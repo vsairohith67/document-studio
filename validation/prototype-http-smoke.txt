@@ -1,0 +1,1 @@
+Prototype HTTP smoke passed: HTML 4631 bytes, JavaScript 2966 bytes; Home and workbench markup present.

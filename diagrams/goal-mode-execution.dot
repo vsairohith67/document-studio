@@ -1,0 +1,28 @@
+digraph GoalMode {
+  graph [rankdir=TB, bgcolor="white", pad="0.25", nodesep="0.35", ranksep="0.45", fontname="Arial"];
+  node [shape=box, style="rounded", color="#1f1f1f", fontname="Arial", fontsize=11, margin="0.14,0.09"];
+  edge [color="#333333", fontname="Arial", fontsize=9];
+
+  repo [label="Repository + approved blueprint"];
+  plan [label="/plan\nInspect, clarify, propose file-level plan"];
+  approve [shape=diamond, label="Plan accepted?"];
+  goal [label="/goal\nOutcome + constraints + verification"];
+  work [label="Inspect → Implement → Test → Verify → Document"];
+  gate [shape=diamond, label="Acceptance gate passes?"];
+  steer [label="Continue in same goal chat\nFix, steer, rerun tests"];
+  review [label="/review\nInspect diff and evidence"];
+  merge [label="Commit / PR / Merge"];
+  next [label="New goal in new chat + branch/worktree"];
+  side [label="/side\nStatus or explanation without interrupting goal", style="rounded,dashed"];
+
+  repo -> plan -> approve;
+  approve -> plan [label="No — refine"];
+  approve -> goal [label="Yes"];
+  goal -> work -> gate;
+  gate -> steer [label="No"];
+  steer -> work;
+  gate -> review [label="Yes"];
+  review -> merge -> next;
+  goal -> side [style=dashed, label="optional"];
+  side -> goal [style=dashed];
+}

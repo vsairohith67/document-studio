@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://document.studio/schemas/operation.schema.json",
+  "title": "Document Studio Operation Manifest",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "name",
+    "category",
+    "inputs",
+    "settingsSchema",
+    "outputs",
+    "verification"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9.-]+$"
+    },
+    "version": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "risk": {
+      "enum": [
+        "normal",
+        "sensitive",
+        "irreversible"
+      ]
+    },
+    "locality": {
+      "enum": [
+        "local",
+        "local-or-cloud",
+        "cloud"
+      ]
+    },
+    "inputs": {
+      "type": "object"
+    },
+    "settingsSchema": {
+      "type": "object"
+    },
+    "outputs": {
+      "type": "object"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

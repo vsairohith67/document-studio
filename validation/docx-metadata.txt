@@ -1,0 +1,1 @@
+Figures/images: 8; missing alt descriptions: 0.

@@ -1,0 +1,22 @@
+digraph G {
+  graph [bgcolor="white", rankdir=TB, pad=.25, nodesep=.30, ranksep=.35, fontname="Arial"];
+  node [fontname="Arial", color="#333333"];
+  edge [color="#555555", arrowsize=.6];
+  Root [shape=box, style="rounded,filled", fillcolor="#eaf0fd", label="Document Studio", fontsize=14, margin=".18,.11"];
+  IA [shape=plain, label=<
+    <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="8" CELLPADDING="10" COLOR="#333333">
+      <TR><TD COLSPAN="3" BGCOLOR="#ECEFF4"><B>Main information architecture</B></TD></TR>
+      <TR>
+        <TD BGCOLOR="#F4F5F7"><B>Document work</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>Automation and intelligence</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>System</B></TD>
+      </TR>
+      <TR>
+        <TD ALIGN="LEFT">Organize - merge, split, extract, reorder<BR ALIGN="LEFT"/>Optimize - compress, repair, PDF/A<BR ALIGN="LEFT"/>Convert - PDF, Office, images, Markdown<BR ALIGN="LEFT"/>Edit - overlay, annotate, crop, redact<BR ALIGN="LEFT"/>OCR - English, Hindi, Telugu<BR ALIGN="LEFT"/>Forms and Sign - fill, flatten, certificates<BR ALIGN="LEFT"/>Protect - encrypt, unlock, sanitize</TD>
+        <TD ALIGN="LEFT">Automate - batch, presets, workflows, CLI<BR ALIGN="LEFT"/>AI (optional) - summarize, ask, extract<BR ALIGN="LEFT"/>History - inspect, rerun, reveal, clean up</TD>
+        <TD ALIGN="LEFT">Home - drop zone, quick tools, recent work<BR ALIGN="LEFT"/>Settings - privacy, engines, models, access</TD>
+      </TR>
+    </TABLE>
+  >];
+  Root -> IA;
+}

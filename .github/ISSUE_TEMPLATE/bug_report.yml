@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible defect without attaching sensitive documents.
+title: "[Bug]: "
+labels: [bug, needs-triage]
+body:
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What happened?
+      description: State the operation, expected result and actual result.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and hardware
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic files and remove passwords, secrets and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include dependency versions and error codes, never document content.

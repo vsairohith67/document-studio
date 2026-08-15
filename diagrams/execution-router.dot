@@ -1,0 +1,25 @@
+digraph G {
+  graph [bgcolor="white", rankdir=TB, pad=.3, nodesep=.4, ranksep=.55, fontname="Arial"];
+  node [shape=box, style="rounded,filled", fillcolor="#f4f5f7", color="#333333", fontname="Arial", fontsize=10];
+  edge [color="#555555", arrowsize=.7, fontname="Arial", fontsize=9];
+  A [label="Inspect input + operation", fillcolor="#eaf0fd"];
+  B [shape=diamond, label="Can run locally?", fillcolor="white"];
+  C [label="Desktop local adapter"];
+  D [shape=diamond, label="Fits browser memory/capability?", fillcolor="white"];
+  E [label="Browser-local worker/WASM"];
+  F [shape=diamond, label="External processing allowed?", fillcolor="white"];
+  G [label="Regional cloud worker\nshort TTL + encryption"];
+  H [label="Explain requirement and alternatives", fillcolor="#f7f3e9"];
+  V [label="Verify + publish", fillcolor="#eef7f1"];
+  A -> B;
+  B -> C [label="Desktop"];
+  C -> V;
+  B -> D [label="Browser"];
+  D -> E [label="yes"];
+  E -> V;
+  D -> F [label="no"];
+  B -> F [label="no"];
+  F -> G [label="yes"];
+  G -> V;
+  F -> H [label="no"];
+}

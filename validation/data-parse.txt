@@ -1,0 +1,1 @@
+Parsed 10 JSON, 5 YAML and 1 TOML files successfully.

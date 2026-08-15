@@ -1,0 +1,42 @@
+schema_version: 1
+policy:
+  default_network: disabled
+  install_requires_user_action: true
+  immutable_revision_required: true
+  checksum_required: true
+  external_provider_requires_per_job_consent: true
+models:
+  - id: ibm-granite/granite-docling-258M
+    purpose: structured document conversion, layout, tables, formulas
+    status: evaluate
+    license: Apache-2.0
+    language_notes: English model card; benchmark Hindi and Telugu separately
+    approximate_size_mb: 530
+    runtime: transformers/docling worker
+    acceptance_gate: better structure accuracy than non-VLM baseline at acceptable latency and memory
+  - id: intfloat/multilingual-e5-small
+    purpose: local semantic retrieval for Ask Document
+    status: evaluate
+    license: MIT
+    parameters_millions: 117
+    embedding_dimensions: 384
+    max_tokens: 512
+    runtime: ONNX or sentence-transformers worker
+    acceptance_gate: page retrieval recall benchmark for English, Hindi and Telugu
+  - id: tesseract/eng
+    purpose: English OCR
+    status: planned-core
+    license: Apache-2.0 language data review
+  - id: tesseract/hin
+    purpose: Hindi OCR
+    status: planned-core
+    license: Apache-2.0 language data review
+  - id: tesseract/tel
+    purpose: Telugu OCR
+    status: planned-core
+    license: Apache-2.0 language data review
+  - id: paddleocr/telugu_PP-OCRv3_rec
+    purpose: Telugu OCR benchmark alternative
+    status: benchmark-only
+    license: verify model-specific terms before distribution
+    acceptance_gate: accuracy/speed/size advantage sufficient to justify second OCR runtime

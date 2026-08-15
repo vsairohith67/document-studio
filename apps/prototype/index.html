@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Document Studio Prototype</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="logo">DS</div>
+    <button class="nav active" data-view="home" title="Home">⌂</button>
+    <button class="nav" title="Organize">▤</button><button class="nav" title="Optimize">↘</button><button class="nav" title="Convert">⇄</button><button class="nav" title="Edit">✎</button><button class="nav" title="OCR">Aa</button><button class="nav" title="Sign">✓</button><button class="nav" title="Protect">⌾</button>
+    <div class="spacer"></div><button class="nav" title="History">◷</button><button class="nav" title="Settings">⚙</button>
+  </aside>
+  <div class="view home-view" id="homeView">
+    <header><div><div class="kicker">PRIVATE DOCUMENT WORKSPACE</div><h1>Good morning, Rohith</h1><p>What would you like to do with your documents?</p></div><div class="locality">● On this device</div></header>
+    <div class="command"><span>⌕</span><input placeholder="Search tools and commands"><kbd>Ctrl K</kbd></div>
+    <section class="dropzone" id="dropzone"><div class="upload">⇧</div><h2>Drop documents here</h2><p>PDF, Word, Excel, PowerPoint and images</p><button id="addFiles">Add files</button><small>Files stay on your device unless you choose an external feature.</small></section>
+    <section><div class="section-title"><h2>Quick tools</h2><button>Customize</button></div><div class="tool-grid" id="toolGrid"></div></section>
+    <div class="lower-grid"><section><div class="section-title"><h2>Recent work</h2><button>View all</button></div><div class="recent"><div><span class="fileicon">PDF</span><span><strong>School circular - July.pdf</strong><small>Compressed · 2 minutes ago</small></span></div><span class="success">Verified</span><button>⋯</button></div><div class="recent"><div><span class="fileicon">PDF</span><span><strong>Admissions bundle.pdf</strong><small>Merged · Yesterday</small></span></div><span class="success">Verified</span><button>⋯</button></div></section><section><div class="section-title"><h2>Saved workflow</h2><button>Manage</button></div><div class="workflow"><strong>Publish circular</strong><p>OCR → Compress → Watermark → Protect</p><div class="chips"><span>OCR</span><span>Compress</span><span>Watermark</span><span>Protect</span></div><button class="secondary">Run workflow</button></div></section></div>
+  </div>
+  <div class="view workbench-view hidden" id="workbenchView">
+    <header class="workbench-header"><div><button class="back" id="backHome">←</button><span><strong>Merge PDF</strong><small>3 files · 18 pages</small></span></div><div class="locality">● On this device</div></header>
+    <div class="workbench">
+      <aside class="files-panel"><div class="panel-title"><strong>Files & pages</strong><button>＋</button></div><div id="fileList"></div></aside>
+      <main class="canvas"><div class="canvas-tools"><button>−</button><span>85%</span><button>＋</button><i></i><button>Fit page</button><button>▦</button></div><div class="paper"><div class="paper-head"><span>DOCUMENT STUDIO</span><span>Preview</span></div><h2>Admissions bundle</h2><p>This preview represents the selected page order. Thumbnail rendering continues in the background so the workbench stays responsive.</p><div class="paper-block"></div><div class="paper-lines"><i></i><i></i><i></i><i></i><i></i></div><div class="page-no">1</div></div></main>
+      <aside class="inspector"><div class="panel-title"><strong>Merge settings</strong><button>⋯</button></div><label>Output name<input value="Admissions bundle - merged.pdf"></label><label>Bookmark handling<select><option>Preserve and combine</option><option>Remove bookmarks</option></select></label><label class="check"><input type="checkbox" checked> Optimize for fast web view</label><div class="output"><strong>Output</strong><p>Documents / Document Studio</p><button>Change</button></div><div class="verify"><strong>After processing</strong><p>✓ Reopen output</p><p>✓ Verify 18 pages</p><p>✓ Check source order</p></div><button class="run" id="runMerge">Merge 18 pages</button></aside>
+    </div>
+    <div class="jobtray" id="jobtray"><div><span class="spinner">◌</span><span><strong id="jobTitle">Ready to merge</strong><small id="jobDetail">Output will be verified before it is published.</small></span></div><progress id="progress" max="100" value="0"></progress><button id="cancelJob">Cancel</button></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body></html>

@@ -1,0 +1,2 @@
+Document_Studio_Master_Blueprint.docx: SHA-256 79a51cda7d98e27005b75eaf37f9c9fc7234ae252fae9d4ef07ac218a7a1b51c; Notion attachment matches.
+Document_Studio_Master_Blueprint.pdf: SHA-256 e538864b89d90db55bf080500fcf49241628e0c08658ce1724a0c8209cae16cc; Notion attachment matches.

@@ -1,0 +1,21 @@
+Title:           Document Studio - Complete Product, Architecture, UI/UX and Codex Build Blueprint
+Subject:         Re-audited master software blueprint
+Keywords:        Document, Studio, PDF, Tauri, React, Rust, Codex, UI, UX, architecture
+Author:          V. Sai Rohith / Document Studio planning
+Creator:         Writer
+Producer:        LibreOffice 25.2.3.2 (X86_64) / LibreOffice Community
+CreationDate:    Wed Jul 22 05:39:44 2026 UTC
+Custom Metadata: no
+Metadata Stream: yes
+Tagged:          yes
+UserProperties:  no
+Suspects:        no
+Form:            none
+JavaScript:      no
+Pages:           44
+Encrypted:       no
+Page size:       595.304 x 841.89 pts (A4)
+Page rot:        0
+File size:       1079368 bytes
+Optimized:       no
+PDF version:     1.7

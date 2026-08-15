@@ -1,0 +1,23 @@
+digraph G {
+  graph [bgcolor="white", rankdir=LR, pad=.3, nodesep=.35, ranksep=.5, fontname="Arial"];
+  node [shape=box, style="rounded,filled", fillcolor="#f4f5f7", color="#333333", fontname="Arial", fontsize=10];
+  edge [color="#555555", arrowsize=.7, fontname="Arial", fontsize=9];
+  Q [label="Queued"];
+  I [label="Inspecting"];
+  P [label="Preflight"];
+  R [label="Ready"];
+  X [label="Running"];
+  V [label="Verifying"];
+  B [label="Publishing"];
+  C [label="Completed", fillcolor="#eef7f1"];
+  F [label="Failed", fillcolor="#f7eeee"];
+  K [label="Cancelled", fillcolor="#f7f3e9"];
+  N [label="Interrupted", fillcolor="#f7f3e9"];
+  Q -> I -> P -> R -> X -> V -> B -> C;
+  P -> F [label="invalid"];
+  X -> K [label="cancel"];
+  X -> F [label="engine error"];
+  V -> F [label="verification failure"];
+  X -> N [label="crash"];
+  N -> P [label="retry after recovery"];
+}

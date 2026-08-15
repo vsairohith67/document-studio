@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://document.studio/schemas/job.schema.json",
+  "title": "Document Studio Job",
+  "type": "object",
+  "required": [
+    "id",
+    "operationId",
+    "state",
+    "createdAt",
+    "inputs",
+    "settings"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operationId": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "queued",
+        "inspecting",
+        "preflight",
+        "ready",
+        "running",
+        "verifying",
+        "publishing",
+        "completed",
+        "failed",
+        "cancelled",
+        "interrupted"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "progress": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "stage": {
+      "type": "string"
+    },
+    "inputs": {
+      "type": "array"
+    },
+    "settings": {
+      "type": "object"
+    },
+    "output": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  }
+}

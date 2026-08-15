@@ -1,0 +1,39 @@
+{
+  "product": "Document Studio",
+  "version": "2.1.0-goal-mode",
+  "audit_date": "22 July 2026",
+  "feature_count": 132,
+  "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
+  "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
+  "phase0_prompt": "codex/prompts/01-foundation.md",
+  "prototype": "apps/prototype/index.html",
+  "final_recheck": "FINAL_RECHECK.md",
+  "report_generator": "scripts/generate_master_report.py",
+  "notion_import": "notion-import/",
+  "figma_handoff": "figma/",
+  "validation_commands": [
+    "python scripts/validate_repo.py",
+    "python scripts/check_links.py",
+    "go test ./... (from services/cloud-control-plane)",
+    "node --check apps/prototype/app.js"
+  ],
+  "report_pages": 44,
+  "publication_status": "Import-ready packages created; live Notion, Canvs, Figma, GitHub and Hugging Face publication requires connected accounts.",
+  "repository_governance": [
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "goal_mode_playbook": "docs/25-GOAL-MODE-BUILD-PLAYBOOK.md",
+  "goal_sequence": [
+    "codex/goals/G00-readiness-audit.md",
+    "codex/goals/G01-foundation.md",
+    "codex/goals/G02-pdf-merge.md",
+    "codex/goals/G03-core-pdf-viewer.md",
+    "codex/goals/G04-optimize-convert.md",
+    "codex/goals/G05-ocr-safety.md",
+    "codex/goals/G06-workbench-forms-signing.md",
+    "codex/goals/G07-automation-ai-hardening.md"
+  ]
+}

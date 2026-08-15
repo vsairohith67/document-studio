@@ -1,0 +1,213 @@
+{
+  "$schema": "https://tokens.studio/schemas/2.0.json",
+  "core": {
+    "color": {
+      "ink": {
+        "value": "#171A1F",
+        "type": "color"
+      },
+      "paper": {
+        "value": "#FFFFFF",
+        "type": "color"
+      },
+      "canvas": {
+        "value": "#F4F5F7",
+        "type": "color"
+      },
+      "line": {
+        "value": "#D7DAE0",
+        "type": "color"
+      },
+      "muted": {
+        "value": "#68707D",
+        "type": "color"
+      },
+      "accent": {
+        "value": "#2C63D7",
+        "type": "color"
+      },
+      "accentSoft": {
+        "value": "#EAF0FD",
+        "type": "color"
+      },
+      "success": {
+        "value": "#177245",
+        "type": "color"
+      },
+      "warning": {
+        "value": "#8A5A00",
+        "type": "color"
+      },
+      "danger": {
+        "value": "#B42318",
+        "type": "color"
+      },
+      "darkCanvas": {
+        "value": "#111318",
+        "type": "color"
+      },
+      "darkSurface": {
+        "value": "#1A1D24",
+        "type": "color"
+      },
+      "darkLine": {
+        "value": "#333844",
+        "type": "color"
+      },
+      "darkText": {
+        "value": "#F4F6F8",
+        "type": "color"
+      }
+    },
+    "space": {
+      "0": {
+        "value": "0px",
+        "type": "dimension"
+      },
+      "1": {
+        "value": "4px",
+        "type": "dimension"
+      },
+      "2": {
+        "value": "8px",
+        "type": "dimension"
+      },
+      "3": {
+        "value": "12px",
+        "type": "dimension"
+      },
+      "4": {
+        "value": "16px",
+        "type": "dimension"
+      },
+      "5": {
+        "value": "20px",
+        "type": "dimension"
+      },
+      "6": {
+        "value": "24px",
+        "type": "dimension"
+      },
+      "7": {
+        "value": "32px",
+        "type": "dimension"
+      },
+      "8": {
+        "value": "40px",
+        "type": "dimension"
+      },
+      "9": {
+        "value": "48px",
+        "type": "dimension"
+      },
+      "10": {
+        "value": "64px",
+        "type": "dimension"
+      }
+    },
+    "radius": {
+      "sm": {
+        "value": "6px",
+        "type": "dimension"
+      },
+      "md": {
+        "value": "10px",
+        "type": "dimension"
+      },
+      "lg": {
+        "value": "16px",
+        "type": "dimension"
+      },
+      "pill": {
+        "value": "999px",
+        "type": "dimension"
+      }
+    },
+    "size": {
+      "control": {
+        "value": "40px",
+        "type": "dimension"
+      },
+      "touch": {
+        "value": "44px",
+        "type": "dimension"
+      },
+      "rail": {
+        "value": "72px",
+        "type": "dimension"
+      },
+      "panel": {
+        "value": "320px",
+        "type": "dimension"
+      }
+    },
+    "font": {
+      "family": {
+        "value": "Inter, Aptos, Segoe UI, sans-serif",
+        "type": "fontFamilies"
+      },
+      "mono": {
+        "value": "IBM Plex Mono, Consolas, monospace",
+        "type": "fontFamilies"
+      }
+    },
+    "motion": {
+      "fast": {
+        "value": "120ms",
+        "type": "duration"
+      },
+      "normal": {
+        "value": "180ms",
+        "type": "duration"
+      },
+      "slow": {
+        "value": "260ms",
+        "type": "duration"
+      }
+    }
+  },
+  "light": {
+    "surface": {
+      "value": "{core.color.paper}",
+      "type": "color"
+    },
+    "background": {
+      "value": "{core.color.canvas}",
+      "type": "color"
+    },
+    "text": {
+      "value": "{core.color.ink}",
+      "type": "color"
+    },
+    "border": {
+      "value": "{core.color.line}",
+      "type": "color"
+    },
+    "primary": {
+      "value": "{core.color.accent}",
+      "type": "color"
+    }
+  },
+  "dark": {
+    "surface": {
+      "value": "{core.color.darkSurface}",
+      "type": "color"
+    },
+    "background": {
+      "value": "{core.color.darkCanvas}",
+      "type": "color"
+    },
+    "text": {
+      "value": "{core.color.darkText}",
+      "type": "color"
+    },
+    "border": {
+      "value": "{core.color.darkLine}",
+      "type": "color"
+    },
+    "primary": {
+      "value": "#82A8FF",
+      "type": "color"
+    }
+  }
+}

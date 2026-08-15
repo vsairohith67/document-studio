@@ -1,0 +1,27 @@
+digraph G {
+  graph [bgcolor="white", rankdir=TB, pad=.25, fontname="Arial"];
+  node [fontname="Arial", color="#333333"];
+  Roadmap [shape=plain, label=<
+    <TABLE BORDER="0" CELLBORDER="1" CELLSPACING="7" CELLPADDING="10" COLOR="#333333">
+      <TR><TD COLSPAN="4" BGCOLOR="#ECEFF4"><B>Document Studio delivery sequence</B></TD></TR>
+      <TR>
+        <TD BGCOLOR="#EAF0FD"><B>0 Foundation</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>1 Core PDF</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>2 Optimize + Convert</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>3 Workbench + OCR</B></TD>
+      </TR>
+      <TR>
+        <TD BGCOLOR="#F4F5F7"><B>4 Redaction + Safety</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>5 Archive + Digital Sign</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>6 Automation</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>7 Optional AI</B></TD>
+      </TR>
+      <TR>
+        <TD BGCOLOR="#F4F5F7"><B>8 Hardening</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>9+ Web</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>9+ Mobile</B></TD>
+        <TD BGCOLOR="#F4F5F7"><B>9+ SDK / API</B></TD>
+      </TR>
+    </TABLE>
+  >];
+}

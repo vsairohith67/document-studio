@@ -1,0 +1,26 @@
+digraph G {
+  graph [bgcolor="white", rankdir=TB, pad=.28, nodesep=.30, ranksep=.42, fontname="Arial", splines=ortho];
+  node [shape=box, style="rounded,filled", fillcolor="#f4f5f7", color="#333333", fontname="Arial", fontsize=10, margin=".13,.08"];
+  edge [color="#555555", arrowsize=.65];
+  User [label="User", fillcolor="#eaf0fd"];
+  UI [label="React workbench\nDesign tokens + PDF.js"];
+  Tauri [label="Tauri trusted boundary\nTyped IPC + capabilities"];
+  Jobs [label="Rust job engine\nQueue + cancel + recovery", fillcolor="#eaf0fd"];
+  Registry [label="Operation registry\nManifests + schemas"];
+  DB [shape=cylinder, label="SQLite\nMetadata only"];
+  Work [shape=folder, label="Private per-job workspace"];
+  Qpdf [label="qpdf"];
+  Vips [label="libvips"];
+  OCR [label="OCRmyPDF\nTesseract"];
+  Office [label="LibreOffice"];
+  AI [label="Optional Docling\nand local models"];
+  Verify [label="Operation-specific verification", fillcolor="#eef7f1"];
+  Output [shape=note, label="Atomic verified output", fillcolor="#eef7f1"];
+  User -> UI -> Tauri -> Jobs;
+  Jobs -> Registry; Jobs -> DB; Jobs -> Work;
+  Registry -> Qpdf; Registry -> Vips; Registry -> OCR; Registry -> Office; Registry -> AI;
+  Qpdf -> Work; Vips -> Work; OCR -> Work; Office -> Work; AI -> Work;
+  Work -> Verify -> Output -> User;
+  {rank=same; Registry; DB; Work}
+  {rank=same; Qpdf; Vips; OCR; Office; AI}
+}

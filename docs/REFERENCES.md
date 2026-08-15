@@ -1,0 +1,21 @@
+# Primary implementation references (checked July 2026)
+
+- Tauri project and security/capability documentation: https://tauri.app/
+- React 19.2 release: https://react.dev/blog/2025/10/01/react-19-2
+- Vite 8.1 announcement: https://vite.dev/blog/announcing-vite8-1
+- qpdf: https://github.com/qpdf/qpdf
+- PDF.js: https://github.com/mozilla/pdf.js
+- pdf-lib: https://github.com/Hopding/pdf-lib
+- pdfcpu: https://github.com/pdfcpu/pdfcpu
+- libvips: https://github.com/libvips/libvips
+- OCRmyPDF: https://github.com/ocrmypdf/OCRmyPDF
+- Tesseract: https://github.com/tesseract-ocr/tesseract
+- LibreOffice: https://www.libreoffice.org/
+- Gotenberg: https://github.com/gotenberg/gotenberg
+- Docling: https://github.com/docling-project/docling
+- Granite Docling 258M: https://huggingface.co/ibm-granite/granite-docling-258M
+- multilingual-e5-small: https://huggingface.co/intfloat/multilingual-e5-small
+- UI UX Pro Max: https://github.com/nextlevelbuilder/ui-ux-pro-max-skill
+- Tokens Studio: https://github.com/tokens-studio/figma-plugin
+- Design Lint: https://github.com/destefanis/design-lint
+- Iconify Figma: https://github.com/iconify/iconify-figma

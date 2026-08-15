@@ -1,0 +1,19 @@
+flowchart LR
+  U[User] --> UI[React workbench + PDF.js]
+  UI --> T[Tauri 2 trusted boundary]
+  T --> J[Rust job engine]
+  J --> R[Operation registry]
+  R --> Q[qpdf]
+  R --> V[libvips]
+  R --> O[OCRmyPDF + Tesseract]
+  R --> L[LibreOffice]
+  R --> A[Optional Docling and local models]
+  J --> DB[(SQLite metadata)]
+  J --> W[Private per-job workspace]
+  Q --> W
+  V --> W
+  O --> W
+  L --> W
+  A --> W
+  W --> X[Verify]
+  X --> P[Atomic publish]

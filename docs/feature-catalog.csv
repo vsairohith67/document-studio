@@ -1,0 +1,133 @@
+category,feature,description,phase,engine,platforms,priority
+Organize,Merge PDF,"Combine PDFs/images, page-range imports, drag reorder, bookmark and outline preservation",1,qpdf,"Desktop, Web",Must
+Organize,Split by ranges,Create files from explicit page ranges,1,qpdf,"Desktop, Web",Must
+Organize,Split every N pages,Split at a fixed page interval,1,qpdf,"Desktop, Web",Must
+Organize,Split by bookmarks,Use document outline levels as boundaries,2,qpdf,"Desktop, Web",Should
+Organize,Split by target size,Estimate boundaries to produce size-bounded parts,3,qpdf + estimator,"Desktop, Web",Could
+Organize,Extract pages,"Export selected pages as one PDF, individual PDFs, or ZIP",1,qpdf,"Desktop, Web",Must
+Organize,Remove pages,Delete thumbnail/range selections with undo before export,1,qpdf,"Desktop, Web",Must
+Organize,Reorder pages,"Drag, reverse, odd/even regroup, duplicate, and move pages",1,qpdf,"Desktop, Web",Must
+Organize,Rotate pages,Rotate selected/odd/even/all pages 90/180/270 degrees,1,qpdf,"Desktop, Web",Must
+Organize,Insert blank pages,Insert configurable blank page sizes and orientation,2,pdf-lib/qpdf,"Desktop, Web",Should
+Organize,Interleave documents,Alternate pages from two or more files,2,qpdf,"Desktop, Web",Should
+Organize,N-up and booklet,"Impose pages for 2-up, 4-up, and booklet printing",5,pdfcpu/print engine,"Desktop, Web",Could
+Organize,Scan to PDF,"Camera/scanner import, crop, dewarp, cleanup, reorder",6,OpenCV + native camera,"Desktop, Web",Should
+Optimize,Compress - lossless,Remove redundant structures and optimize streams without image loss,1,qpdf,"Desktop, Web",Must
+Optimize,Compress - balanced,Downsample/re-encode images with readable defaults,2,libvips + qpdf,"Desktop, Web",Must
+Optimize,Compress - strong,Aggressive image and font optimization with preview comparison,2,libvips + qpdf,"Desktop, Web",Should
+Optimize,Image-aware compression,"Per-image DPI, JPEG quality, monochrome and transparency controls",2,libvips,"Desktop, Web",Should
+Optimize,Linearize PDF,Fast-web-view optimization,1,qpdf,"Desktop, Web",Should
+Optimize,Repair PDF,Rebuild xref/object streams and salvage readable pages,2,qpdf + fallback parser,"Desktop, Web",Must
+Optimize,Remove unused objects,Garbage collect orphaned objects/resources,2,qpdf,"Desktop, Web",Should
+Optimize,PDF/A conversion,Create archival variants and validate conformance,5,LibreOffice/veraPDF,"Desktop, Web",Should
+Optimize,Optimize scans,"Deskew, despeckle, background cleanup, bilevel optimization",3,OCRmyPDF + unpaper,"Desktop, Web",Should
+Convert to PDF,JPG/PNG/WebP to PDF,"Convert raster images with page size, margins, orientation, quality",1,libvips + PDF writer,"Desktop, Web",Must
+Convert to PDF,TIFF/BMP/HEIC to PDF,Convert additional image formats and multipage TIFF,2,libvips/ImageMagick,"Desktop, Web",Should
+Convert to PDF,Word to PDF,DOC/DOCX/ODT conversion,2,LibreOffice,"Desktop, Web",Must
+Convert to PDF,Excel to PDF,XLS/XLSX/ODS conversion with sheet/range options,2,LibreOffice,"Desktop, Web",Must
+Convert to PDF,PowerPoint to PDF,PPT/PPTX/ODP conversion,2,LibreOffice,"Desktop, Web",Must
+Convert to PDF,Markdown to PDF,Render Markdown with print themes and syntax highlighting,2,Chromium/HTML pipeline,"Desktop, Web",Should
+Convert to PDF,HTML to PDF,Render local HTML or approved URLs with page controls,2,Chromium/Gotenberg,"Desktop, Web",Should
+Convert to PDF,Text to PDF,Convert TXT/CSV/JSON/XML to formatted PDF,2,native renderer,"Desktop, Web",Should
+Convert to PDF,Email to PDF,Convert EML/MSG with headers and attachments index,5,Docling/mail parser,"Desktop, Web",Could
+Convert to PDF,SVG to PDF,Preserve vector content when possible,3,resvg/Cairo,"Desktop, Web",Should
+Convert to PDF,Archive package to PDF,Combine mixed supported inputs into an ordered PDF binder,4,workflow engine,"Desktop, Web",Could
+Convert from PDF,PDF to JPG/PNG/WebP,Render selected pages at configurable DPI,1,PDFium/MuPDF/libvips,"Desktop, Web",Must
+Convert from PDF,PDF to TIFF,Export single/multipage TIFF,2,PDFium + libvips,"Desktop, Web",Should
+Convert from PDF,PDF to text,Reading-order text extraction with OCR fallback,1,PDF.js/Docling/Tesseract,"Desktop, Web",Must
+Convert from PDF,PDF to Markdown,"Structured headings, lists, tables, images and links",4,Docling/Granite Docling,"Desktop, Web",Should
+Convert from PDF,PDF to Word,Layout-aware DOCX with OCR fallback and confidence warnings,5,Docling + DOCX writer,"Desktop, Web",Should
+Convert from PDF,PDF to Excel,Detect tables; export CSV/XLSX with review step,5,Docling/table engine,"Desktop, Web",Should
+Convert from PDF,PDF to PowerPoint,Page-as-slide and editable reconstruction modes,6,renderer + PPTX writer,"Desktop, Web",Could
+Convert from PDF,PDF to HTML,Structured HTML with page/image assets,4,Docling,"Desktop, Web",Could
+Convert from PDF,Extract images,Export embedded images without unnecessary re-rendering,2,qpdf/PDF parser,"Desktop, Web",Should
+Convert from PDF,Extract attachments,List and export embedded files safely,2,qpdf/PDF parser,"Desktop, Web",Should
+Convert from PDF,Extract fonts report,Inventory embedded fonts without redistributing font binaries,5,PDF parser,"Desktop, Web",Could
+Convert from PDF,Extract annotations,Export comments/highlights to JSON/CSV/FDF-like formats,4,PDF parser,"Desktop, Web",Could
+Convert from PDF,PDF to searchable archive,OCR + PDF/A + metadata workflow,5,workflow engine,"Desktop, Web",Should
+Edit,Add text,Positioned text overlays with font embedding and alignment,3,pdf-lib/PDF editor,"Desktop, Web",Must
+Edit,Edit overlay text,Move/resize/delete objects created by Document Studio,3,editor scene graph,"Desktop, Web",Must
+Edit,Add shapes,"Rectangles, ellipses, lines, arrows, polygons and callouts",3,editor scene graph,"Desktop, Web",Must
+Edit,Freehand draw,"Pen/highlighter with smoothing, opacity and eraser",3,canvas + PDF annotations,"Desktop, Web",Should
+Edit,Highlight/underline/strikeout,Text-aware markup annotations,3,PDF.js text layer,"Desktop, Web",Must
+Edit,Comments and notes,Sticky notes and threaded local comments,3,PDF annotations,"Desktop, Web",Should
+Edit,Insert images,"Place, crop, rotate and resize images/logos/stamps",3,pdf-lib/PDF editor,"Desktop, Web",Must
+Edit,Add page numbers,"Position, format, range, start number and exclusions",2,PDF overlay engine,"Desktop, Web",Must
+Edit,Headers and footers,"Templates using date, filename, page and page count",3,PDF overlay engine,"Desktop, Web",Should
+Edit,Watermark,"Text/image watermark with opacity, angle and page scope",2,PDF overlay engine,"Desktop, Web",Must
+Edit,Crop pages,"Visual crop boxes, margins and uniform/apply-to-range modes",3,PDF page boxes,"Desktop, Web",Must
+Edit,Resize pages,Change page media size and optionally scale content,4,PDF page transform,"Desktop, Web",Should
+Edit,Redact,Search/manual true redaction that removes underlying content,4,MuPDF/PDF redaction engine,"Desktop, Web",Must
+Edit,Sanitize after redaction,"Remove metadata, hidden objects, attachments and scripts",4,qpdf + sanitizer,"Desktop, Web",Must
+Edit,Compare PDFs,"Side-by-side, overlay and semantic text difference report",5,renderer + diff engine,"Desktop, Web",Should
+Edit,Replace pages,Swap selected pages while preserving order/bookmarks when possible,3,qpdf,"Desktop, Web",Should
+Edit,Layers/optional content,Inspect and toggle optional-content groups,7,advanced PDF parser,"Desktop, Web",Could
+Edit,Bates numbering,Legal document numbering with prefix/suffix and range rules,5,overlay engine,"Desktop, Web",Could
+Forms,Fill AcroForms,"Text, checkbox, radio, choice, date and signature fields",3,PDF form engine,"Desktop, Web",Must
+Forms,Create form fields,"Add form controls, names, validation, required state and tab order",5,PDF form engine,"Desktop, Web",Should
+Forms,Detect form fields,Suggest fields on flattened/scanned forms,7,layout model,"Desktop, Web",Could
+Forms,Flatten forms,Bake appearances into final pages,3,PDF form engine,"Desktop, Web",Must
+Forms,Import/export form data,FDF/XFDF/JSON-like data interchange,6,form data adapter,"Desktop, Web",Could
+Forms,Form validation report,Missing required values and field constraints,5,form engine,"Desktop, Web",Should
+Forms,Template forms,Save reusable field layouts for recurring documents,6,workflow + form engine,"Desktop, Web",Could
+OCR,Searchable PDF,Add hidden text layer while preserving page appearance,3,OCRmyPDF + Tesseract,"Desktop, Web",Must
+OCR,English OCR,Default English language pack,3,Tesseract eng,"Desktop, Web",Must
+OCR,Hindi OCR,Hindi language pack,3,Tesseract hin,"Desktop, Web",Must
+OCR,Telugu OCR,Telugu language pack with benchmark against PaddleOCR,3,Tesseract tel / benchmark,"Desktop, Web",Must
+OCR,Mixed-language OCR,Run multiple languages in one job,3,Tesseract,"Desktop, Web",Must
+OCR,Deskew/orientation,Detect page rotation and deskew,3,OCRmyPDF,"Desktop, Web",Must
+OCR,Cleanup scans,"Denoise, remove background and optimize before OCR",3,OCRmyPDF/unpaper,"Desktop, Web",Should
+OCR,OCR confidence review,Page-level warnings and low-confidence text overlay review,6,OCR pipeline,"Desktop, Web",Could
+OCR,hOCR/ALTO export,Export OCR geometry and confidence,6,Tesseract,"Desktop, Web",Could
+OCR,Handwriting research mode,Optional experimental handwriting model; never promise accuracy,8,HF model evaluation,"Desktop, Web",Could
+Security,Protect PDF,"Set open password, owner password and permissions",2,qpdf,"Desktop, Web",Must
+Security,Unlock PDF,Remove protection only with valid user-supplied credentials,2,qpdf,"Desktop, Web",Must
+Security,AES encryption,Support modern PDF encryption profiles,2,qpdf,"Desktop, Web",Must
+Security,Metadata editor,"View, change and remove title/author/subject/keywords/dates",2,qpdf/PDF parser,"Desktop, Web",Must
+Security,Sanitize document,"Remove scripts, actions, embedded files, selected annotations and hidden metadata",4,sanitizer,"Desktop, Web",Must
+Security,Malware-safe preflight,Detect suspicious actions/attachments and isolate risky files,4,static scanner,"Desktop, Web",Should
+Security,Secure erase temporary jobs,Best-effort cleanup and encrypted temp option,4,OS storage layer,"Desktop, Web",Should
+Security,Certificate validation,"Inspect signatures, certificate chain and revocation where available",5,PAdES verifier,"Desktop, Web",Should
+Security,Permission report,Explain permissions and encryption status in plain language,2,qpdf,"Desktop, Web",Must
+Security,Privacy mode,Globally disable network and external providers,0,platform policy,"Desktop, Web",Must
+Sign,Draw/type/upload signature,Create reusable local signature assets,3,editor + OS keychain,"Desktop, Web",Must
+Sign,Place signature/initial/date,Drag placement and repeat across pages,3,PDF overlay engine,"Desktop, Web",Must
+Sign,Signature vault,Encrypt local identities and assets using OS credentials,3,OS keychain,"Desktop, Web",Must
+Sign,Certificate signing,PAdES/CMS-based digital signatures,5,standards-compliant signer,"Desktop, Web",Should
+Sign,Timestamp signing,Optional trusted timestamp integration,6,TSA adapter,"Desktop, Web",Could
+Sign,Signature validation,"Show signer, integrity, trust and timestamp status",5,PAdES verifier,"Desktop, Web",Should
+Sign,Request signatures,"Cloud-only multi-recipient workflow, optional future module",9,cloud e-sign service,"Desktop, Web",Could
+Automation,Batch processing,Apply one operation to many files with isolated failures,2,job engine,"Desktop, Web",Must
+Automation,Saved workflows,Chain typed operations with variables and review gates,6,workflow engine,"Desktop, Web",Should
+Automation,Watched folders,Run approved workflows for new files,6,desktop watcher,"Desktop, Web",Should
+Automation,Command-line interface,Expose stable operations for scripts,6,Rust CLI,"Desktop, Web",Should
+Automation,Local HTTP API,Optional loopback API with token protection,7,Rust local API,"Desktop, Web",Could
+Automation,Naming templates,Deterministic outputs with collision policies,1,job engine,"Desktop, Web",Must
+Automation,Presets,Reusable per-tool settings,1,SQLite,"Desktop, Web",Must
+Automation,Schedule jobs,Run local workflows at a chosen time,7,OS scheduler,"Desktop, Web",Could
+Automation,Share workflow file,Portable .dsflow JSON with versioned schema,6,workflow engine,"Desktop, Web",Should
+Automation,Hot folders with routing,"Route by filename, type or detected document class",8,workflow + classifier,"Desktop, Web",Could
+AI,Document summary,Local-first summary with selectable pages and citations,7,provider-neutral LLM,"Desktop, Web",Should
+AI,Ask document,RAG over extracted text with page citations,7,multilingual-e5 + LLM,"Desktop, Web",Should
+AI,Classify and rename,"Suggest type, filename and destination",7,classifier/LLM,"Desktop, Web",Should
+AI,Structured extraction,"Invoices, receipts, forms and custom JSON schema",7,Docling + LLM,"Desktop, Web",Should
+AI,Table understanding,Detect/repair table structure for export,7,Docling/Granite Docling,"Desktop, Web",Should
+AI,Translate document,Translate text with clear layout-fidelity limitations,8,translation provider,"Desktop, Web",Could
+AI,Smart split,Suggest logical document boundaries,8,layout model + rules,"Desktop, Web",Could
+AI,Sensitive-data finder,Suggest PII/financial identifiers for manual review,7,NER/rules,"Desktop, Web",Should
+AI,AI-assisted redaction review,Never auto-commit; user confirms every redaction,8,NER + review UI,"Desktop, Web",Could
+AI,Document Q&A export,Export questions/answers with source-page references,8,RAG engine,"Desktop, Web",Could
+AI,Model download manager,"Install, verify, update and remove local models",7,model registry,"Desktop, Web",Should
+AI,External-provider consent,"Per-job approval with provider, scope and retention notice",7,policy layer,"Desktop, Web",Must
+Platform,Recent work and history,"Search jobs, inspect settings, rerun, reveal output and clean history",0,SQLite,"Desktop, Web",Must
+Platform,Command palette,"Keyboard-first access to tools, files and presets",0,React UI,"Desktop, Web",Must
+Platform,Dependency diagnostics,"Detect missing engines, versions and remediation steps",0,Rust core,"Desktop, Web",Must
+Platform,Crash recovery,Recover interrupted jobs without false success,0,job engine,"Desktop, Web",Must
+Platform,Update manager,Signed releases with optional staged rollout,8,Tauri updater,"Desktop, Web",Should
+Platform,Localization framework,English first; Telugu and Hindi UI-ready strings,0,i18n,"Desktop, Web",Should
+Platform,Accessibility mode,"Keyboard, screen reader, 200% scaling, high contrast, reduced motion",0,design system,"Desktop, Web",Must
+Platform,Theme modes,"Light, dark and high-contrast variables",0,design tokens,"Desktop, Web",Should
+Platform,Print center,"Preview, grayscale, duplex guidance, N-up, booklet and fit",5,print pipeline,"Desktop, Web",Should
+Platform,Cross-device handoff,Optional encrypted handoff between personal devices,10,future cloud sync,"Desktop, Web",Could
+Platform,Plugin SDK,Versioned operation manifests and sandboxed adapters,9,operation SDK,"Desktop, Web",Could
+Platform,Diagnostics export,Logs and dependency data without document content/secrets,0,platform,"Desktop, Web",Must

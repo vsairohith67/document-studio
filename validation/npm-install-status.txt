@@ -1,0 +1,1 @@
+Frontend dependency installation could not be completed in this environment: npm registry resolution produced no output and exceeded a 240-second retry. No node_modules or partial lockfile is included in the deliverable. Run npm install, npm run typecheck and npm --workspace apps/desktop run build on the target machine.

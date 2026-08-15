@@ -1,0 +1,15 @@
+stateDiagram-v2
+  [*] --> Queued
+  Queued --> Inspecting
+  Inspecting --> Preflight
+  Preflight --> Ready
+  Preflight --> Failed
+  Ready --> Running
+  Running --> Verifying
+  Running --> Cancelled
+  Running --> Failed
+  Running --> Interrupted
+  Verifying --> Publishing
+  Verifying --> Failed
+  Publishing --> Completed
+  Interrupted --> Preflight: retry after recovery

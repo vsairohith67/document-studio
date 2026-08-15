@@ -1,0 +1,3 @@
+PDF opens successfully: 44 pages; 1079368 bytes.
+First-page text sample: DOCUMENT STUDIO | Complete Product, Architecture, UI/UX and Codex Build  | Blueprint | Local-first document and PDF workspace | Re-audited master specification | 132 planned capabilities in one complete edition | Windows desktop first - opt
+Last-page text sample: DOCUMENT STUDIO - COMPLETE PRODUCT AND BUILD BLUEPRINT | Personal planning document  |  44 | Appendix C. Primary implementation references |  Tauri project and security/capability documentation: https://tauri.app/ |  React 19.2 release: h
