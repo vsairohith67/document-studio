@@ -15,7 +15,7 @@ A dependency may move from evaluation to adoption only after an ADR records:
 
 ## G01 direct dependency notices
 
-- Tauri, its CLI/build crate, API, and dialog plugin: MIT OR Apache-2.0.
+- Tauri, its CLI/build crate, API, dialog plugin, and official `tauri-plugin-single-instance` 2.4.3: MIT OR Apache-2.0.
 - React, React DOM, Vite, Vitest, jsdom, Testing Library, AJV, AJV Formats, and TypeScript: MIT or Apache-2.0 as recorded in the register.
 - axe-core: MPL-2.0; used only by tests and not shipped in the desktop runtime bundle.
 - serde, serde_json, uuid, thiserror, chrono, sha2, windows-sys, tempfile, and rusqlite: MIT or MIT OR Apache-2.0 as recorded in the register.

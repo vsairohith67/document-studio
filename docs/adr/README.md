@@ -9,5 +9,6 @@
 | [ADR-005](ADR-005-storage-ownership-and-provider-persistence.md) | Keep documents user-owned and provider persistence deferred | Accepted |
 | [ADR-006](ADR-006-foundation-dependencies-and-sqlite.md) | Adopt reviewed foundation dependencies and bundled SQLite | Accepted |
 | [ADR-007](ADR-007-durable-publication-and-recovery.md) | Require journaled no-overwrite publication and evidence-based recovery | Accepted |
+| [ADR-008](ADR-008-single-instance-cancellation.md) | Enforce one Windows application process for cancellation ownership | Accepted |
 
 Create a new ADR for decisions that are expensive to reverse, affect security/privacy, change the operation contract, add a production dependency/model or alter the platform sequence. Never rewrite an accepted ADR to hide history; supersede it with a new record.

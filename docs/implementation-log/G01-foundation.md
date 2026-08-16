@@ -1,7 +1,8 @@
 # G01 Foundation Implementation Log
 
-Status: Implementation and acceptance complete; approved commit pending
+Status: Acceptance remediation implemented; independent acceptance re-review pending
 Base commit: `af885a291a1d2ed05f9e10fe77540ae3588e9f7f`
+Acceptance-remediation base: `ce6e096f48bf173b3fb23670abd717f362ca2c20`
 Implementation branch: `feat/g01-foundation`
 Target: Windows 11, Tauri 2, Rust 1.97.1, Node 24.19.0, npm 11.17.0, Python 3.12.10
 
@@ -9,13 +10,25 @@ Target: Windows 11, Tauri 2, Rust 1.97.1, Node 24.19.0, npm 11.17.0, Python 3.12
 
 - Correct npm workspaces, a root Cargo workspace and committed npm/Cargo/Python locks.
 - Strict JSON Schema, TypeScript and Rust contracts for the complete G01 lifecycle and IPC.
-- Checksummed transactional SQLite migrations and a metadata-only repository with 30-day terminal-history retention.
-- Windows path/file-identity validation, UUID job workspaces, exact cleanup, collision-safe staged publication and startup recovery.
-- `diagnostic.copy` with streaming byte progress, cooperative cancellation, independent SHA-256 verification, safe audit and no-overwrite publication.
+- Checksummed transactional SQLite migrations and a metadata-only repository with configurable application-only terminal-history retention (30 days by default).
+- Windows path/file-identity validation, UUID job workspaces, exact cleanup, bounded collision-safe staged publication, deterministic non-resuming startup recovery and single-instance enforcement.
+- `diagnostic.copy` `1.0.1` with durable exact destination-partial reservation plus Windows file-identity activation before bytes, streaming progress, cooperative cancellation, independent SHA-256 verification, safe audit and no-overwrite publication.
 - Typed Tauri commands/events, dependency diagnostics, and a neutral design-token-driven React UI with a truthful disabled viewer placeholder.
 - Real frontend, contract, migration, path-safety, copy, cancellation, failure, recovery, accessibility and leakage tests.
 
 No production PDF engine, PDF viewer runtime, OCR, Office integration, account, cloud provider, external AI, installer, subscription or team capability was added.
+
+## Independent acceptance remediation
+
+The independent review of PR #4 returned **CHANGES REQUIRED**. The remediation does not claim acceptance completion; it remains subject to independent re-review.
+
+- `diagnostic.copy` new jobs, manifest and shared fixture now use `1.0.1`; pre-fix `1.0.0` metadata is interpreted conservatively.
+- The exact destination path is first committed only as a reservation. A delete-on-close `create_new` guard supplies a Windows file identity that is durably activated before a no-replace hard link creates the partial; only that matching opened identity may be deleted. Pre-existing files at the reserved or guard path are preserved.
+- Collision attempts stop at 1,000, and cleanup failure takes precedence over `CollisionExhausted` or any terminal result.
+- Startup resolves queued/interrupted work without resuming it. Ambiguous legacy publication-capable and terminal records receive `LEGACY_CLEANUP_UNPROVEN`, preserve unknown files and are quarantined from history deletion.
+- Retention initializes/reads only `application/history.retention_days`, validates `0..=365`, and deletes at most 1,000 eligible terminal rows after recovery or a setting update.
+- Official `tauri-plugin-single-instance` 2.4.3 is registered first. Forwarded inputs are ignored; the callback only restores/focuses the primary window.
+- Cancellation tokens are registered before spawn; spawn failure and no-token fallback require proven cleanup and never create a false terminal result.
 
 ## Dependency and lock evidence
 
@@ -26,7 +39,7 @@ No production PDF engine, PDF viewer runtime, OCR, Office integration, account, 
 - `pip-tools==7.6.0` generated `scripts/requirements-validation.lock.txt` with hashes after the project virtual environment was pinned to compatible `pip==26.1`.
 - Locked Python installation with `--require-hashes --only-binary=:all:` passed.
 
-## Checkpoint evidence
+## Original checkpoint evidence before independent re-review
 
 | Checkpoint | Evidence | Result |
 |---|---|---|
@@ -41,9 +54,9 @@ No production PDF engine, PDF viewer runtime, OCR, Office integration, account, 
 | Rust lint | Workspace clippy with warnings denied | Passed |
 | Tauri compile | Release-mode `build --no-bundle` | Passed |
 
-## Final acceptance evidence
+## Original implementation evidence before independent re-review
 
-All commands below completed successfully on 2026-08-16 from the repository root:
+The commands below completed successfully for the original implementation on 2026-08-16. They are historical evidence only and do not constitute acceptance of the remediation:
 
 | Gate | Command | Result |
 |---|---|---|
@@ -61,6 +74,24 @@ All commands below completed successfully on 2026-08-16 from the repository root
 | Patch whitespace | `git diff --check` | Passed |
 
 The Tauri command retains the approved identifier `studio.document.app` and emits only the known cross-platform advisory that `.app` is also the macOS bundle extension.
+
+## Acceptance-remediation verification evidence
+
+The following remediation checks passed locally on 2026-08-16. Independent acceptance re-review is still pending.
+
+| Gate | Result |
+|---|---|
+| Approved dependency resolution | `cargo check --workspace` resolved `tauri-plugin-single-instance` exactly to 2.4.3 |
+| Lock audit | 34 plugin/transitive packages added, none removed or version-replaced; only root and `tracing` dependency blocks changed as expected |
+| Repository and links | Both Python validators passed; 132 feature entries verified |
+| Frontend/contracts | Typecheck passed; 10 desktop and 7 shared-contract tests passed; Vite production build passed |
+| Rust format/lint | `cargo fmt --all -- --check` and locked all-target clippy with warnings denied passed |
+| Rust tests | 65 locked unit/integration tests passed, including guarded activation, pre-existing partial/guard, reservation-release, inspecting/preflight/ready recovery, and explicit legacy publishing/interrupted regressions |
+| Single instance | Test-runtime two-process smoke passed; secondary exited before runtime setup |
+| Production Tauri | Release-mode `build --no-bundle` passed without `test-runtime` |
+| Diff safety | `git diff --check` passed; migrations, capabilities and npm lock remained unchanged |
+
+The Python hash-locked install was not repeated because its locked environment was already present and no Python dependency changed. `npm ci --ignore-scripts` was repeated from the unchanged lockfile and audited 122 packages with zero vulnerabilities. The unrelated GitHub Actions Node runtime warning remains non-blocking and action pins were not changed.
 
 ## Windows interactive evidence
 
@@ -82,7 +113,7 @@ The Tauri command retains the approved identifier `studio.document.app` and emit
 - Sentinel document content and a sentinel password were absent from SQLite, progress events, errors and dependency diagnostics.
 - The Tauri capability contains only `core:default` and `dialog:allow-open`.
 - No HTTP, shell or general filesystem plugin is adopted.
-- Existing sources and outputs are opened without truncation; publication uses create-new partials and a no-replace final move.
+- Existing sources and outputs are opened without truncation; publication uses a create-new delete-on-close guard, an identity-checked no-replace partial hard link, and a no-replace final move.
 - Cleanup validates a UUID path and ownership marker below the canonical application workspace root.
 
 ## Known limits
@@ -91,9 +122,10 @@ The Tauri command retains the approved identifier `studio.document.app` and emit
 - Automated axe checks run in jsdom. Native focus, 200% effective scaling, forced colors and reduced-motion preference were additionally checked in the Tauri smoke; a full assistive-technology certification remains a later release activity.
 - Publication performs additional full streaming reads/hashes to prioritize correctness over speed.
 - Installer packaging, signing and distribution are outside G01.
+- Pre-fix `1.0.0` development databases can contain cleanup ambiguity that software cannot resolve without guessing. A metadata reset requires separate approval and manual inspection of affected destinations; it is not part of this remediation.
 
 ## Rollback
 
-Use an approved `git revert` after a G01 commit; do not reset or broadly clean the repository. Restore dependency manifests and their lockfiles together. Migrations remain append-only. Rollback never deletes user-published output or the metadata database. Cleanup may remove only an exact recorded destination partial or a validated owned UUID workspace.
+Use an approved `git revert` after a G01 commit; do not reset or broadly clean the repository. Restore dependency manifests and their lockfiles together. Migrations remain append-only. Rollback never deletes user-published output or the metadata database. Cleanup may remove only an exact recorded destination partial whose opened Windows identity matches its durable activation token, or a validated owned UUID workspace.
 
 The final Git cleanliness proof is intentionally deferred until the separately approved G01 commit is created. No push is part of G01.

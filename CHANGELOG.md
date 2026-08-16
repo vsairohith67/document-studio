@@ -4,6 +4,7 @@ All notable planning-package and software releases are recorded here.
 
 ## 0.1.0-g01-foundation - 2026-08-16
 
+- Remediated acceptance findings with `diagnostic.copy` protocol `1.0.1`, durable exact destination-partial reservation plus file-identity activation, bounded collision recovery, deterministic non-resuming startup recovery, application-only runtime retention, conservative `1.0.0` quarantine, and Windows single-instance enforcement.
 - Added reproducible npm, Cargo and Python validation workspaces and lockfiles.
 - Added strict TypeScript, JSON Schema and Rust contracts for jobs, stages, settings, dependencies, errors, IPC and progress.
 - Added a metadata-only SQLite repository with transactional checksummed migrations and 30-day terminal-history retention.

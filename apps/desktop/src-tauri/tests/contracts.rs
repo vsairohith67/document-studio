@@ -16,8 +16,10 @@ fn rust_deserializes_and_round_trips_shared_golden_payloads() {
         .expect("golden operation must deserialize");
 
     assert_eq!(job.state, JobState::Running);
+    assert_eq!(job.operation_version, "1.0.1");
     assert_eq!(event.job_id, job.id);
     assert_eq!(operation.id, "diagnostic.copy");
+    assert_eq!(operation.version, "1.0.1");
     assert_eq!(serde_json::to_value(&job).unwrap(), fixture["job"]);
     assert_eq!(
         serde_json::to_value(&event).unwrap(),

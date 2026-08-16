@@ -45,6 +45,8 @@ export const api = {
       invoke<JobRecord>('jobs_create', { request }),
     cancel: (request: JobIdRequest) =>
       invoke<CancelResponse>('jobs_cancel', { request }),
+    resolveInterrupted: (request: JobIdRequest) =>
+      invoke<JobRecord>('jobs_resolve_interrupted', { request }),
     get: (request: JobIdRequest) => invoke<JobRecord>('jobs_get', { request }),
     onProgress: (handler: (event: ProgressEvent) => void): Promise<UnlistenFn> =>
       listen<ProgressEvent>(JOB_PROGRESS_EVENT_NAME, (event) => handler(event.payload)),

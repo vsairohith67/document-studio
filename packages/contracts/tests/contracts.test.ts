@@ -18,6 +18,8 @@ const validateProgress = ajv.compile({
 });
 describe('foundation contracts', () => {
   it('accepts the shared golden job, operation, and event', () => {
+    expect(fixtures.job.operationVersion).toBe('1.0.1');
+    expect(fixtures.operationManifest.version).toBe('1.0.1');
     expect(validateJob(fixtures.job), JSON.stringify(validateJob.errors)).toBe(true);
     expect(validateOperation(fixtures.operationManifest), JSON.stringify(validateOperation.errors)).toBe(true);
     expect(validateProgress(fixtures.progressEvent), JSON.stringify(validateProgress.errors)).toBe(true);

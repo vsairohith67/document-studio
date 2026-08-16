@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -10,14 +11,19 @@ use crate::path_policy::{
     canonical_directory, canonical_regular_file, ensure_different_files, validate_output_name,
     PathPolicyError,
 };
-use crate::windows_security::{available_bytes, is_collision_error, move_no_replace};
+use crate::windows_security::{
+    available_bytes, create_delete_on_close, delete_open_file, identity_from_file,
+    is_collision_error, move_no_replace, open_for_identity_and_delete, FileIdentity,
+};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
-const MAX_COLLISION_ATTEMPTS: u32 = 1000;
+pub const MAX_COLLISION_ATTEMPTS: u32 = 1000;
+const PARTIAL_OWNERSHIP_RESULT_PREFIX: &str = "DESTINATION_PARTIAL_OWNED:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationResult {
     pub final_path: PathBuf,
+    pub owned_partial_path: PathBuf,
     pub resolved_name: String,
     pub size_bytes: u64,
     pub sha256: String,
@@ -38,6 +44,8 @@ pub enum PublicationError {
     Path(#[from] PathPolicyError),
     #[error("publication filesystem operation failed")]
     Io(#[from] io::Error),
+    #[error("the exact owned destination partial could not be reconciled")]
+    Cleanup(io::Error),
     #[error("the operation was cancelled before publication")]
     Cancelled,
     #[error("the destination does not have enough available space")]
@@ -74,20 +82,29 @@ where
             on_progress(completed, total);
             Ok(())
         },
+        |_, _, _, _, _| Ok(()),
+        |_, _| Ok(()),
+        |_| Ok(()),
         |_| Ok(()),
     )
 }
 
 #[doc(hidden)]
-pub fn publish_verified_staging_with_observer<C, P, O>(
+pub fn publish_verified_staging_with_observer<C, P, R, A, L, O>(
     context: PublicationContext<'_>,
     mut is_cancelled: C,
     mut on_progress: P,
+    mut reserve_attempt: R,
+    mut activate_attempt: A,
+    mut release_attempt: L,
     mut before_commit: O,
 ) -> Result<PublicationResult, PublicationError>
 where
     C: FnMut() -> bool,
     P: FnMut(u64, u64) -> io::Result<()>,
+    R: FnMut(&Path, &Path, &str, u64, &str) -> Result<(), PublicationError>,
+    A: FnMut(&Path, FileIdentity) -> Result<(), PublicationError>,
+    L: FnMut(&Path) -> Result<(), PublicationError>,
     O: FnMut(&Path) -> Result<(), PublicationError>,
 {
     let PublicationContext {
@@ -128,10 +145,61 @@ where
             Uuid::new_v4().hyphenated()
         );
         let partial_path = destination_directory.join(partial_name);
-        let partial_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&partial_path)?;
+        reserve_attempt(
+            &final_path,
+            &partial_path,
+            &resolved_name,
+            expected_size,
+            &expected_hash,
+        )?;
+        let guard_path = partial_guard_path(&partial_path);
+        let guard_file = match create_delete_on_close(&guard_path) {
+            Ok(file) => file,
+            Err(error) => {
+                release_attempt(&partial_path)?;
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    continue;
+                }
+                return Err(error.into());
+            }
+        };
+        let partial_identity = match identity_from_file(&guard_file) {
+            Ok(identity) => identity,
+            Err(error) => {
+                drop(guard_file);
+                release_attempt(&partial_path)?;
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = activate_attempt(&partial_path, partial_identity) {
+            drop(guard_file);
+            return Err(error);
+        }
+        if let Err(error) = fs::hard_link(&guard_path, &partial_path) {
+            drop(guard_file);
+            release_attempt(&partial_path)?;
+            if error.kind() == io::ErrorKind::AlreadyExists || is_collision_error(&error) {
+                continue;
+            }
+            return Err(error.into());
+        }
+        let partial_file = match OpenOptions::new().write(true).open(&partial_path) {
+            Ok(file) => match identity_from_file(&file) {
+                Ok(identity) if identity == partial_identity => file,
+                Ok(_) | Err(_) => {
+                    drop(file);
+                    drop(guard_file);
+                    reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
+                    return Err(io::Error::other("destination partial identity changed").into());
+                }
+            },
+            Err(error) => {
+                drop(guard_file);
+                reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
+                return Err(error.into());
+            }
+        };
+        drop(guard_file);
 
         let copied = copy_to_partial(
             &staging_path,
@@ -143,42 +211,64 @@ where
         let (copied_size, copied_hash) = match copied {
             Ok(value) => value,
             Err(error) => {
-                remove_owned_partial(&partial_path);
+                reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
                 return Err(error);
             }
         };
         if copied_size != expected_size || copied_hash != expected_hash {
-            remove_owned_partial(&partial_path);
+            reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
             return Err(PublicationError::VerificationMismatch);
         }
-        let (reopened_size, reopened_hash) = hash_file(&partial_path)?;
+        let (reopened_size, reopened_hash) = match hash_file(&partial_path) {
+            Ok(value) => value,
+            Err(error) => {
+                reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
+                return Err(error.into());
+            }
+        };
         if reopened_size != expected_size || reopened_hash != expected_hash {
-            remove_owned_partial(&partial_path);
+            reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
             return Err(PublicationError::VerificationMismatch);
         }
 
         if is_cancelled() {
-            remove_owned_partial(&partial_path);
+            reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
             return Err(PublicationError::Cancelled);
         }
         if let Err(error) = before_commit(&final_path) {
-            remove_owned_partial(&partial_path);
+            reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
             return Err(error);
         }
         match move_no_replace(&partial_path, &final_path) {
             Ok(()) => {
+                let (published_size, published_hash) = match hash_file(&final_path) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        reconcile_owned_partial(
+                            &partial_path,
+                            partial_identity,
+                            &mut release_attempt,
+                        )?;
+                        return Err(error.into());
+                    }
+                };
+                if published_size != expected_size || published_hash != expected_hash {
+                    reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
+                    return Err(PublicationError::VerificationMismatch);
+                }
                 return Ok(PublicationResult {
                     final_path,
+                    owned_partial_path: partial_path,
                     resolved_name,
                     size_bytes: expected_size,
                     sha256: expected_hash,
                 });
             }
             Err(error) if is_collision_error(&error) => {
-                remove_owned_partial(&partial_path);
+                reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
             }
             Err(error) => {
-                remove_owned_partial(&partial_path);
+                reconcile_owned_partial(&partial_path, partial_identity, &mut release_attempt)?;
                 return Err(error.into());
             }
         }
@@ -200,6 +290,52 @@ pub fn collision_name(requested_name: &str, attempt: u32) -> String {
         Some(extension) if !extension.is_empty() => format!("{stem} ({attempt}).{extension}"),
         _ => format!("{stem} ({attempt})"),
     }
+}
+
+pub fn is_exact_owned_partial_path(
+    destination_directory: &Path,
+    job_id: &str,
+    partial_path: &Path,
+) -> bool {
+    if Uuid::parse_str(job_id).is_err() || partial_path.parent() != Some(destination_directory) {
+        return false;
+    }
+    let Some(name) = partial_path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let prefix = format!(".document-studio-{job_id}-");
+    let Some(identifier) = name
+        .strip_prefix(&prefix)
+        .and_then(|value| value.strip_suffix(".partial"))
+    else {
+        return false;
+    };
+    Uuid::parse_str(identifier).is_ok()
+}
+
+pub fn partial_ownership_result_code(
+    destination_directory: &Path,
+    job_id: &str,
+    partial_path: &Path,
+    identity: FileIdentity,
+) -> Option<String> {
+    if Uuid::parse_str(job_id).is_err() || partial_path.parent() != Some(destination_directory) {
+        return None;
+    }
+    let name = partial_path.file_name()?.to_str()?;
+    let prefix = format!(".document-studio-{job_id}-");
+    let identifier = name.strip_prefix(&prefix)?.strip_suffix(".partial")?;
+    let identifier = Uuid::parse_str(identifier).ok()?;
+    Some(format!(
+        "{PARTIAL_OWNERSHIP_RESULT_PREFIX}{}:{identity}",
+        identifier.hyphenated(),
+    ))
+}
+
+fn partial_guard_path(partial_path: &Path) -> PathBuf {
+    let mut name = OsString::from(partial_path.file_name().unwrap_or_default());
+    name.push(".guard");
+    partial_path.with_file_name(name)
 }
 
 pub fn hash_file(path: &Path) -> Result<(u64, String), io::Error> {
@@ -258,10 +394,23 @@ fn digest_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn remove_owned_partial(path: &Path) {
-    if let Err(error) = fs::remove_file(path) {
-        if error.kind() != io::ErrorKind::NotFound {
-            // The caller retains the primary failure. Startup recovery also reconciles recorded partials.
+fn reconcile_owned_partial<L>(
+    path: &Path,
+    expected_identity: FileIdentity,
+    release_attempt: &mut L,
+) -> Result<(), PublicationError>
+where
+    L: FnMut(&Path) -> Result<(), PublicationError>,
+{
+    match open_for_identity_and_delete(path) {
+        Ok(file) => {
+            let actual_identity = identity_from_file(&file).map_err(PublicationError::Cleanup)?;
+            if actual_identity == expected_identity {
+                delete_open_file(file).map_err(PublicationError::Cleanup)?;
+            }
         }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PublicationError::Cleanup(error)),
     }
+    release_attempt(path)
 }

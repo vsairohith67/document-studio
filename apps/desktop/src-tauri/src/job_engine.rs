@@ -22,14 +22,14 @@ pub const fn can_transition(from: JobState, to: JobState) -> bool {
 
     matches!(
         (from, to),
-        (Queued, Inspecting | Cancelled | Failed)
+        (Queued, Inspecting | Cancelled | Failed | Interrupted)
             | (Inspecting, Preflight | Cancelled | Failed | Interrupted)
             | (Preflight, Ready | Cancelled | Failed | Interrupted)
             | (Ready, Running | Cancelled | Failed | Interrupted)
             | (Running, Verifying | Cancelled | Failed | Interrupted)
             | (Verifying, Publishing | Cancelled | Failed | Interrupted)
             | (Publishing, Completed | Failed | Interrupted)
-            | (Interrupted, Preflight)
+            | (Interrupted, Completed | Failed)
     )
 }
 
@@ -111,7 +111,9 @@ mod tests {
         assert!(!can_transition(JobState::Queued, JobState::Running));
         assert!(!can_transition(JobState::Running, JobState::Ready));
         assert!(!can_transition(JobState::Publishing, JobState::Cancelled));
-        assert!(can_transition(JobState::Interrupted, JobState::Preflight));
+        assert!(!can_transition(JobState::Interrupted, JobState::Preflight));
+        assert!(can_transition(JobState::Interrupted, JobState::Failed));
+        assert!(can_transition(JobState::Interrupted, JobState::Completed));
     }
 
     #[test]

@@ -9,9 +9,10 @@ This repository contains the Document Studio product specifications and the impl
 The foundation intentionally proves the safety architecture before any production document engine is adopted:
 
 - User documents remain in user-selected local locations or short-lived job workspaces.
-- SQLite stores allow-listed metadata only, with 30-day terminal history by default.
-- `diagnostic.copy` streams, hashes, independently verifies and publishes without overwriting an existing file.
-- Jobs use the durable queued-to-completed lifecycle with failed, cancelled and interrupted recovery paths.
+- SQLite stores allow-listed metadata only. `application/history.retention_days` defaults to 30, accepts 0–365, and drives bounded startup/runtime maintenance.
+- `diagnostic.copy` protocol `1.0.1` durably reserves each exact destination partial, activates a matching Windows file-identity proof before writing bytes, independently verifies it, and publishes without overwriting an existing file.
+- Startup deterministically resolves every nonterminal job without pretending to resume it. Ambiguous pre-fix `1.0.0` history is preserved with a manual-inspection warning.
+- Windows enforces one application instance before database or worker setup; cancellation ownership therefore remains process-local without cross-process leases.
 - The webview has typed commands and progress events, a native open-dialog permission, and no shell or general filesystem capability.
 - qpdf, PDF.js, OCR, Office, cloud, account and AI dependencies remain deferred.
 

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -10,7 +10,10 @@ use thiserror::Error;
 
 use crate::contracts::{
     DependencyDiagnostic, JobInput, JobOutput, JobProgress, JobRecord, JobState, OperationError,
-    OperationStage, OutputStatus, ProgressUnit, SettingRecord,
+    OperationStage, OutputStatus, ProgressUnit, SettingRecord, DEFAULT_HISTORY_RETENTION_DAYS,
+    DIAGNOSTIC_COPY_OPERATION_ID, DIAGNOSTIC_COPY_VERSION, HISTORY_RETENTION_KEY,
+    HISTORY_RETENTION_SCOPE, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
+    LEGACY_DIAGNOSTIC_COPY_VERSION, MAX_HISTORY_PURGE,
 };
 use crate::job_engine::can_transition;
 
@@ -68,6 +71,8 @@ pub enum DatabaseError {
     IllegalTransition,
     #[error("terminal state requires publication and cleanup evidence")]
     TerminalEvidenceMissing,
+    #[error("legacy destination cleanup cannot be proven")]
+    LegacyCleanupUnproven,
     #[error("JSON value is not valid for metadata storage")]
     Json(#[from] serde_json::Error),
 }
@@ -83,6 +88,7 @@ pub struct PublicationEvidence {
     pub size_bytes: u64,
     pub sha256: String,
     pub status: OutputStatus,
+    pub partial_path: Option<String>,
 }
 
 impl Database {
@@ -443,6 +449,190 @@ impl Database {
         Ok(())
     }
 
+    pub fn reserve_publication_attempt(
+        &mut self,
+        id: &str,
+        resolved_name: &str,
+        final_path: &str,
+        partial_path: &str,
+        size_bytes: u64,
+        sha256: &str,
+    ) -> Result<(), DatabaseError> {
+        let size_bytes = metadata_i64(size_bytes, "output size")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let output_changed = transaction.execute(
+            "UPDATE job_outputs
+             SET resolved_name = ?1, final_path = ?2, partial_path = ?3,
+                 size_bytes = ?4, sha256 = ?5
+             WHERE job_id = ?6 AND ordinal = 0 AND partial_path IS NULL
+               AND status IN ('verified', 'publishing')",
+            params![
+                resolved_name,
+                final_path,
+                partial_path,
+                size_bytes,
+                sha256,
+                id
+            ],
+        )?;
+        let job_changed = transaction.execute(
+            "UPDATE jobs
+             SET resolved_output_name = ?1, updated_at = ?2, version = version + 1
+             WHERE id = ?3 AND state IN ('verifying', 'publishing')",
+            params![resolved_name, now(), id],
+        )?;
+        if output_changed != 1 || job_changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_owned_partial(
+        &mut self,
+        id: &str,
+        expected_partial_path: &str,
+    ) -> Result<(), DatabaseError> {
+        let changed = self.connection.execute(
+            "UPDATE job_outputs SET partial_path = NULL
+             WHERE job_id = ?1 AND ordinal = 0 AND partial_path = ?2",
+            params![id, expected_partial_path],
+        )?;
+        if changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        Ok(())
+    }
+
+    pub fn activate_owned_partial(
+        &mut self,
+        id: &str,
+        expected_partial_path: &str,
+        ownership_result_code: &str,
+    ) -> Result<(), DatabaseError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let reserved: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM jobs
+                JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = 0
+                WHERE jobs.id = ?1 AND jobs.operation_id = ?2 AND jobs.operation_version = ?3
+                  AND jobs.state IN ('verifying', 'publishing')
+                  AND job_outputs.partial_path = ?4
+             )",
+            params![
+                id,
+                DIAGNOSTIC_COPY_OPERATION_ID,
+                DIAGNOSTIC_COPY_VERSION,
+                expected_partial_path,
+            ],
+            |row| row.get(0),
+        )?;
+        if !reserved {
+            return Err(DatabaseError::JobConflict);
+        }
+        let already_activated: bool = transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM job_stage_runs
+                WHERE job_id = ?1 AND stage = 'publish' AND safe_result_code = ?2
+             )",
+            params![id, ownership_result_code],
+            |row| row.get(0),
+        )?;
+        if !already_activated {
+            let sequence: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(sequence), -1) + 1 FROM job_stage_runs WHERE job_id = ?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            let activated_at = now();
+            transaction.execute(
+                "INSERT INTO job_stage_runs (
+                    job_id, sequence, stage, started_at, finished_at,
+                    completed_units, total_units, safe_result_code
+                 ) VALUES (?1, ?2, 'publish', ?3, ?3, 0, 0, ?4)",
+                params![id, sequence, activated_at, ownership_result_code],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn owned_partial_is_activated(
+        &self,
+        id: &str,
+        expected_partial_path: &str,
+        ownership_result_code: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM jobs
+                    JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = 0
+                    JOIN job_stage_runs ON job_stage_runs.job_id = jobs.id
+                    WHERE jobs.id = ?1 AND jobs.operation_id = ?2 AND jobs.operation_version = ?3
+                      AND job_outputs.partial_path = ?4
+                      AND job_stage_runs.stage = 'publish'
+                      AND job_stage_runs.safe_result_code = ?5
+                 )",
+                params![
+                    id,
+                    DIAGNOSTIC_COPY_OPERATION_ID,
+                    DIAGNOSTIC_COPY_VERSION,
+                    expected_partial_path,
+                    ownership_result_code,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn clear_staging_path(
+        &mut self,
+        id: &str,
+        expected_staging_path: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let changed = self.connection.execute(
+            "UPDATE job_outputs SET staging_path = NULL
+             WHERE job_id = ?1 AND ordinal = 0
+               AND ((?2 IS NULL AND staging_path IS NULL) OR staging_path = ?2)",
+            params![id, expected_staging_path],
+        )?;
+        if changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        Ok(())
+    }
+
+    pub fn clear_unpublished_intent(&mut self, id: &str) -> Result<(), DatabaseError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let output_changed = transaction.execute(
+            "UPDATE job_outputs
+             SET resolved_name = NULL, final_path = NULL,
+                 status = CASE WHEN status = 'publishing' THEN 'verified' ELSE status END
+             WHERE job_id = ?1 AND ordinal = 0 AND partial_path IS NULL
+               AND status IN ('planned', 'staged', 'verified', 'publishing')",
+            [id],
+        )?;
+        let job_changed = transaction.execute(
+            "UPDATE jobs SET resolved_output_name = NULL, updated_at = ?1, version = version + 1
+             WHERE id = ?2 AND state IN (
+                'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying', 'interrupted'
+             )",
+            params![now(), id],
+        )?;
+        if output_changed != 1 || job_changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn set_publication_intent(
         &mut self,
         id: &str,
@@ -459,7 +649,8 @@ impl Database {
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, size_bytes = ?3, sha256 = ?4,
                  status = 'publishing'
-             WHERE job_id = ?5 AND ordinal = 0",
+             WHERE job_id = ?5 AND ordinal = 0 AND partial_path IS NOT NULL
+               AND resolved_name = ?1 AND final_path = ?2",
             params![resolved_name, final_path, size_bytes, sha256, id],
         )?;
         let state_changed = transaction.execute(
@@ -498,7 +689,8 @@ impl Database {
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, size_bytes = ?3, sha256 = ?4,
                  status = 'publishing'
-             WHERE job_id = ?5 AND ordinal = 0 AND status = 'verified'",
+             WHERE job_id = ?5 AND ordinal = 0 AND status = 'verified'
+               AND partial_path IS NOT NULL AND resolved_name = ?1 AND final_path = ?2",
             params![resolved_name, final_path, size_bytes, sha256, id],
         )?;
         let state_changed = transaction.execute(
@@ -522,34 +714,29 @@ impl Database {
         final_path: &str,
         size_bytes: u64,
         sha256: &str,
+        expected_partial_path: Option<&str>,
     ) -> Result<(), DatabaseError> {
         let size_bytes = metadata_i64(size_bytes, "output size")?;
         let published_at = now();
         let changed = self.connection.execute(
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, size_bytes = ?3, sha256 = ?4,
-                 status = 'published', published_at = ?5, staging_path = NULL, partial_path = NULL
-             WHERE job_id = ?6 AND ordinal = 0",
+                 status = 'published', published_at = ?5, partial_path = NULL
+             WHERE job_id = ?6 AND ordinal = 0
+               AND ((?7 IS NULL AND partial_path IS NULL) OR partial_path = ?7)",
             params![
                 resolved_name,
                 final_path,
                 size_bytes,
                 sha256,
                 published_at,
-                id
+                id,
+                expected_partial_path,
             ],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
         }
-        Ok(())
-    }
-
-    pub fn clear_ephemeral_paths(&mut self, id: &str) -> Result<(), DatabaseError> {
-        self.connection.execute(
-            "UPDATE job_outputs SET staging_path = NULL, partial_path = NULL WHERE job_id = ?1",
-            [id],
-        )?;
         Ok(())
     }
 
@@ -559,7 +746,7 @@ impl Database {
     ) -> Result<Option<PublicationEvidence>, DatabaseError> {
         self.connection
             .query_row(
-                "SELECT final_path, resolved_name, size_bytes, sha256, status
+                "SELECT final_path, resolved_name, size_bytes, sha256, status, partial_path
                  FROM job_outputs WHERE job_id = ?1 AND ordinal = 0
                    AND final_path IS NOT NULL AND resolved_name IS NOT NULL
                    AND size_bytes IS NOT NULL AND sha256 IS NOT NULL",
@@ -579,6 +766,7 @@ impl Database {
                         size_bytes: row_u64(row, 2)?,
                         sha256: row.get(3)?,
                         status,
+                        partial_path: row.get(5)?,
                     })
                 },
             )
@@ -612,6 +800,22 @@ impl Database {
         Ok(())
     }
 
+    pub fn record_error_once(
+        &mut self,
+        id: &str,
+        error: &OperationError,
+    ) -> Result<(), DatabaseError> {
+        let already_recorded: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM job_errors WHERE job_id = ?1 AND code = ?2)",
+            params![id, error.code],
+            |row| row.get(0),
+        )?;
+        if !already_recorded {
+            self.record_error(id, error)?;
+        }
+        Ok(())
+    }
+
     pub fn in_flight_jobs(&self) -> Result<Vec<JobRecord>, DatabaseError> {
         let ids = {
             let mut statement = self.connection.prepare(
@@ -635,11 +839,53 @@ impl Database {
             .collect()
     }
 
+    pub fn startup_recovery_jobs(&self) -> Result<Vec<JobRecord>, DatabaseError> {
+        let ids = {
+            let mut statement = self.connection.prepare(
+                "SELECT DISTINCT jobs.id
+                 FROM jobs
+                 LEFT JOIN job_outputs ON job_outputs.job_id = jobs.id
+                 WHERE jobs.state IN (
+                    'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying',
+                    'publishing', 'interrupted'
+                 )
+                 OR (jobs.operation_id = ?1 AND jobs.operation_version = ?2)
+                 OR job_outputs.staging_path IS NOT NULL OR job_outputs.partial_path IS NOT NULL
+                 ORDER BY jobs.created_at",
+            )?;
+            let ids = statement
+                .query_map(
+                    params![DIAGNOSTIC_COPY_OPERATION_ID, LEGACY_DIAGNOSTIC_COPY_VERSION],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        ids.iter()
+            .map(|id| {
+                self.get_job(id)?
+                    .ok_or(DatabaseError::InvalidContractValue {
+                        field: "startup recovery job reference",
+                    })
+            })
+            .collect()
+    }
+
     pub fn mark_interrupted(
         &mut self,
         id: &str,
         expected_state: JobState,
     ) -> Result<(), DatabaseError> {
+        if expected_state == JobState::Interrupted {
+            self.connection.execute(
+                "UPDATE jobs
+                 SET stage = 'recovery', recovery_count = recovery_count + 1,
+                     updated_at = ?1, version = version + 1, sequence = sequence + 1
+                 WHERE id = ?2 AND state = 'interrupted'",
+                params![now(), id],
+            )?;
+            return Ok(());
+        }
         if !can_transition(expected_state, JobState::Interrupted) {
             return Err(DatabaseError::IllegalTransition);
         }
@@ -654,6 +900,51 @@ impl Database {
             return Err(DatabaseError::JobConflict);
         }
         Ok(())
+    }
+
+    pub fn record_recovery_result_once(
+        &mut self,
+        id: &str,
+        result_code: &str,
+    ) -> Result<(), DatabaseError> {
+        let exists: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM job_stage_runs
+                WHERE job_id = ?1 AND stage = 'recovery' AND safe_result_code = ?2
+             )",
+            params![id, result_code],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(());
+        }
+        let sequence: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(sequence), -1) + 1 FROM job_stage_runs WHERE job_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let recorded_at = now();
+        self.connection.execute(
+            "INSERT INTO job_stage_runs (
+                job_id, sequence, stage, started_at, finished_at,
+                completed_units, total_units, safe_result_code
+             ) VALUES (?1, ?2, 'recovery', ?3, ?3, 0, 0, ?4)",
+            params![id, sequence, recorded_at, result_code],
+        )?;
+        Ok(())
+    }
+
+    pub fn legacy_cleanup_is_proven(&self, id: &str) -> Result<bool, DatabaseError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM job_stage_runs
+                    WHERE job_id = ?1 AND stage = 'recovery' AND safe_result_code = ?2
+                 )",
+                params![id, LEGACY_CLEANUP_PROVEN],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn upsert_dependency(
@@ -696,6 +987,32 @@ impl Database {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for id in ids.iter().take(200) {
+            let ambiguous: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM jobs
+                    WHERE id = ?1 AND operation_id = ?2 AND operation_version = ?3
+                      AND (
+                        EXISTS(SELECT 1 FROM job_errors WHERE job_id = jobs.id AND code = ?4)
+                        OR NOT EXISTS(
+                            SELECT 1 FROM job_stage_runs
+                            WHERE job_id = jobs.id AND stage = 'recovery' AND safe_result_code = ?5
+                        )
+                      )
+                 )",
+                params![
+                    id,
+                    DIAGNOSTIC_COPY_OPERATION_ID,
+                    LEGACY_DIAGNOSTIC_COPY_VERSION,
+                    LEGACY_CLEANUP_UNPROVEN,
+                    LEGACY_CLEANUP_PROVEN,
+                ],
+                |row| row.get(0),
+            )?;
+            if ambiguous {
+                return Err(DatabaseError::LegacyCleanupUnproven);
+            }
+        }
         let mut deleted = 0;
         for id in ids.iter().take(200) {
             deleted += transaction.execute(
@@ -711,11 +1028,65 @@ impl Database {
         self.connection
             .execute(
                 "DELETE FROM jobs
-                 WHERE state IN ('completed', 'failed', 'cancelled')
-                   AND finished_at IS NOT NULL AND finished_at < ?1",
-                [cutoff],
+                 WHERE id IN (
+                    SELECT jobs.id FROM jobs
+                    WHERE jobs.state IN ('completed', 'failed', 'cancelled')
+                      AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?1
+                      AND NOT (
+                        jobs.operation_id = ?2 AND jobs.operation_version = ?3
+                        AND (
+                            EXISTS(
+                                SELECT 1 FROM job_errors
+                                WHERE job_id = jobs.id AND code = ?4
+                            )
+                            OR NOT EXISTS(
+                                SELECT 1 FROM job_stage_runs
+                                WHERE job_id = jobs.id AND stage = 'recovery'
+                                  AND safe_result_code = ?5
+                            )
+                        )
+                      )
+                    ORDER BY jobs.finished_at, jobs.id
+                    LIMIT ?6
+                 )",
+                params![
+                    cutoff,
+                    DIAGNOSTIC_COPY_OPERATION_ID,
+                    LEGACY_DIAGNOSTIC_COPY_VERSION,
+                    LEGACY_CLEANUP_UNPROVEN,
+                    LEGACY_CLEANUP_PROVEN,
+                    MAX_HISTORY_PURGE as i64,
+                ],
             )
             .map_err(Into::into)
+    }
+
+    pub fn ensure_application_retention_setting(&mut self) -> Result<SettingRecord, DatabaseError> {
+        if let Some(setting) = self.get_setting(HISTORY_RETENTION_SCOPE, HISTORY_RETENTION_KEY)? {
+            validate_setting(&setting.scope, &setting.key, &setting.value, true)?;
+            return Ok(setting);
+        }
+        self.set_setting(
+            HISTORY_RETENTION_SCOPE,
+            HISTORY_RETENTION_KEY,
+            Value::from(DEFAULT_HISTORY_RETENTION_DAYS),
+            0,
+        )
+    }
+
+    pub fn run_retention_at(
+        &mut self,
+        maintenance_time: DateTime<Utc>,
+    ) -> Result<usize, DatabaseError> {
+        let setting = self.ensure_application_retention_setting()?;
+        let days = setting
+            .value
+            .as_u64()
+            .filter(|days| *days <= 365)
+            .ok_or(DatabaseError::SettingNotAllowed)?;
+        let days = i64::try_from(days).map_err(|_| DatabaseError::SettingNotAllowed)?;
+        let cutoff = maintenance_time - ChronoDuration::days(days);
+        self.purge_terminal_before(&cutoff.to_rfc3339_opts(SecondsFormat::Secs, true))
     }
 
     pub fn get_setting(
@@ -1003,10 +1374,11 @@ fn validate_setting(
     if !matches!(scope, "application" | "operation") {
         return Err(DatabaseError::SettingNotAllowed);
     }
-    let allowed = matches!(
-        key,
-        "history.retention_days" | "privacy.offline" | "ui.theme"
-    );
+    let allowed = match key {
+        HISTORY_RETENTION_KEY => scope == HISTORY_RETENTION_SCOPE,
+        "privacy.offline" | "ui.theme" => true,
+        _ => false,
+    };
     if !allowed {
         return Err(DatabaseError::SettingNotAllowed);
     }

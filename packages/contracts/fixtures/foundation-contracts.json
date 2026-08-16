@@ -2,7 +2,7 @@
   "job": {
     "id": "018f0f17-2f4a-7fb1-a247-101010101010",
     "operationId": "diagnostic.copy",
-    "operationVersion": "1.0.0",
+    "operationVersion": "1.0.1",
     "state": "running",
     "stage": "execute",
     "sequence": 17,
@@ -60,7 +60,7 @@
   },
   "operationManifest": {
     "id": "diagnostic.copy",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "name": "Diagnostic copy",
     "category": "diagnostics",
     "description": "Streams, verifies, and safely publishes one local file.",

@@ -294,6 +294,48 @@ fn collision_created_at_commit_is_preserved_and_retries_the_next_suffix() {
 }
 
 #[test]
+fn collision_partial_deletion_failure_interrupts_with_exact_ownership_retained() {
+    let (_app_data, state, service) = service();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let input = support::write_fixture(source.path(), "fixture.bin", b"cleanup collision");
+    let job = service
+        .create_job(request(&input, destination.path()))
+        .unwrap();
+
+    let error = service
+        .execute_with_hooks(
+            &job.id,
+            |_event| {},
+            DiagnosticCopyHooks {
+                create_collision_before_first_publication_commit: true,
+                lock_partial_before_first_publication_commit: true,
+                fail_cleanup: true,
+                ..DiagnosticCopyHooks::default()
+            },
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code, "CLEANUP_FAILED");
+    let interrupted = state.database().get_job(&job.id).unwrap().unwrap();
+    assert_eq!(interrupted.state, JobState::Interrupted);
+    let partial_path = interrupted.outputs[0].partial_path.as_ref().unwrap();
+    assert!(std::path::Path::new(partial_path).exists());
+    assert_eq!(
+        fs::read(destination.path().join("fixture-copy.bin")).unwrap(),
+        b"competing output"
+    );
+    assert_eq!(
+        interrupted
+            .errors
+            .iter()
+            .filter(|operation_error| operation_error.code == "CLEANUP_FAILED")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn zero_byte_file_is_valid_and_uses_standard_empty_sha256() {
     let (_app_data, _state, service) = service();
     let source = tempdir().unwrap();

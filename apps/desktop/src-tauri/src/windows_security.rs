@@ -8,9 +8,11 @@ use std::path::Path;
 
 use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetFileInformationByHandle, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
+    FileDispositionInfoEx, GetDiskFreeSpaceExW, GetFileInformationByHandle, MoveFileExW,
+    SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +91,46 @@ pub fn move_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
     if succeeded == 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+/// Creates a new file that Windows will delete if the process or handle closes
+/// before durable application ownership has been activated.
+pub fn create_delete_on_close(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode(FILE_GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+        .open(path)
+}
+
+pub fn open_for_identity_and_delete(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Deletes the exact opened file object rather than a later path replacement.
+pub fn delete_open_file(file: File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE,
+    };
+    let succeeded = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            FileDispositionInfoEx,
+            std::ptr::addr_of!(disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop(file);
     Ok(())
 }
 

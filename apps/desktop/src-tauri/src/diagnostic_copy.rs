@@ -7,21 +7,27 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, SecondsFormat, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_SEQUENTIAL_SCAN, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 
 use crate::app_state::{AppState, CancellationToken};
 use crate::contracts::{
     JobInput, JobOutput, JobProgress, JobRecord, JobState, JobsCreateRequest, OperationError,
-    OperationStage, OutputStatus, ProgressEvent, ProgressUnit,
+    OperationStage, OutputStatus, ProgressEvent, ProgressUnit, DIAGNOSTIC_COPY_OPERATION_ID,
+    DIAGNOSTIC_COPY_VERSION,
 };
 use crate::database::DatabaseError;
 use crate::path_policy::{
     canonical_directory, canonical_regular_file, ensure_different_files, validate_output_name,
 };
 use crate::publication::{
-    hash_file, publish_verified_staging_with_observer, PublicationContext, PublicationError,
+    hash_file, is_exact_owned_partial_path, partial_ownership_result_code,
+    publish_verified_staging_with_observer, PublicationContext, PublicationError,
 };
-use crate::windows_security::{available_bytes, identity_from_file};
+use crate::windows_security::{
+    available_bytes, delete_open_file, identity_from_file, open_for_identity_and_delete,
+};
 use crate::workspace::JobWorkspace;
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
@@ -31,6 +37,7 @@ pub struct DiagnosticCopyHooks {
     pub fail_write_after_bytes: Option<u64>,
     pub corrupt_staging_before_verify: bool,
     pub create_collision_before_first_publication_commit: bool,
+    pub lock_partial_before_first_publication_commit: bool,
     pub fail_cleanup: bool,
 }
 
@@ -45,7 +52,7 @@ impl DiagnosticCopyService {
     }
 
     pub fn create_job(&self, request: JobsCreateRequest) -> Result<JobRecord, OperationError> {
-        if request.operation_id != "diagnostic.copy" || request.input_paths.len() != 1 {
+        if request.operation_id != DIAGNOSTIC_COPY_OPERATION_ID || request.input_paths.len() != 1 {
             return Err(safe_error(
                 "INVALID_OPERATION_REQUEST",
                 "The diagnostic copy request is not valid",
@@ -74,8 +81,8 @@ impl DiagnosticCopyService {
         let destination_directory = destination.to_string_lossy().into_owned();
         let job = JobRecord {
             id,
-            operation_id: "diagnostic.copy".to_owned(),
-            operation_version: "1.0.0".to_owned(),
+            operation_id: DIAGNOSTIC_COPY_OPERATION_ID.to_owned(),
+            operation_version: DIAGNOSTIC_COPY_VERSION.to_owned(),
             state: JobState::Queued,
             stage: None,
             sequence: 0,
@@ -131,20 +138,56 @@ impl DiagnosticCopyService {
     where
         F: FnMut(ProgressEvent),
     {
-        self.execute_with_hooks(job_id, on_event, DiagnosticCopyHooks::default())
+        let token = self.state.cancellations.register(job_id);
+        self.execute_with_registered_token_and_hooks(
+            job_id,
+            token,
+            on_event,
+            DiagnosticCopyHooks::default(),
+        )
     }
 
     #[doc(hidden)]
     pub fn execute_with_hooks<F>(
         &self,
         job_id: &str,
-        mut on_event: F,
+        on_event: F,
         hooks: DiagnosticCopyHooks,
     ) -> Result<JobRecord, OperationError>
     where
         F: FnMut(ProgressEvent),
     {
         let token = self.state.cancellations.register(job_id);
+        self.execute_with_registered_token_and_hooks(job_id, token, on_event, hooks)
+    }
+
+    pub fn execute_with_registered_token<F>(
+        &self,
+        job_id: &str,
+        token: CancellationToken,
+        on_event: F,
+    ) -> Result<JobRecord, OperationError>
+    where
+        F: FnMut(ProgressEvent),
+    {
+        self.execute_with_registered_token_and_hooks(
+            job_id,
+            token,
+            on_event,
+            DiagnosticCopyHooks::default(),
+        )
+    }
+
+    fn execute_with_registered_token_and_hooks<F>(
+        &self,
+        job_id: &str,
+        token: CancellationToken,
+        mut on_event: F,
+        hooks: DiagnosticCopyHooks,
+    ) -> Result<JobRecord, OperationError>
+    where
+        F: FnMut(ProgressEvent),
+    {
         let mut workspace: Option<JobWorkspace> = None;
         let result = self.execute_inner(job_id, &token, &hooks, &mut workspace, &mut on_event);
         let result = match result {
@@ -370,12 +413,19 @@ impl DiagnosticCopyService {
         check_cancelled(token, OperationStage::Publish)?;
 
         let requested_name = verifying.requested_output_name.clone();
+        let state_for_reservation = self.state.clone();
+        let state_for_activation = self.state.clone();
+        let destination_for_activation = destination.clone();
+        let state_for_release = self.state.clone();
         let state_for_intent = self.state.clone();
         let token_for_commit = token.clone();
         let token_for_progress = token.clone();
         let create_collision_before_first_commit =
             hooks.create_collision_before_first_publication_commit;
+        let lock_partial_before_first_commit = hooks.lock_partial_before_first_publication_commit;
+        let state_for_partial_lock = self.state.clone();
         let mut collision_created = false;
+        let mut partial_cleanup_lock = None;
         let result = publish_verified_staging_with_observer(
             PublicationContext {
                 staging_path: &staging_path,
@@ -404,10 +454,89 @@ impl DiagnosticCopyService {
                 )
                 .map_err(|_| std::io::Error::other("publication progress could not be stored"))
             },
+            move |candidate, partial, resolved_name, size, sha256| {
+                state_for_reservation
+                    .database()
+                    .reserve_publication_attempt(
+                        job_id,
+                        resolved_name,
+                        &candidate.to_string_lossy(),
+                        &partial.to_string_lossy(),
+                        size,
+                        sha256,
+                    )
+                    .map_err(|_| {
+                        PublicationError::Io(std::io::Error::other(
+                            "publication ownership could not be stored",
+                        ))
+                    })
+            },
+            move |partial, identity| {
+                let ownership_result_code = partial_ownership_result_code(
+                    &destination_for_activation,
+                    job_id,
+                    partial,
+                    identity,
+                )
+                .ok_or_else(|| {
+                    PublicationError::Io(std::io::Error::other(
+                        "publication ownership proof is invalid",
+                    ))
+                })?;
+                state_for_activation
+                    .database()
+                    .activate_owned_partial(
+                        job_id,
+                        &partial.to_string_lossy(),
+                        &ownership_result_code,
+                    )
+                    .map_err(|_| {
+                        PublicationError::Io(std::io::Error::other(
+                            "publication ownership could not be activated",
+                        ))
+                    })
+            },
+            move |partial| {
+                state_for_release
+                    .database()
+                    .clear_owned_partial(job_id, &partial.to_string_lossy())
+                    .map_err(|_| {
+                        PublicationError::Io(std::io::Error::other(
+                            "publication ownership could not be released",
+                        ))
+                    })
+            },
             move |candidate| {
                 if create_collision_before_first_commit && !collision_created {
                     fs::write(candidate, b"competing output").map_err(PublicationError::Io)?;
                     collision_created = true;
+                }
+                if lock_partial_before_first_commit && partial_cleanup_lock.is_none() {
+                    let job = state_for_partial_lock
+                        .database()
+                        .get_job(job_id)
+                        .map_err(|_| {
+                            PublicationError::Io(std::io::Error::other(
+                                "publication ownership could not be read",
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            PublicationError::Io(std::io::Error::other(
+                                "publication job is unavailable",
+                            ))
+                        })?;
+                    let partial_path = job.outputs[0].partial_path.as_deref().ok_or_else(|| {
+                        PublicationError::Io(std::io::Error::other(
+                            "publication ownership is unavailable",
+                        ))
+                    })?;
+                    partial_cleanup_lock = Some(
+                        OpenOptions::new()
+                            .read(true)
+                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                            .open(partial_path)
+                            .map_err(PublicationError::Io)?,
+                    );
                 }
                 let publication_already_started = token_for_commit.commit_started();
                 if !token_for_commit.try_begin_publication_commit() {
@@ -467,6 +596,7 @@ impl DiagnosticCopyService {
                 &result.final_path.to_string_lossy(),
                 result.size_bytes,
                 &result.sha256,
+                Some(&result.owned_partial_path.to_string_lossy()),
             )
             .map_err(|_| metadata_error())?;
         self.progress(
@@ -500,7 +630,7 @@ impl DiagnosticCopyService {
             .map_err(|_| cleanup_error())?;
         self.state
             .database()
-            .clear_ephemeral_paths(job_id)
+            .clear_staging_path(job_id, Some(&staging_path.to_string_lossy()))
             .map_err(|_| metadata_error())?;
         let completed = self.transition(
             job_id,
@@ -669,19 +799,20 @@ impl DiagnosticCopyService {
     where
         F: FnMut(ProgressEvent),
     {
-        if hooks.fail_cleanup
-            || (workspace.is_some() && self.state.workspaces.cleanup_job(job_id).is_err())
-        {
+        if let Err(error) = self.reconcile_temporary_artifacts(job_id, workspace, hooks) {
             let current = self.current_job(job_id)?;
-            self.state
-                .database()
+            let mut database = self.state.database();
+            database
+                .record_error_once(job_id, &error)
+                .map_err(|_| metadata_error())?;
+            database
                 .mark_interrupted(job_id, current.state)
                 .map_err(|_| metadata_error())?;
             return Err(cleanup_error());
         }
         let mut database = self.state.database();
         database
-            .clear_ephemeral_paths(job_id)
+            .clear_unpublished_intent(job_id)
             .map_err(|_| metadata_error())?;
         let current = database
             .get_job(job_id)
@@ -723,25 +854,28 @@ impl DiagnosticCopyService {
         F: FnMut(ProgressEvent),
     {
         let current = self.current_job(job_id)?;
-        let cleanup_failed = hooks.fail_cleanup
-            || (workspace.is_some() && self.state.workspaces.cleanup_job(job_id).is_err());
+        let cleanup_result = self.reconcile_temporary_artifacts(job_id, workspace, hooks);
         let mut database = self.state.database();
         database
-            .record_error(job_id, error)
+            .record_error_once(job_id, error)
             .map_err(|_| metadata_error())?;
-        if cleanup_failed || current.state == JobState::Publishing {
-            if !cleanup_failed {
-                database
-                    .clear_ephemeral_paths(job_id)
-                    .map_err(|_| metadata_error())?;
-            }
+        if let Err(cleanup) = cleanup_result {
+            database
+                .record_error_once(job_id, &cleanup)
+                .map_err(|_| metadata_error())?;
+            database
+                .mark_interrupted(job_id, current.state)
+                .map_err(|_| metadata_error())?;
+            return Ok(());
+        }
+        if current.state == JobState::Publishing {
             database
                 .mark_interrupted(job_id, current.state)
                 .map_err(|_| metadata_error())?;
             return Ok(());
         }
         database
-            .clear_ephemeral_paths(job_id)
+            .clear_unpublished_intent(job_id)
             .map_err(|_| metadata_error())?;
         let refreshed = database
             .get_job(job_id)
@@ -768,6 +902,66 @@ impl DiagnosticCopyService {
             false,
             on_event,
         );
+        Ok(())
+    }
+
+    fn reconcile_temporary_artifacts(
+        &self,
+        job_id: &str,
+        workspace: Option<&JobWorkspace>,
+        hooks: &DiagnosticCopyHooks,
+    ) -> Result<(), OperationError> {
+        let job = self.current_job(job_id)?;
+        let output = job.outputs.first().ok_or_else(metadata_error)?;
+        if let Some(partial_path) = output.partial_path.as_deref() {
+            let partial_path = Path::new(partial_path);
+            let destination = Path::new(&job.destination_directory);
+            if !is_exact_owned_partial_path(destination, job_id, partial_path) {
+                return Err(cleanup_error());
+            }
+            if hooks.fail_cleanup {
+                return Err(cleanup_error());
+            }
+            match open_for_identity_and_delete(partial_path) {
+                Ok(file) => {
+                    let identity = identity_from_file(&file).map_err(|_| cleanup_error())?;
+                    let ownership_result_code =
+                        partial_ownership_result_code(destination, job_id, partial_path, identity)
+                            .ok_or_else(cleanup_error)?;
+                    let activated = self
+                        .state
+                        .database()
+                        .owned_partial_is_activated(
+                            job_id,
+                            &partial_path.to_string_lossy(),
+                            &ownership_result_code,
+                        )
+                        .map_err(|_| metadata_error())?;
+                    if activated {
+                        delete_open_file(file).map_err(|_| cleanup_error())?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(cleanup_error()),
+            }
+            self.state
+                .database()
+                .clear_owned_partial(job_id, &partial_path.to_string_lossy())
+                .map_err(|_| metadata_error())?;
+        }
+        if hooks.fail_cleanup {
+            return Err(cleanup_error());
+        }
+        if workspace.is_some() || output.staging_path.is_some() {
+            self.state
+                .workspaces
+                .cleanup_job(job_id)
+                .map_err(|_| cleanup_error())?;
+        }
+        self.state
+            .database()
+            .clear_staging_path(job_id, output.staging_path.as_deref())
+            .map_err(|_| metadata_error())?;
         Ok(())
     }
 
@@ -901,7 +1095,7 @@ fn publication_error(error: PublicationError) -> OperationError {
         ),
         PublicationError::VerificationMismatch => verify_error(),
         PublicationError::CollisionExhausted => safe_error(
-            "OUTPUT_COLLISION_LIMIT",
+            "COLLISION_EXHAUSTED",
             "A safe output name could not be reserved",
             "Choose a different output name or destination and try again.",
             OperationStage::Publish,
@@ -915,6 +1109,7 @@ fn publication_error(error: PublicationError) -> OperationError {
             true,
         ),
         PublicationError::Path(_) => path_error(),
+        PublicationError::Cleanup(_) => cleanup_error(),
         PublicationError::Io(_) => safe_error(
             "PUBLICATION_FAILED",
             "The verified copy could not be published",

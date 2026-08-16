@@ -45,5 +45,9 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --all-targets --locked
+      - name: Prove Windows single-instance startup boundary
+        run: |
+          cargo build -p document-studio --locked --features test-runtime
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_single_instance.ps1 -Executable .\target\debug\document-studio.exe
       - name: Compile Tauri without a bundle
         run: npm --workspace @document-studio/desktop run tauri -- build --no-bundle

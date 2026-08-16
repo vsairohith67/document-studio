@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DIAGNOSTIC_COPY_OPERATION_ID: &str = "diagnostic.copy";
+pub const DIAGNOSTIC_COPY_VERSION: &str = "1.0.1";
+pub const LEGACY_DIAGNOSTIC_COPY_VERSION: &str = "1.0.0";
+pub const LEGACY_CLEANUP_PROVEN: &str = "LEGACY_CLEANUP_PROVEN";
+pub const LEGACY_CLEANUP_UNPROVEN: &str = "LEGACY_CLEANUP_UNPROVEN";
+pub const HISTORY_RETENTION_SCOPE: &str = "application";
+pub const HISTORY_RETENTION_KEY: &str = "history.retention_days";
+pub const DEFAULT_HISTORY_RETENTION_DAYS: u64 = 30;
+pub const MAX_HISTORY_PURGE: usize = 1000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobState {

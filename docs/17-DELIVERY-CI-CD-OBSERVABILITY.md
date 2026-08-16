@@ -8,7 +8,7 @@
 - Signed tags and release artifacts.
 - Reproducible sidecar acquisition with checksums.
 
-G01 CI pins checkout, Python, Node and Rust toolchain actions to immutable commit SHAs. Python installs with required hashes, npm uses `npm ci`, Cargo uses `--locked`, clippy denies warnings, and Windows compiles Tauri with `--no-bundle`. A dependency update must change its manifest and lock together and repeat licence/provenance review.
+G01 CI pins checkout, Python, Node and Rust toolchain actions to immutable commit SHAs. Python installs with required hashes, npm uses `npm ci`, Cargo uses `--locked`, clippy denies warnings, and Windows compiles Tauri with `--no-bundle`. CI also builds the isolated `test-runtime` feature and launches two processes to prove the secondary cannot reach setup. The production Tauri build excludes that feature. A dependency update must change its manifest and lock together and repeat licence/provenance review.
 
 ## Desktop packaging
 

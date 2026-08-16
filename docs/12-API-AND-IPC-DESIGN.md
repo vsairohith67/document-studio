@@ -11,6 +11,7 @@ The React app may call only named Tauri commands with serializable typed payload
 - `files_inspect`
 - `jobs_create`
 - `jobs_cancel`
+- `jobs_resolve_interrupted`
 - `jobs_get`
 - `history_list`
 - `history_delete`
@@ -23,6 +24,8 @@ These are the exact G01 Tauri command names. The frontend groups them behind typ
 G01 emits one advisory event, `document-studio-job-progress-v1`. It contains schema version 1, a monotonic per-job sequence, UTC time, job and operation IDs, state, stage, completed/total units, unit, safe message code/text and whether cancellation is currently available. It contains no full path, document content or secret. Events are throttled during byte copying and always emitted for state/stage changes.
 
 SQLite-backed `jobs_get` and `history_list` are authoritative. The client ignores duplicate/stale sequences and calls `jobs_get` after a sequence gap or reload.
+
+`jobs_resolve_interrupted` performs one evidence-based, non-resuming reconciliation. It completes only already-published output with matching durable evidence, otherwise fails after exact cleanup, and remains interrupted on cleanup failure. It rejects ambiguous `1.0.0` records with `LEGACY_CLEANUP_UNPROVEN`. `history_delete` exposes the same safe error instead of deleting a mixed request partially. Settings IPC permits retention only at `application/history.retention_days`.
 
 ## Future cloud API
 

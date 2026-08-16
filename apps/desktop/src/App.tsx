@@ -38,6 +38,7 @@ export default function App() {
   const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [history, setHistory] = useState<JobRecord[]>([]);
   const [dependencies, setDependencies] = useState<DependencyDiagnostic[]>([]);
+  const [retentionDays, setRetentionDays] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -68,12 +69,14 @@ export default function App() {
       api.system.status(),
       api.dependencies.scan(),
       api.history.list({ limit: 8 }),
+      api.settings.get({ scope: 'application', key: 'history.retention_days' }),
     ])
-      .then(([status, dependencyStatus, jobHistory]) => {
+      .then(([status, dependencyStatus, jobHistory, retention]) => {
         if (!active) return;
         setSystem(status);
         setDependencies(dependencyStatus);
         setHistory(jobHistory);
+        setRetentionDays(typeof retention?.value === 'number' ? retention.value : null);
       })
       .catch((reason: unknown) => active && setError(operationErrorMessage(reason)));
     void api.jobs.onProgress((event) => {
@@ -133,6 +136,16 @@ export default function App() {
     if (!job) return;
     try {
       await api.jobs.cancel({ jobId: job.id });
+    } catch (reason) {
+      setError(operationErrorMessage(reason));
+    }
+  };
+
+  const resolveInterruptedJob = async (jobId: string) => {
+    setError(null);
+    try {
+      await api.jobs.resolveInterrupted({ jobId });
+      await refreshHistory();
     } catch (reason) {
       setError(operationErrorMessage(reason));
     }
@@ -284,20 +297,39 @@ export default function App() {
               <p className="eyebrow">METADATA ONLY</p>
               <h2 id="history-heading">Recent jobs</h2>
             </div>
-            <span>30-day default history</span>
+            <span>{retentionDays == null ? 'Loading retention policy' : `${retentionDays}-day metadata retention`}</span>
           </div>
           <div className="history-list">
             {history.length === 0 && <p className="empty-state">Completed, failed, and cancelled jobs will appear here.</p>}
-            {history.map((item) => (
+            {history.map((item) => {
+              const legacyCleanupUnproven = item.errors.some(
+                (itemError) => itemError.code === 'LEGACY_CLEANUP_UNPROVEN',
+              );
+              return (
               <article className="history-row" key={item.id}>
                 <div>
                   <strong>{shortPath(item.inputs[0]?.displayName)}</strong>
                   <small>{item.operationId} · {new Date(item.updatedAt).toLocaleString()}</small>
+                  {legacyCleanupUnproven && (
+                    <small className="cleanup-warning" role="status">
+                      Legacy destination cleanup is unproven. Inspect the destination manually; history is preserved.
+                    </small>
+                  )}
                 </div>
                 <span className={`job-state state-${item.state}`}>{item.state}</span>
                 <span>{item.outputs[0]?.sizeBytes == null ? '—' : formatBytes(item.outputs[0].sizeBytes)}</span>
+                {item.state === 'interrupted' && !legacyCleanupUnproven && (
+                  <button
+                    type="button"
+                    className="secondary compact"
+                    onClick={() => void resolveInterruptedJob(item.id)}
+                  >
+                    Resolve safely
+                  </button>
+                )}
               </article>
-            ))}
+              );
+            })}
           </div>
         </section>
       </main>

@@ -10,7 +10,7 @@ Each active job may use a private, UUID-scoped workspace below the application d
 
 SQLite stores metadata only. It may store allow-listed paths, sizes, timestamps, safe SHA-256 fingerprints, operation and lifecycle state, dependency health, settings, sanitized errors, and cleanup/publication evidence. It must not store document bodies, page images, extracted text, thumbnails, passwords, keys, prompts, clipboard content, embeddings, or arbitrary binary/log payloads.
 
-Terminal job metadata is retained for 30 days by default and can be deleted immediately by the user. Temporary document data is removed after success, failure, cancellation, or recovery. A cleanup failure keeps the job recoverable instead of falsely claiming a clean terminal state.
+Terminal job metadata is retained for 30 days by default and can normally be deleted immediately by the user. ADR-007 quarantines pre-fix legacy records whose destination cleanup is unproven. Temporary document data is removed after success, failure, cancellation, or recovery. A cleanup failure keeps the job recoverable instead of falsely claiming a clean terminal state.
 
 G01 implements no accounts, Google Drive, OneDrive, SharePoint, cloud worker, hosted processing, or external AI persistence. A future provider requires a separate ADR covering explicit authorization, the provider-owned persistence model, metadata allow-list, retention deadline, deletion evidence, consent revocation, offline behavior, and error recovery.
 

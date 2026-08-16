@@ -31,11 +31,12 @@ The foundation has executable TypeScript/JSON Schema, React/jsdom/axe and Rust u
 
 - valid and invalid contracts plus cross-language golden fixtures;
 - every legal lifecycle edge and rejected skipped/backward/terminal transitions;
-- fresh/idempotent/failed/checksum-mismatch migrations, constraints and retention;
+- fresh/idempotent/failed/checksum-mismatch migrations, application-only retention validation, both sides of injected cutoffs, zero retention, legacy quarantine and the 1,000-row maintenance bound;
 - success, zero-byte files, chunked progress, queued/running cancellation and too-late cancellation semantics;
 - traversal, unsafe Windows names, junction/reparse escape and hard-link input/output collisions;
-- existing-output suffixing, collision races, write failures and verification mismatches;
-- running/publishing crash recovery and false-success prevention;
+- reservation before creation, guarded file-identity activation before bytes, deterministic pre-existing-file/create-new collisions, reservation-release failure, both reservation/activation crash windows, termination during copy, exact deletion failure/restart cleanup, neighboring-file preservation, existing-output suffixing, 1,000-attempt collision exhaustion, write failures and verification mismatches;
+- every nonterminal startup state including inspecting/preflight/ready, worker-spawn failure, no-token cancellation fallback, explicit legacy `1.0.0` verifying/publishing/interrupted compatibility boundaries, publishing evidence and false-success prevention;
+- a Windows two-process smoke proving the secondary exits before runtime/database setup;
 - metadata, event, error and dependency-diagnostic content/secret leakage;
 - typed command names/payloads, progress sequence-gap reconciliation, neutral UI copy, token application, keyboard controls and axe smoke.
 

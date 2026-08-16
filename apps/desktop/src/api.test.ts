@@ -51,6 +51,7 @@ describe('typed Tauri API', () => {
     await api.files.inspect(request.inputPaths);
     await api.jobs.create(request);
     await api.jobs.cancel({ jobId: job.id });
+    await api.jobs.resolveInterrupted({ jobId: job.id });
     await api.history.list({ limit: 8 });
 
     expect(native.invoke).toHaveBeenNthCalledWith(1, 'files_inspect', {
@@ -60,7 +61,10 @@ describe('typed Tauri API', () => {
     expect(native.invoke).toHaveBeenNthCalledWith(3, 'jobs_cancel', {
       request: { jobId: job.id },
     });
-    expect(native.invoke).toHaveBeenNthCalledWith(4, 'history_list', {
+    expect(native.invoke).toHaveBeenNthCalledWith(4, 'jobs_resolve_interrupted', {
+      request: { jobId: job.id },
+    });
+    expect(native.invoke).toHaveBeenNthCalledWith(5, 'history_list', {
       request: { limit: 8 },
     });
   });

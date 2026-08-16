@@ -17,9 +17,11 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   cancel: vi.fn(),
   get: vi.fn(),
+  resolveInterrupted: vi.fn(),
   list: vi.fn(),
   scan: vi.fn(),
   status: vi.fn(),
+  settingGet: vi.fn(),
   progressHandler: undefined as ((event: ProgressEvent) => void) | undefined,
 }));
 
@@ -38,6 +40,7 @@ vi.mock('./api', async (importOriginal) => {
         create: mocks.create,
         cancel: mocks.cancel,
         get: mocks.get,
+        resolveInterrupted: mocks.resolveInterrupted,
         onProgress: vi.fn(async (handler: (event: ProgressEvent) => void) => {
           mocks.progressHandler = handler;
           return vi.fn();
@@ -45,6 +48,7 @@ vi.mock('./api', async (importOriginal) => {
       },
       history: { list: mocks.list },
       dependencies: { scan: mocks.scan },
+      settings: { get: mocks.settingGet },
     },
   };
 });
@@ -92,7 +96,7 @@ function makeJob(state: JobRecord['state'] = 'queued'): JobRecord {
   return {
     id: '9e515769-e47b-40dd-a334-ddc661a78d45',
     operationId: 'diagnostic.copy',
-    operationVersion: '1.0.0',
+    operationVersion: '1.0.1',
     state,
     stage: state === 'completed' ? 'cleanup' : 'inspect',
     sequence: 1,
@@ -165,12 +169,21 @@ describe('G01 foundation screen', () => {
     mocks.create.mockResolvedValue(makeJob());
     mocks.cancel.mockResolvedValue({ outcome: 'requested' });
     mocks.get.mockResolvedValue(makeJob('completed'));
+    mocks.resolveInterrupted.mockResolvedValue(makeJob('failed'));
+    mocks.settingGet.mockResolvedValue({
+      scope: 'application',
+      key: 'history.retention_days',
+      value: 45,
+      version: 1,
+      updatedAt: '2026-08-16T12:00:00Z',
+    });
   });
 
   it('uses neutral product copy and has no automated accessibility violations', async () => {
     const { container } = render(<App />);
 
     expect(await screen.findByText('Offline by default')).toBeTruthy();
+    expect(screen.getByText('45-day metadata retention')).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Document Studio is ready for local diagnostics' })).toBeTruthy();
     const retiredPersonalName = new RegExp(['Ro', 'hith'].join(''), 'i');
     expect(screen.queryByText(retiredPersonalName)).toBeNull();
@@ -208,5 +221,32 @@ describe('G01 foundation screen', () => {
 
     await act(async () => mocks.progressHandler?.(event('completed', 3)));
     expect(await screen.findByText('Verified output: report-copy.pdf')).toBeTruthy();
+  });
+
+  it('warns for ambiguous legacy history and never offers a false cleanup action', async () => {
+    const legacy = makeJob('failed');
+    legacy.operationVersion = '1.0.0';
+    legacy.errors = [{
+      code: 'LEGACY_CLEANUP_UNPROVEN',
+      title: 'Legacy destination cleanup is unproven',
+      detail: 'Inspect the affected destination manually; unknown files are preserved.',
+      stage: 'recovery',
+      retryable: false,
+    }];
+    mocks.list.mockResolvedValue([legacy]);
+
+    render(<App />);
+    expect(await screen.findByText(/Legacy destination cleanup is unproven/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Resolve safely' })).toBeNull();
+  });
+
+  it('offers evidence-based resolution only for non-legacy interrupted jobs', async () => {
+    const user = userEvent.setup();
+    const interrupted = makeJob('interrupted');
+    mocks.list.mockResolvedValue([interrupted]);
+
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Resolve safely' }));
+    expect(mocks.resolveInterrupted).toHaveBeenCalledWith({ jobId: interrupted.id });
   });
 });
