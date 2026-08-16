@@ -17,12 +17,28 @@ SQLite stores metadata only. Documents remain in user-selected locations or shor
 - `settings`: scoped key/value store with migration version.
 - `signature_identities`: references to protected local assets/certificates; no plaintext secrets.
 
+### G01 implemented schema
+
+The G01 database is opened by one blocking Rust repository worker. It enables foreign keys, WAL journaling, `synchronous=FULL`, and a bounded busy timeout. Ordered migrations are checksummed and applied in transactions. An unknown or changed migration fails startup closed.
+
+- `schema_migrations`: applied version, name, checksum and UTC time.
+- `settings`: allow-listed scope/key JSON with optimistic versioning.
+- `dependencies`: built-in or deferred dependency health and safe diagnostics.
+- `presets`: operation-scoped metadata and settings only.
+- `jobs`, `job_inputs`, `job_outputs`, `job_stage_runs`, `job_errors`: durable lifecycle, progress, paths, identities, hashes, publication evidence and sanitized errors.
+- `workflows`, `workflow_steps`, `workflow_runs`, `workflow_run_jobs`: metadata foundation only; G01 does not execute workflows.
+
+Constraints restrict states, stages, statuses, non-negative units and ordinals, JSON validity and SHA-256 length. Indexed fields include state/update time, operation/create time, retention time, dependency status and workflow-run status. No migration contains a BLOB column.
+
+Job creation, compare-and-set state transitions, publication evidence, audit updates and retention deletion use explicit transactions. Filesystem publication is reconciled with recorded evidence because SQLite and the filesystem cannot share one transaction.
+
 ## Retention
 
-- Job history is configurable.
+- Terminal job history defaults to 30 days and can be deleted immediately.
 - Temporary workspaces are removed after terminal states and reconciled at startup.
-- Extracted text/embeddings are opt-in and scoped to AI features.
-- Passwords/API keys/certificate secrets are stored in the OS credential store, referenced by opaque IDs.
+- Interrupted records remain until recovery, retry or explicit history deletion.
+- G01 stores no document bodies, extracted text, page images, thumbnails, embeddings, passwords, keys, prompts, clipboard data, arbitrary logs or binary payloads.
+- A future secret may be referenced by an opaque credential-store ID, but G01 stores no document password.
 
 ## Future cloud storage
 

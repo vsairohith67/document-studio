@@ -1,0 +1,10 @@
+{
+  "name": "@document-studio/tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./document-studio.tokens.json",
+    "./document-studio.tokens.json": "./document-studio.tokens.json"
+  }
+}

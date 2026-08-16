@@ -2,15 +2,22 @@
   "name": "document-studio",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["apps/*", "packages/*"],
+  "packageManager": "npm@11.17.0",
+  "workspaces": [
+    "apps/desktop",
+    "packages/contracts",
+    "packages/tokens"
+  ],
   "scripts": {
     "prototype": "python -m http.server 4173 -d apps/prototype",
     "validate": "python scripts/validate_repo.py",
     "check:links": "python scripts/check_links.py",
-    "typecheck": "npm --workspace apps/desktop run typecheck",
-    "test": "npm --workspace apps/desktop test"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm --workspace @document-studio/desktop run build"
   },
   "engines": {
-    "node": ">=22"
+    "node": "24.19.0",
+    "npm": "11.17.0"
   }
 }

@@ -3,66 +3,119 @@
   "$id": "https://document.studio/schemas/job.schema.json",
   "title": "Document Studio Job",
   "type": "object",
+  "additionalProperties": false,
   "required": [
-    "id",
-    "operationId",
-    "state",
-    "createdAt",
-    "inputs",
-    "settings"
+    "id", "operationId", "operationVersion", "state", "stage", "sequence",
+    "progress", "destinationDirectory", "requestedOutputName", "resolvedOutputName",
+    "cancellationRequestedAt", "createdAt", "updatedAt", "finishedAt", "version",
+    "inputs", "outputs", "errors"
   ],
   "properties": {
-    "id": {
-      "type": "string",
-      "format": "uuid"
-    },
-    "operationId": {
-      "type": "string"
-    },
-    "state": {
+    "id": { "$ref": "#/$defs/uuid" },
+    "operationId": { "$ref": "#/$defs/operationId" },
+    "operationVersion": { "$ref": "#/$defs/semanticVersion" },
+    "state": { "$ref": "#/$defs/jobState" },
+    "stage": { "oneOf": [{ "$ref": "#/$defs/stage" }, { "type": "null" }] },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "progress": { "$ref": "#/$defs/progress" },
+    "destinationDirectory": { "$ref": "#/$defs/path" },
+    "requestedOutputName": { "$ref": "#/$defs/fileName" },
+    "resolvedOutputName": { "oneOf": [{ "$ref": "#/$defs/fileName" }, { "type": "null" }] },
+    "cancellationRequestedAt": { "$ref": "#/$defs/nullableDateTime" },
+    "createdAt": { "$ref": "#/$defs/dateTime" },
+    "updatedAt": { "$ref": "#/$defs/dateTime" },
+    "finishedAt": { "$ref": "#/$defs/nullableDateTime" },
+    "version": { "type": "integer", "minimum": 0 },
+    "inputs": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/jobInput" } },
+    "outputs": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/jobOutput" } },
+    "errors": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/operationError" } }
+  },
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "dateTime": { "type": "string", "format": "date-time" },
+    "nullableDateTime": { "oneOf": [{ "$ref": "#/$defs/dateTime" }, { "type": "null" }] },
+    "semanticVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$", "maxLength": 32 },
+    "operationId": { "type": "string", "pattern": "^[a-z][a-z0-9.-]{2,63}$" },
+    "path": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "fileName": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "jobState": {
       "enum": [
-        "queued",
-        "inspecting",
-        "preflight",
-        "ready",
-        "running",
-        "verifying",
-        "publishing",
-        "completed",
-        "failed",
-        "cancelled",
-        "interrupted"
+        "queued", "inspecting", "preflight", "ready", "running", "verifying",
+        "publishing", "completed", "failed", "cancelled", "interrupted"
       ]
-    },
-    "createdAt": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "progress": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 1
     },
     "stage": {
-      "type": "string"
-    },
-    "inputs": {
-      "type": "array"
-    },
-    "settings": {
-      "type": "object"
-    },
-    "output": {
-      "type": [
-        "object",
-        "null"
+      "enum": [
+        "inspect", "preflight", "estimate", "plan", "execute", "verify",
+        "publish", "audit", "cleanup", "recovery"
       ]
     },
-    "error": {
-      "type": [
-        "object",
-        "null"
-      ]
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completedUnits", "totalUnits", "unit"],
+      "properties": {
+        "completedUnits": { "type": "integer", "minimum": 0 },
+        "totalUnits": { "type": "integer", "minimum": 0 },
+        "unit": { "enum": ["bytes", "items", "steps"] }
+      }
+    },
+    "jobInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal", "displayName", "sourcePath", "canonicalPath", "fileIdentity",
+        "sizeBytes", "modifiedAt", "mimeType", "sha256", "passwordReference"
+      ],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 0 },
+        "displayName": { "$ref": "#/$defs/fileName" },
+        "sourcePath": { "$ref": "#/$defs/path" },
+        "canonicalPath": { "$ref": "#/$defs/path" },
+        "fileIdentity": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "modifiedAt": { "$ref": "#/$defs/dateTime" },
+        "mimeType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "passwordReference": { "type": ["string", "null"], "maxLength": 255 }
+      }
+    },
+    "jobOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal", "requestedName", "resolvedName", "stagingPath", "partialPath",
+        "finalPath", "sizeBytes", "mimeType", "sha256", "status", "verifiedAt", "publishedAt"
+      ],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 0 },
+        "requestedName": { "$ref": "#/$defs/fileName" },
+        "resolvedName": { "oneOf": [{ "$ref": "#/$defs/fileName" }, { "type": "null" }] },
+        "stagingPath": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] },
+        "partialPath": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] },
+        "finalPath": { "oneOf": [{ "$ref": "#/$defs/path" }, { "type": "null" }] },
+        "sizeBytes": { "type": ["integer", "null"], "minimum": 0 },
+        "mimeType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "sha256": { "oneOf": [{ "$ref": "#/$defs/sha256" }, { "type": "null" }] },
+        "status": { "enum": ["planned", "staged", "verified", "publishing", "published"] },
+        "verifiedAt": { "$ref": "#/$defs/nullableDateTime" },
+        "publishedAt": { "$ref": "#/$defs/nullableDateTime" }
+      }
+    },
+    "operationError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "title", "detail", "stage", "retryable"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,63}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "detail": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "stage": { "$ref": "#/$defs/stage" },
+        "retryable": { "type": "boolean" },
+        "inputIndex": { "type": "integer", "minimum": 0 },
+        "helpId": { "type": "string", "pattern": "^[a-z0-9-]{1,64}$" }
+      }
     }
   }
 }

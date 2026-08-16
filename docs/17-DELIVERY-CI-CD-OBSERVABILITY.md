@@ -8,6 +8,8 @@
 - Signed tags and release artifacts.
 - Reproducible sidecar acquisition with checksums.
 
+G01 CI pins checkout, Python, Node and Rust toolchain actions to immutable commit SHAs. Python installs with required hashes, npm uses `npm ci`, Cargo uses `--locked`, clippy denies warnings, and Windows compiles Tauri with `--no-bundle`. A dependency update must change its manifest and lock together and repeat licence/provenance review.
+
 ## Desktop packaging
 
 - Windows MSI/NSIS first.
@@ -22,6 +24,8 @@
 - No document text, password, key or prompt body by default.
 - User-controlled diagnostics export with redaction.
 - Local benchmark history to detect regressions.
+
+G01 progress events and SQLite history use allow-listed fields rather than raw logs. Errors expose a typed safe code, title and detail. Dependency diagnostics report built-in or deferred state only and never install or download an engine. The implementation log records commands, exits and limitations without copying document contents or secrets.
 
 ## Future cloud observability
 
