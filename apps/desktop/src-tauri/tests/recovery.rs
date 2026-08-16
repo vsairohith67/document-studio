@@ -6,7 +6,7 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
 use document_studio_lib::app_state::AppState;
-use document_studio_lib::contracts::{JobState, JobsCreateRequest, OperationStage};
+use document_studio_lib::contracts::{JobRecord, JobState, JobsCreateRequest, OperationStage};
 use document_studio_lib::database::{Database, DatabaseError};
 use document_studio_lib::diagnostic_copy::DiagnosticCopyService;
 use document_studio_lib::publication::{hash_file, partial_ownership_result_code};
@@ -40,6 +40,10 @@ fn create_job(
             requested_output_name: "recovery-copy.bin".to_owned(),
         })
         .unwrap()
+}
+
+fn job_destination(job: &JobRecord) -> &Path {
+    Path::new(&job.destination_directory)
 }
 
 fn advance(
@@ -210,8 +214,8 @@ fn reserved_but_unactivated_partial_path_never_authorizes_deletion() {
             "2026-08-16T12:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-77777777-7777-4777-8777-777777777777.partial",
         job.id
     ));
@@ -273,8 +277,8 @@ fn activated_identity_mismatch_preserves_preexisting_partial_after_release_failu
             "2026-08-16T12:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-99999999-9999-4999-8999-999999999999.partial",
         job.id
     ));
@@ -289,10 +293,10 @@ fn activated_identity_mismatch_preserves_preexisting_partial_after_release_failu
             &hash,
         )
         .unwrap();
-    let guard_identity_source = destination.path().join("owned-identity-source.tmp");
+    let guard_identity_source = job_destination(&job).join("owned-identity-source.tmp");
     fs::write(&guard_identity_source, b"").unwrap();
     let ownership_result_code = partial_ownership_result_code(
-        destination.path(),
+        job_destination(&job),
         &job.id,
         &partial_path,
         file_identity(&guard_identity_source).unwrap(),
@@ -350,8 +354,8 @@ fn publishing_job_completes_only_when_recorded_final_hash_and_size_match() {
             "2026-08-16T12:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-44444444-4444-4444-8444-444444444444.partial",
         job.id
     ));
@@ -429,8 +433,8 @@ fn publishing_mismatch_fails_after_cleanup_and_never_deletes_unknown_final_file(
             "2026-08-16T12:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-55555555-5555-4555-8555-555555555555.partial",
         job.id
     ));
@@ -509,7 +513,7 @@ fn legacy_verifying_with_null_partial_is_quarantined_and_unknown_files_survive()
         OperationStage::Verify,
     )
     .unwrap();
-    let unknown = destination.path().join(format!(
+    let unknown = job_destination(&job).join(format!(
         ".document-studio-{}-11111111-1111-4111-8111-111111111111.partial",
         job.id
     ));
@@ -547,7 +551,7 @@ fn legacy_publishing_and_interrupted_with_null_partial_remain_unresolved() {
                 [legacy_state.as_str(), &job.id],
             )
             .unwrap();
-        let unknown = destination.path().join(format!(
+        let unknown = job_destination(&job).join(format!(
             ".document-studio-{}-88888888-8888-4888-8888-888888888888.partial",
             job.id
         ));
@@ -630,7 +634,7 @@ fn legacy_terminal_states_keep_their_outcome_and_receive_one_warning() {
                 [terminal.as_str(), &job.id],
             )
             .unwrap();
-        let neighbor = destination.path().join(format!("neighbor-{index}.bin"));
+        let neighbor = job_destination(&job).join(format!("neighbor-{index}.bin"));
         fs::write(&neighbor, b"preserve").unwrap();
 
         reconcile_startup(&state).unwrap();
@@ -679,8 +683,8 @@ fn restart_removes_the_exact_identity_activated_partial_before_any_bytes() {
             "2026-08-16T12:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-22222222-2222-4222-8222-222222222222.partial",
         job.id
     ));
@@ -701,7 +705,7 @@ fn restart_removes_the_exact_identity_activated_partial_before_any_bytes() {
         .open(&partial_path)
         .unwrap();
     activate_partial(&state, &job.id, &partial_path);
-    let neighbor = destination.path().join("neighbor.bin");
+    let neighbor = job_destination(&job).join("neighbor.bin");
     fs::write(&neighbor, b"preserve").unwrap();
 
     let report = reconcile_startup(&state).unwrap();
@@ -743,8 +747,8 @@ fn restart_keeps_exact_ownership_when_partial_deletion_fails_then_retries_safely
             "2026-08-16T12:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-33333333-3333-4333-8333-333333333333.partial",
         job.id
     ));
@@ -828,8 +832,8 @@ fn no_token_cancellation_never_terminalizes_when_partial_deletion_fails() {
             [&job.id],
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let final_path = job_destination(&job).join("recovery-copy.bin");
+    let partial_path = job_destination(&job).join(format!(
         ".document-studio-{}-66666666-6666-4666-8666-666666666666.partial",
         job.id
     ));
