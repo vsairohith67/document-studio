@@ -17,12 +17,29 @@ SQLite stores metadata only. Documents remain in user-selected locations or shor
 - `settings`: scoped key/value store with migration version.
 - `signature_identities`: references to protected local assets/certificates; no plaintext secrets.
 
+### G01 implemented schema
+
+The G01 database is opened by one blocking Rust repository worker. It enables foreign keys, WAL journaling, `synchronous=FULL`, and a bounded busy timeout. Ordered migrations are checksummed and applied in transactions. An unknown or changed migration fails startup closed.
+
+- `schema_migrations`: applied version, name, checksum and UTC time.
+- `settings`: allow-listed scope/key JSON with optimistic versioning.
+- `dependencies`: built-in or deferred dependency health and safe diagnostics.
+- `presets`: operation-scoped metadata and settings only.
+- `jobs`, `job_inputs`, `job_outputs`, `job_stage_runs`, `job_errors`: durable lifecycle, progress, paths, identities, hashes, publication evidence and sanitized errors.
+- `workflows`, `workflow_steps`, `workflow_runs`, `workflow_run_jobs`: metadata foundation only; G01 does not execute workflows.
+
+Constraints restrict states, stages, statuses, non-negative units and ordinals, JSON validity and SHA-256 length. Indexed fields include state/update time, operation/create time, retention time, dependency status and workflow-run status. No migration contains a BLOB column.
+
+Job creation, compare-and-set state transitions, exact publication-partial reservation/release, publication evidence, audit updates and retention deletion use explicit transactions. A `partial_path` row is only a reservation. After guarded creation, `job_stage_runs.safe_result_code` stores a path-UUID-and-Windows-file-identity activation token; deletion requires both the current exact path and the matching opened file identity. Filesystem publication is reconciled with recorded evidence because SQLite and the filesystem cannot share one transaction. No migration was added for the acceptance remediation: schema-v3 already has `jobs.operation_version`, `job_outputs.partial_path`, `job_errors`, and `job_stage_runs.safe_result_code`.
+
 ## Retention
 
-- Job history is configurable.
+- Retention is application-only: `application/history.retention_days` is accepted and `operation/history.retention_days` is rejected. The integer range is `0..=365`, with 30 initialized when missing.
+- Startup runs recovery first, then deletes at most 1,000 oldest eligible terminal records older than one injected UTC cutoff. A successful retention-setting update runs the same bounded maintenance path.
 - Temporary workspaces are removed after terminal states and reconciled at startup.
-- Extracted text/embeddings are opt-in and scoped to AI features.
-- Passwords/API keys/certificate secrets are stored in the OS credential store, referenced by opaque IDs.
+- Active/interrupted records are never purged. Ambiguous legacy `diagnostic.copy` `1.0.0` records carry `LEGACY_CLEANUP_UNPROVEN` and are rejected by both automatic retention and all-or-nothing `history_delete` preflight. Only pre-publication legacy work with durable `LEGACY_CLEANUP_PROVEN` can re-enter ordinary retention.
+- G01 stores no document bodies, extracted text, page images, thumbnails, embeddings, passwords, keys, prompts, clipboard data, arbitrary logs or binary payloads.
+- A future secret may be referenced by an opaque credential-store ID, but G01 stores no document password.
 
 ## Future cloud storage
 

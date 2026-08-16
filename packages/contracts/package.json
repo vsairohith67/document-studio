@@ -1,0 +1,23 @@
+{
+  "name": "@document-studio/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./job.schema.json": "./job.schema.json",
+    "./operation.schema.json": "./operation.schema.json",
+    "./ipc.schema.json": "./ipc.schema.json",
+    "./fixtures/foundation-contracts.json": "./fixtures/foundation-contracts.json"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "ajv": "~8.20.0",
+    "ajv-formats": "~3.0.1",
+    "typescript": "~5.8.0",
+    "vitest": "~4.1.10"
+  }
+}

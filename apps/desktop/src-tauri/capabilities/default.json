@@ -3,5 +3,8 @@
   "identifier": "default",
   "description": "Minimum permissions for the Document Studio main window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
 }

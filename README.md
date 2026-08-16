@@ -2,28 +2,42 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository is a **Codex-ready architecture and implementation starter**. It contains the product blueprint, feature catalogue, UI/UX handoff, design tokens, architecture diagrams, a working static prototype, operation contracts, test strategy, model registry, dependency register, Notion import pack, and the first implementation prompts.
+This repository contains the Document Studio product specifications and the implemented Windows Phase 0 foundation. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, and a verified local `diagnostic.copy` reference operation.
 
-## Re-audit status
+## G01 foundation status
 
-This package replaces the older working title and closes the documentation gaps found during the 22 July 2026 review:
+The foundation intentionally proves the safety architecture before any production document engine is adopted:
 
-- The canonical product name is **Document Studio** everywhere.
-- The platform strategy is explicit: Windows desktop first, macOS second, optional web third, mobile capture fourth.
-- Desktop orchestration uses the Tauri Rust core; a Go service is reserved for the future cloud control plane rather than adding a second local runtime prematurely.
-- The feature catalogue contains **132 planned capabilities** in one complete edition.
-- The UI/UX system, Figma handoff, accessibility rules, performance budgets, security model, database schema, API contracts, Codex prompts, dependency/model registers, and import instructions are included.
-- Existing source research, prior PDF/DOCX reports, diagrams, prototype screenshots, and whiteboard exports are copied into the Notion import pack.
+- User documents remain in user-selected local locations or short-lived job workspaces.
+- SQLite stores allow-listed metadata only. `application/history.retention_days` defaults to 30, accepts 0–365, and drives bounded startup/runtime maintenance.
+- `diagnostic.copy` protocol `1.0.1` durably reserves each exact destination partial, activates a matching Windows file-identity proof before writing bytes, independently verifies it, and publishes without overwriting an existing file.
+- Startup deterministically resolves every nonterminal job without pretending to resume it. Ambiguous pre-fix `1.0.0` history is preserved with a manual-inspection warning.
+- Windows enforces one application instance before database or worker setup; cancellation ownership therefore remains process-local without cross-process leases.
+- The webview has typed commands and progress events, a native open-dialog permission, and no shell or general filesystem capability.
+- qpdf, PDF.js, OCR, Office, cloud, account and AI dependencies remain deferred.
 
 ## Start here
 
 1. Read `CODEX_START_HERE.md`.
 2. Read `docs/00-AUDIT-AND-COMPLETION.md` and `docs/01-PRODUCT-CHARTER.md`.
-3. Open `apps/prototype/index.html` to inspect the UI concept.
-4. Use `codex/prompts/01-foundation.md` for the first Codex run.
-5. Do not start feature work until Phase 0 acceptance tests pass.
-6. Read `docs/23-DEVELOPMENT-SETUP.md` for the target Windows toolchain and first build.
-7. Read `FINAL_RECHECK.md` for the verified completion state and remaining external actions.
+3. Read `docs/23-DEVELOPMENT-SETUP.md` for locked installation, test and launch commands.
+4. Read `docs/implementation-log/G01-foundation.md` for the actual Phase 0 evidence and known limits.
+5. Do not add a production PDF operation until G01 acceptance is complete.
+
+## Validate and run on Windows
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r scripts\requirements-validation.lock.txt
+npm ci --ignore-scripts
+.\.venv\Scripts\python.exe -B scripts\validate_repo.py
+.\.venv\Scripts\python.exe -B scripts\check_links.py
+npm run typecheck
+npm test
+cargo test --workspace --all-targets --locked
+npm --workspace @document-studio/desktop run tauri -- dev
+```
+
+The development window can copy a synthetic local file to a selected local folder. It is not a PDF editor and does not parse or render PDF content.
 
 ## Build philosophy
 
@@ -38,7 +52,7 @@ This package replaces the older working title and closes the documentation gaps 
 ## Package map
 
 - `docs/` - product, system, security, UX, testing and delivery documentation.
-- `apps/desktop/` - Tauri + React starter scaffold.
+- `apps/desktop/` - implemented Tauri + React Windows foundation.
 - `apps/prototype/` - browser-openable visual prototype.
 - `services/cloud-control-plane/` - optional future Go service skeleton.
 - `packages/contracts/` - JSON Schema and TypeScript operation contracts.
@@ -52,8 +66,8 @@ This package replaces the older working title and closes the documentation gaps 
 - `.github/`, `CONTRIBUTING.md`, `SECURITY.md` - repository workflow, issue/PR templates and security reporting.
 - `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md` - release history and dependency/model adoption gate.
 
-Version: `2.0.1-final-recheck`  
-Audit date: `22 July 2026`
+Foundation version: `0.1.0-g01`
+Implementation date: `16 August 2026`
 
 ## Goal Mode build workflow
 

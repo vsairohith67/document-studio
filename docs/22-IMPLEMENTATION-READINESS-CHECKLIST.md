@@ -29,15 +29,16 @@
 - [x] Codex prompts included.
 - [x] Dependency/model registers included.
 - [x] Validation scripts and CI skeleton included.
-- [ ] Create private GitHub repository and push this package.
+- [x] Create private GitHub repository and push the accepted baseline package.
 - [ ] Create/import live Notion knowledge base.
 - [ ] Create live Figma file from the handoff.
-- [ ] Run toolchain installation on the target Windows machine.
-- [ ] Execute Phase 0 prompt in Codex.
+- [x] Run and verify the Windows Tauri toolchain on the target machine.
+- [x] Complete the G01 Phase 0 interactive launch and screenshot evidence.
+- [ ] Commit the approved G01 implementation and prove final clean Git status.
 
 ## Proceed/no-proceed
 
-Proceed to Phase 0 only after the five unchecked environment/publication items are confirmed. The planning package itself is complete enough to start.
+The G01 implementation, locked checks, interactive Windows smoke and screenshot evidence are complete. Production PDF operations remain blocked until the G01 commit and clean-status review are approved and completed. Notion and Figma publication are separate external activities and are not Phase 0 runtime dependencies.
 
 ## Final local recheck
 

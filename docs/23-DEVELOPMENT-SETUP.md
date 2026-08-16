@@ -13,12 +13,14 @@ This is the target-machine runbook for the Windows-first Phase 0 build. It inten
 
 Tauri requires Microsoft C++ Build Tools and Microsoft Edge WebView2 on Windows. In Visual Studio Build Tools, enable **Desktop development with C++**. WebView2 is normally already present on current Windows 10/11 systems. MSI packaging may also require the Windows VBSCRIPT optional feature.
 
-Install the remaining tools from an elevated PowerShell window:
+Install the remaining tools only when they are missing and after reviewing the exact command. G01 was accepted with Node 24.19.0, npm 11.17.0, Rust/Cargo 1.97.1 on `stable-x86_64-pc-windows-msvc`, and Python 3.12.10. The repository records these versions in `.node-version`, `.python-version`, `rust-toolchain.toml` and `package.json`.
+
+Example bootstrap commands for a new machine are:
 
 ```powershell
 winget install --id Git.Git -e
 winget install --id Rustlang.Rustup -e
-winget install --id OpenJS.NodeJS.LTS -e
+winget install --id OpenJS.NodeJS -e
 winget install --id Python.Python.3.12 -e
 rustup default stable-msvc
 ```
@@ -34,20 +36,28 @@ cargo --version
 python --version
 ```
 
-## 2. Clone and validate the planning repository
+## 2. Clone and validate the G01 repository
 
 ```powershell
 git clone <PRIVATE_REPOSITORY_URL> document-studio
 cd document-studio
-python scripts/validate_repo.py
-python scripts/check_links.py
-npm install
+.\.venv\Scripts\python.exe -m pip install --require-hashes --only-binary=:all: -r scripts\requirements-validation.lock.txt
+npm ci --ignore-scripts
+.\.venv\Scripts\python.exe -B scripts\validate_repo.py
+.\.venv\Scripts\python.exe -B scripts\check_links.py
 npm run typecheck
-cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-npm --workspace apps/desktop run tauri dev
+npm test
+npm run build
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+npm --workspace @document-studio/desktop run tauri -- build --no-bundle
+npm --workspace @document-studio/desktop run tauri -- dev
 ```
 
-The first successful checkpoint is the starter window plus the `system_status` Tauri command. Do not add PDF engines until this baseline builds and tests cleanly.
+The launched foundation window should show neutral Document Studio copy, offline status, dependency diagnostics, recent metadata-only history, a disabled viewer placeholder and the `diagnostic.copy` workflow. Test only with a synthetic file. Do not add PDF engines until this entire baseline builds and tests cleanly.
+
+`pip-tools==7.6.0` is needed only when regenerating the Python lock. On the accepted machine it required project-local `pip==26.1`; runtime validation needs only the committed hash-locked PyYAML package.
 
 ## 3. Core engine installation policy
 
@@ -61,7 +71,7 @@ Use a reviewed Windows binary or a reproducible build. Prefer dynamic linking an
 
 ### PDF.js
 
-Install through npm. Keep rendering in the UI process, but move expensive page inspection and document operations to workers/Rust commands. Use virtualized thumbnails and progressive page rendering.
+PDF.js is not installed in G01. Adopt and review it in G03 when the viewer is implemented. Keep rendering in the UI process, but move expensive inspection and document operations to workers or Rust commands.
 
 ## 4. Optional capability dependencies
 
@@ -98,7 +108,7 @@ No model is installed during the foundation. The model manager must require user
 ## 6. First-build evidence to retain
 
 - Exact Node/npm/Rust/Cargo versions.
-- Generated lockfiles and Cargo.lock.
+- Committed `package-lock.json`, `Cargo.lock` and hash-locked Python validation requirements.
 - `npm run typecheck` output.
 - `cargo test` output.
 - Tauri dev-launch screenshot.

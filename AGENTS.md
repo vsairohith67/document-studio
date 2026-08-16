@@ -19,12 +19,17 @@ This repository contains the canonical plan and starter scaffold for Document St
 Before marking work complete:
 
 ```bash
-python scripts/validate_repo.py
-python scripts/check_links.py
-cargo fmt --all -- --check
-cargo test --workspace
+.venv/Scripts/python.exe -m pip install --require-hashes --only-binary=:all: -r scripts/requirements-validation.lock.txt
+.venv/Scripts/python.exe -B scripts/validate_repo.py
+.venv/Scripts/python.exe -B scripts/check_links.py
+npm ci --ignore-scripts
 npm run typecheck
 npm test
+npm run build
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+npm --workspace @document-studio/desktop run tauri -- build --no-bundle
 ```
 
 Only run commands that are applicable to the slice and installed environment, but report all skipped checks explicitly.

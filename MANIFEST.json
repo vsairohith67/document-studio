@@ -1,7 +1,7 @@
 {
   "product": "Document Studio",
-  "version": "2.1.0-goal-mode",
-  "audit_date": "22 July 2026",
+  "version": "0.1.0-g01-foundation",
+  "audit_date": "16 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
@@ -12,13 +12,21 @@
   "notion_import": "notion-import/",
   "figma_handoff": "figma/",
   "validation_commands": [
-    "python scripts/validate_repo.py",
-    "python scripts/check_links.py",
-    "go test ./... (from services/cloud-control-plane)",
-    "node --check apps/prototype/app.js"
+    ".venv/Scripts/python.exe -B scripts/validate_repo.py",
+    ".venv/Scripts/python.exe -B scripts/check_links.py",
+    "npm ci --ignore-scripts",
+    "npm run typecheck",
+    "npm test",
+    "npm run build",
+    "cargo fmt --all -- --check",
+    "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "cargo test --workspace --all-targets --locked",
+    "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "Import-ready packages created; live Notion, Canvs, Figma, GitHub and Hugging Face publication requires connected accounts.",
+  "publication_status": "G01 is local and offline by default. No cloud provider, external AI, account, installer or external project service is implemented.",
+  "foundation_operation": "diagnostic.copy",
+  "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [
     "CONTRIBUTING.md",
     "SECURITY.md",

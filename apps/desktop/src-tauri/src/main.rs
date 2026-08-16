@@ -1,1 +1,3 @@
-fn main() { document_studio_lib::run(); }
+fn main() {
+    document_studio_lib::run();
+}
