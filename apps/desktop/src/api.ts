@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import type {
   CancelResponse,
@@ -29,8 +30,21 @@ export const api = {
   files: {
     inspect: (paths: string[]) =>
       invoke<FileInspection[]>('files_inspect', { request: { paths } }),
+    onPdfDrop: (handler: (paths: string[]) => void): Promise<UnlistenFn> =>
+      getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === 'drop') handler(event.payload.paths);
+      }),
   },
   dialogs: {
+    async selectPdfInputs(): Promise<string[]> {
+      const selected = await open({
+        directory: false,
+        multiple: true,
+        filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
+      });
+      if (Array.isArray(selected)) return selected;
+      return typeof selected === 'string' ? [selected] : [];
+    },
     async selectInput(): Promise<string | null> {
       const selected = await open({ directory: false, multiple: false });
       return typeof selected === 'string' ? selected : null;

@@ -41,3 +41,11 @@ The foundation has executable TypeScript/JSON Schema, React/jsdom/axe and Rust u
 - typed command names/payloads, progress sequence-gap reconciliation, neutral UI copy, token application, keyboard controls and axe smoke.
 
 Automated jsdom accessibility checks do not prove color contrast or native WebView behavior. Final G01 acceptance therefore also checks visible focus, keyboard order, 200% zoom, Windows high contrast and reduced motion in the launched Tauri application.
+
+## G02 regression matrix
+
+Generated local fixtures cover two and many inputs, semantic order, repeated input and hard-link alias, Unicode and paths longer than 260 characters, malformed/recovery-required/encrypted/zero-page files, busy or changed sources, destination/input aliases, no-overwrite collision, low space, corrupt staging, cleanup failure, and source immutability. No third-party PDF fixture is committed.
+
+Process tests prove the exact production argv without `--deterministic-id`, fixed zero-capability profile, filesystem and loopback denial, bounded 64 KiB stdout/stderr tails, one-process and 2 GiB limits, timeout, owned termination, and unrelated-process survival. Cancellation tests cover before work, after qpdf starts, destination-partial copy, and the atomic commit boundary. Recovery covers every relevant nonterminal state and neighboring-file preservation. Leakage checks inspect SQLite, progress, errors, and diagnostics.
+
+React tests cover add/drop, exact ordering, pointer and keyboard reorder, remove/focus behavior, validation, progress, cancellation boundary, success/failure/interrupted states, and axe. A real Tauri window is also visually inspected at 1280×800 using the production dependency diagnostic.

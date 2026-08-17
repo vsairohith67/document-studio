@@ -9,6 +9,7 @@ use document_studio_lib::app_state::AppState;
 use document_studio_lib::contracts::{JobRecord, JobState, JobsCreateRequest, OperationStage};
 use document_studio_lib::database::{Database, DatabaseError};
 use document_studio_lib::diagnostic_copy::DiagnosticCopyService;
+use document_studio_lib::pdf_merge::PdfMergeService;
 use document_studio_lib::publication::{hash_file, partial_ownership_result_code};
 use document_studio_lib::recovery::{
     cancel_without_worker, reconcile_startup, resolve_interrupted,
@@ -865,4 +866,107 @@ fn no_token_cancellation_never_terminalizes_when_partial_deletion_fails() {
         Some(partial_path.to_string_lossy().as_ref())
     );
     drop(lock);
+}
+
+#[test]
+fn pdf_merge_restarts_fail_every_prepublication_state_without_resuming() {
+    for target in [
+        JobState::Queued,
+        JobState::Inspecting,
+        JobState::Preflight,
+        JobState::Ready,
+        JobState::Running,
+        JobState::Verifying,
+    ] {
+        let (_app_data, state, _diagnostic) = setup();
+        let source = tempdir().unwrap();
+        let destination = tempdir().unwrap();
+        let first = support::write_pdf_fixture(source.path(), "first.pdf", "FIRST", 600);
+        let second = support::write_pdf_fixture(source.path(), "second.pdf", "SECOND", 601);
+        let job = PdfMergeService::new(state.clone())
+            .create_job(JobsCreateRequest {
+                operation_id: "pdf.merge".to_owned(),
+                input_paths: vec![
+                    first.to_string_lossy().into_owned(),
+                    second.to_string_lossy().into_owned(),
+                ],
+                destination_directory: destination.path().to_string_lossy().into_owned(),
+                requested_output_name: "recovered.pdf".to_owned(),
+            })
+            .unwrap();
+        let workspace = state.workspaces.create_job(&job.id).unwrap();
+        fs::write(workspace.inputs.join("source-0000.pdf"), b"owned temporary").unwrap();
+        if target != JobState::Queued {
+            advance(
+                &state,
+                &job.id,
+                JobState::Queued,
+                JobState::Inspecting,
+                OperationStage::Inspect,
+            )
+            .unwrap();
+        }
+        if matches!(
+            target,
+            JobState::Preflight | JobState::Ready | JobState::Running | JobState::Verifying
+        ) {
+            advance(
+                &state,
+                &job.id,
+                JobState::Inspecting,
+                JobState::Preflight,
+                OperationStage::Preflight,
+            )
+            .unwrap();
+        }
+        if matches!(
+            target,
+            JobState::Ready | JobState::Running | JobState::Verifying
+        ) {
+            advance(
+                &state,
+                &job.id,
+                JobState::Preflight,
+                JobState::Ready,
+                OperationStage::Plan,
+            )
+            .unwrap();
+        }
+        if matches!(target, JobState::Running | JobState::Verifying) {
+            advance(
+                &state,
+                &job.id,
+                JobState::Ready,
+                JobState::Running,
+                OperationStage::Execute,
+            )
+            .unwrap();
+        }
+        if target == JobState::Verifying {
+            advance(
+                &state,
+                &job.id,
+                JobState::Running,
+                JobState::Verifying,
+                OperationStage::Verify,
+            )
+            .unwrap();
+        }
+
+        let report = reconcile_startup(&state).unwrap();
+        assert_eq!(report.failed, 1, "PDF Merge restart state {target:?}");
+        let recovered = state.database().get_job(&job.id).unwrap().unwrap();
+        assert_eq!(
+            recovered.state,
+            JobState::Failed,
+            "PDF Merge state {target:?}"
+        );
+        assert!(!workspace.root.exists());
+        assert!(recovered.errors.iter().any(|error| error.code
+            == if target == JobState::Queued {
+                "JOB_WORKER_NOT_STARTED"
+            } else {
+                "JOB_INTERRUPTED_BY_RESTART"
+            }));
+    }
 }

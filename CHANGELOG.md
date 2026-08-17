@@ -2,6 +2,15 @@
 
 All notable planning-package and software releases are recorded here.
 
+## 0.2.0-g02-pdf-merge - unreleased
+
+- Added the `pdf.merge` 1.0.0 contract foundation for 2–128 ordered local PDFs without a database migration or Tauri capability expansion.
+- Bundled the signed qpdf 12.3.2 MSVC64 runtime with exact file hashes, provenance, Apache-2.0 license materials and reproducible acquisition/verification scripts.
+- Proved fixed-name zero-capability AppContainer launch, one-process/2 GiB/kill-on-close Job Object limits, filesystem and loopback denial, owned termination, and the exact production merge argument vector.
+- Added the production merge worker: per-ordinal snapshots, identity-deduplicated bounded preflight, direct sandboxed qpdf execution, bounded process output, owned cancellation, independent output verification, G01 publication, and non-resuming recovery.
+- Added the accessible Precision Paper PDF Merge workspace with multi-select/drop, exact ordering, keyboard and pointer reorder, remove, destination/name validation, truthful progress/cancellation, and verified results.
+- Added generated-fixture regression coverage and bounded Windows performance evidence. The planned approximately 1 GiB byte-volume corpus remains a pre-release benchmark follow-up.
+
 ## 0.1.0-g01-foundation - 2026-08-16
 
 - Remediated acceptance findings with `diagnostic.copy` protocol `1.0.1`, durable exact destination-partial reservation plus file-identity activation, bounded collision recovery, deterministic non-resuming startup recovery, application-only runtime retention, conservative `1.0.0` quarantine, and Windows single-instance enforcement.

@@ -25,3 +25,9 @@ A dependency may move from evaluation to adoption only after an ADR records:
 - pip-tools: BSD-3-Clause; lock-generation tooling only.
 
 No G01 dependency authorizes copying third-party product code. Full transitive notices and shipped-runtime review must be regenerated from the accepted lockfiles before a distributable installer is released.
+
+## G02 qpdf dependency notice
+
+Document Studio bundles qpdf 12.3.2 for the local PDF Merge operation under Apache-2.0. The runtime comes only from the signed official `qpdf-12.3.2-msvc64.zip` archive. The reviewed bundle retains the full Apache-2.0 license, qpdf's upstream license pages, signed checksum provenance, and an exact size/SHA-256 manifest for every shipped runtime file.
+
+The bundled Microsoft Visual C++ 14.44.35211 runtime DLLs are the unmodified redistributable files included with the signed upstream qpdf Windows archive. The exact filenames and hashes are recorded in `resources/qpdf/12.3.2/qpdf-manifest.json`. Release packaging must continue to carry the qpdf license materials and comply with the applicable Microsoft Visual Studio redistributable terms; removing or substituting these files requires a new dependency review.

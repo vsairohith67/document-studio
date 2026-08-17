@@ -2,11 +2,11 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository contains the Document Studio product specifications and the implemented Windows Phase 0 foundation. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, and a verified local `diagnostic.copy` reference operation.
+This repository contains the Document Studio product specifications, the accepted Windows Phase 0 foundation, and the implemented G02 PDF Merge vertical slice. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, the `diagnostic.copy` reference operation, and production `pdf.merge` 1.0.0.
 
-## G01 foundation status
+## G02 PDF Merge status
 
-The foundation intentionally proves the safety architecture before any production document engine is adopted:
+G01 proved the safety architecture before a production document engine was adopted. G02 now applies that architecture to a real local PDF operation:
 
 - User documents remain in user-selected local locations or short-lived job workspaces.
 - SQLite stores allow-listed metadata only. `application/history.retention_days` defaults to 30, accepts 0–365, and drives bounded startup/runtime maintenance.
@@ -14,15 +14,17 @@ The foundation intentionally proves the safety architecture before any productio
 - Startup deterministically resolves every nonterminal job without pretending to resume it. Ambiguous pre-fix `1.0.0` history is preserved with a manual-inspection warning.
 - Windows enforces one application instance before database or worker setup; cancellation ownership therefore remains process-local without cross-process leases.
 - The webview has typed commands and progress events, a native open-dialog permission, and no shell or general filesystem capability.
-- qpdf, PDF.js, OCR, Office, cloud, account and AI dependencies remain deferred.
+- qpdf 12.3.2 is bundled from its signed official Windows archive with exact hashes, retained licenses, a zero-capability AppContainer, and owned Job Object limits.
+- PDF Merge accepts 2–128 local PDFs, preserves the displayed order including intentional duplicates, creates one private snapshot per ordinal, verifies the output independently, and never overwrites by default.
+- PDF.js, OCR, Office, cloud, account and AI dependencies remain deferred.
 
 ## Start here
 
 1. Read `CODEX_START_HERE.md`.
 2. Read `docs/00-AUDIT-AND-COMPLETION.md` and `docs/01-PRODUCT-CHARTER.md`.
 3. Read `docs/23-DEVELOPMENT-SETUP.md` for locked installation, test and launch commands.
-4. Read `docs/implementation-log/G01-foundation.md` for the actual Phase 0 evidence and known limits.
-5. Do not add a production PDF operation until G01 acceptance is complete.
+4. Read `docs/implementation-log/G01-foundation.md` for the accepted Phase 0 evidence.
+5. Read `docs/implementation-log/G02-pdf-merge.md` for implementation, test, security, and performance evidence.
 
 ## Validate and run on Windows
 
@@ -37,7 +39,7 @@ cargo test --workspace --all-targets --locked
 npm --workspace @document-studio/desktop run tauri -- dev
 ```
 
-The development window can copy a synthetic local file to a selected local folder. It is not a PDF editor and does not parse or render PDF content.
+The development window provides the production PDF Merge workspace. `diagnostic.copy` remains covered as a foundation regression operation but is not the main user workflow.
 
 ## Build philosophy
 

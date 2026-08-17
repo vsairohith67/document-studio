@@ -44,6 +44,18 @@
 
 Tests place document and password sentinels in inputs and confirm they do not appear in SQLite, events, errors or dependency diagnostics.
 
+## G02 qpdf process boundary
+
+- Use only the manifest-verified bundled qpdf 12.3.2 executable and sibling DLLs. Never discover qpdf through PATH and never call a shell.
+- Use the stable `DocumentStudio.PdfEngine.Qpdf.V1` production AppContainer profile with zero capabilities. Create or derive it idempotently, verify the derived SID and configuration contract, and fail closed on mismatch. Tests use and delete only the separately named fixed test profile.
+- Create qpdf suspended, validate its token as the exact zero-capability AppContainer, assign it to a private Job Object, query back kill-on-close/one-process/2 GiB limits, and only then resume it.
+- Grant the AppContainer only the verified engine cache and the current owned job paths. A test proves writes inside the grant and denial of an ungranted file.
+- Forward `SystemRoot` and `WINDIR`; map `LOCALAPPDATA`, `TEMP` and `TMP` to the private job temporary directory. Do not forward the real user profile, proxy, cloud or qpdf environment.
+- Prove loopback connection denial. Cancellation and timeout terminate only the retained owned Job Object; an unrelated-process test must remain alive.
+- Run the exact page-only merge argument vector with no production `--deterministic-id`, then reopen and independently verify the staging result before G01 publication can begin.
+- Continuously drain stdout/stderr but retain only bounded 64 KiB in-memory tails. Raw engine output is never persisted or shown to the user.
+- Reopen the published result and require its size and SHA-256 to equal the verified staging evidence. Restart recovery never resumes qpdf and deletes only marker/identity-proven owned artifacts.
+
 ## Redaction safety
 
 Visual cover-up is not redaction. The operation must remove underlying text/objects or rasterize/sanitize the affected area, then test extraction and visual output. The UI requires a final irreversible confirmation.

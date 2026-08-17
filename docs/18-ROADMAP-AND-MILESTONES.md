@@ -12,6 +12,8 @@ Merge, split, extract, remove, reorder, rotate, linearize, PDF-to-images, images
 
 **Exit:** golden and failure tests pass; performance budgets are measured.
 
+G02 delivers only the first Phase 1 item: production page-only PDF Merge. Split, extract, page removal/reorder/rotate, linearization, image conversion, page ranges, viewer/thumbnails, and bookmark/outline policies remain later goals.
+
 ## Phase 2 - Optimize, convert and protect
 
 Compression, Office-to-PDF, text/Markdown/HTML-to-PDF, page numbers, watermark, metadata, encrypt/unlock, batch runner.

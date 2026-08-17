@@ -2,19 +2,19 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::{AppState, CancelOutcome};
 use crate::contracts::{
     CancelResponse, FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest,
-    JobIdRequest, JobRecord, JobsCreateRequest, OperationError, OperationInputs, OperationManifest,
-    OperationOutputs, OperationStage, SettingGetRequest, SettingRecord, SettingSetRequest,
-    SystemStatus, DIAGNOSTIC_COPY_OPERATION_ID, DIAGNOSTIC_COPY_VERSION, JOB_PROGRESS_EVENT_NAME,
+    JobIdRequest, JobRecord, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
+    SettingGetRequest, SettingRecord, SettingSetRequest, SystemStatus, JOB_PROGRESS_EVENT_NAME,
 };
 use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
+use crate::operation_registry::{all_manifests, validate_create_request, OperationKind};
 use crate::path_policy::canonical_regular_file;
+use crate::pdf_merge::PdfMergeService;
 use crate::recovery::{cancel_without_worker, resolve_interrupted, resolve_worker_spawn_failure};
 
 #[tauri::command]
@@ -36,12 +36,12 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
 
 #[tauri::command]
 pub fn operations_list() -> Vec<OperationManifest> {
-    vec![diagnostic_copy_manifest()]
+    all_manifests()
 }
 
 #[tauri::command]
 pub fn files_inspect(request: FilesInspectRequest) -> Result<Vec<FileInspection>, OperationError> {
-    if request.paths.is_empty() || request.paths.len() > 32 {
+    if request.paths.is_empty() || request.paths.len() > 128 {
         return Err(request_error());
     }
     request
@@ -61,7 +61,7 @@ pub fn files_inspect(request: FilesInspectRequest) -> Result<Vec<FileInspection>
                     .to_owned(),
                 size_bytes: metadata.len(),
                 modified_at: modified.to_rfc3339_opts(SecondsFormat::Secs, true),
-                mime_type: "application/octet-stream".to_owned(),
+                mime_type: inspected_mime_type(&canonical)?,
                 file_identity: identity.to_string(),
             })
         })
@@ -74,17 +74,34 @@ pub fn jobs_create(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<JobRecord, OperationError> {
-    let service = DiagnosticCopyService::new(state.inner().clone());
-    let job = service.create_job(request)?;
+    let kind = validate_create_request(&request)?;
+    let job = match kind {
+        OperationKind::DiagnosticCopy => {
+            DiagnosticCopyService::new(state.inner().clone()).create_job(request)?
+        }
+        OperationKind::PdfMerge => {
+            PdfMergeService::new(state.inner().clone()).create_job(request)?
+        }
+    };
     let job_id = job.id.clone();
     let worker_job_id = job_id.clone();
+    let worker_state = state.inner().clone();
     spawn_registered_worker(
         state.inner(),
         &job_id,
-        move |token| {
-            let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
-                let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
-            });
+        move |token| match kind {
+            OperationKind::DiagnosticCopy => {
+                let service = DiagnosticCopyService::new(worker_state);
+                let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
+                    let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                });
+            }
+            OperationKind::PdfMerge => {
+                let service = PdfMergeService::new(worker_state);
+                let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
+                    let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                });
+            }
         },
         |name, worker| {
             std::thread::Builder::new()
@@ -204,7 +221,7 @@ pub fn history_delete(
 pub fn dependencies_scan(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::contracts::DependencyDiagnostic>, OperationError> {
-    scan_dependencies(&mut state.database())
+    scan_dependencies(state.inner())
 }
 
 #[tauri::command]
@@ -243,43 +260,13 @@ pub fn settings_set(
 }
 
 pub fn diagnostic_copy_manifest() -> OperationManifest {
-    OperationManifest {
-        id: DIAGNOSTIC_COPY_OPERATION_ID.to_owned(),
-        version: DIAGNOSTIC_COPY_VERSION.to_owned(),
-        name: "Diagnostic copy".to_owned(),
-        category: "diagnostics".to_owned(),
-        description: "Streams, verifies, and safely publishes one local file.".to_owned(),
-        risk: "normal".to_owned(),
-        locality: "local".to_owned(),
-        inputs: OperationInputs {
-            accepted_mime_types: vec!["application/octet-stream".to_owned()],
-            minimum: 1,
-            maximum: 1,
-            allow_directories: false,
-        },
-        settings_schema: json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {}
-        }),
-        outputs: OperationOutputs {
-            mime_type: "application/octet-stream".to_owned(),
-            multiplicity: "single".to_owned(),
-        },
-        dependencies: vec!["document-studio-core".to_owned()],
-        verification: vec!["sha256".to_owned(), "size".to_owned(), "reopen".to_owned()],
-        stages: vec![
-            OperationStage::Inspect,
-            OperationStage::Preflight,
-            OperationStage::Estimate,
-            OperationStage::Plan,
-            OperationStage::Execute,
-            OperationStage::Verify,
-            OperationStage::Publish,
-            OperationStage::Audit,
-            OperationStage::Cleanup,
-        ],
-    }
+    crate::operation_registry::diagnostic_copy_manifest()
+}
+
+fn inspected_mime_type(path: &Path) -> Result<String, OperationError> {
+    crate::pdf_merge::inspect_pdf_mime(path)
+        .map(str::to_owned)
+        .map_err(|_| path_error())
 }
 
 fn cancel_queued_job(job_id: &str, state: &AppState) -> Result<CancelResponse, OperationError> {

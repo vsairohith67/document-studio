@@ -33,6 +33,34 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
           targets: x86_64-pc-windows-msvc
+      - name: Install pinned Cosign verifier
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: 'v3.0.6'
+      - name: Verify signed qpdf bundle and reviewed runtime tree
+        shell: pwsh
+        run: |
+          $reviewed = (Resolve-Path '.\apps\desktop\src-tauri\resources\qpdf\12.3.2').Path
+          $fresh = Join-Path $env:RUNNER_TEMP 'document-studio-qpdf-ci-12.3.2'
+          if (Test-Path -LiteralPath $fresh) {
+            throw "Refusing to overwrite CI acquisition directory: $fresh"
+          }
+          .\scripts\acquire-qpdf.ps1 -Destination $fresh
+          .\scripts\verify-qpdf-bundle.ps1 -BundleRoot $reviewed
+          .\scripts\verify-qpdf-bundle.ps1 -BundleRoot $fresh
+          $reviewedFiles = Get-ChildItem -LiteralPath $reviewed -File -Recurse | ForEach-Object {
+            $relative = $_.FullName.Substring($reviewed.Length + 1)
+            "$relative|$($_.Length)|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+          }
+          $freshFiles = Get-ChildItem -LiteralPath $fresh -File -Recurse | ForEach-Object {
+            $relative = $_.FullName.Substring($fresh.Length + 1)
+            "$relative|$($_.Length)|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+          }
+          $difference = @(Compare-Object $reviewedFiles $freshFiles)
+          if ($difference.Count -ne 0) {
+            $difference | Format-Table | Out-String | Write-Output
+            throw 'Fresh signed qpdf acquisition differs from the reviewed resource tree.'
+          }
       - name: Install locked npm dependencies
         run: npm ci --ignore-scripts
       - name: Typecheck and test frontend contracts
@@ -45,6 +73,8 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --all-targets --locked
+      - name: Prove qpdf AppContainer and owned Job Object boundary
+        run: cargo test -p document-studio --locked --features test-runtime --test process_sandbox -- --test-threads=1
       - name: Prove Windows single-instance startup boundary
         run: |
           cargo build -p document-studio --locked --features test-runtime

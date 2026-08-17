@@ -1,0 +1,57 @@
+{
+  "minimumRequest": {
+    "operationId": "pdf.merge",
+    "inputPaths": [
+      "C:\\Users\\Example\\Documents\\cover.pdf",
+      "C:\\Users\\Example\\Documents\\body.pdf"
+    ],
+    "destinationDirectory": "C:\\Users\\Example\\Documents",
+    "requestedOutputName": "merged.pdf"
+  },
+  "operationManifest": {
+    "id": "pdf.merge",
+    "version": "1.0.0",
+    "name": "PDF Merge",
+    "category": "pdf",
+    "description": "Merges 2–128 local PDFs in exact order into one verified page-only PDF.",
+    "risk": "normal",
+    "locality": "local",
+    "inputs": {
+      "acceptedMimeTypes": ["application/pdf"],
+      "minimum": 2,
+      "maximum": 128,
+      "allowDirectories": false
+    },
+    "settingsSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "outputs": {
+      "mimeType": "application/pdf",
+      "multiplicity": "single"
+    },
+    "dependencies": ["qpdf"],
+    "verification": [
+      "regular-file",
+      "pdf-magic",
+      "sha256",
+      "qpdf-strict-check",
+      "unencrypted",
+      "page-count",
+      "reopen",
+      "publication-hash"
+    ],
+    "stages": [
+      "inspect",
+      "preflight",
+      "estimate",
+      "plan",
+      "execute",
+      "verify",
+      "publish",
+      "audit",
+      "cleanup"
+    ]
+  }
+}

@@ -10,5 +10,6 @@
 | [ADR-006](ADR-006-foundation-dependencies-and-sqlite.md) | Adopt reviewed foundation dependencies and bundled SQLite | Accepted |
 | [ADR-007](ADR-007-durable-publication-and-recovery.md) | Require journaled no-overwrite publication and evidence-based recovery | Accepted |
 | [ADR-008](ADR-008-single-instance-cancellation.md) | Enforce one Windows application process for cancellation ownership | Accepted |
+| [ADR-009](ADR-009-qpdf-and-production-pdf-merge.md) | Bundle qpdf for sandboxed, verified, page-only PDF Merge | Accepted; implemented in G02 |
 
 Create a new ADR for decisions that are expensive to reverse, affect security/privacy, change the operation contract, add a production dependency/model or alter the platform sequence. Never rewrite an accepted ADR to hide history; supersede it with a new record.

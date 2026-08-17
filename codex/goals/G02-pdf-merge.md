@@ -1,9 +1,9 @@
-# G02 — PDF Merge Vertical Slice
+# G02 — Production PDF Merge
 
-Implement PDF Merge as the first production operation.
+Status: G02 READY TO STAGE on `feat/g02-pdf-merge`; implementation and local acceptance evidence are complete, with no staging, commit, push or release.
 
-Outcome: add and inspect multiple PDFs, drag reorder, optional page ranges/bookmark policy, output naming and destination, truthful preflight/progress/cancel, qpdf execution, verified atomic output, history and continue-with-result.
+Outcome: add and inspect 2–128 local PDFs, preserve the exact displayed order including intentional duplicates, reorder/remove entries, choose a safe output name and destination, run a truthful cancellable merge, independently verify one page-only PDF, and publish it without overwrite through the G01 lifecycle.
 
-Constraints: use the shared operation contract and job engine; checksum-govern qpdf; validated argument arrays only; never rasterize structural merges; never overwrite inputs; no silent cloud fallback; pause for ADR/dependency changes.
+Constraints: use `pdf.merge` `1.0.0`, the shared job engine and metadata-only storage; checksum- and signature-govern bundled qpdf 12.3.2; direct argument arrays only; stable fixed-name zero-capability AppContainer plus owned Job Object; one physical ASCII snapshot per persisted ordinal; no source mutation; no silent repair, cloud, unsandboxed fallback, page ranges, viewer, thumbnails, or overwrite. The production builder excludes `--deterministic-id`. No migration or Tauri capability expansion is planned.
 
-Verification: openability, expected page count and source order, encryption state, corrupt/encrypted input errors, cancel leaves no final partial, naming collision behavior, crash recovery, golden corpus, performance baseline, UI keyboard/screenshot review and updated docs.
+Verification: one-to-one UI/ordinal/snapshot/`--file` order, strict check exit rules, encryption exit rules, expected summed page count and semantic source order, staging/final SHA-256 equality, corrupt/encrypted/zero-page/changed input errors, cancellation leaves no unknown partial, naming collisions never overwrite, deterministic non-resuming recovery, privacy leakage checks, generated fixtures, measured bounded performance, and keyboard/accessibility review.

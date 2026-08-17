@@ -5,3 +5,7 @@
 *.pdf binary
 *.docx binary
 *.zip binary
+
+# Preserve byte-exact upstream qpdf notices as opaque vendored artifacts.
+apps/desktop/src-tauri/resources/qpdf/12.3.2/licenses/share__doc__qpdf__manual-html___sources__license.rst.txt -text -diff
+apps/desktop/src-tauri/resources/qpdf/12.3.2/licenses/share__doc__qpdf__manual-html__license.html -text -diff

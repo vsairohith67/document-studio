@@ -14,3 +14,7 @@ The canonical machine-readable catalogue is `feature-catalog.csv`. It currently 
 ## Product rule
 
 Every implemented feature is available in one complete personal edition. “Must/Should/Could” expresses implementation priority only.
+
+## G02 implemented slice
+
+PDF Merge is the first Phase 1 production operation. It accepts 2–128 local PDFs, keeps the exact user-visible order including deliberate duplicates, and publishes one verified page-only PDF without overwrite. Page ranges, image inputs, bookmark or outline preservation, a viewer, and thumbnails are not part of G02.

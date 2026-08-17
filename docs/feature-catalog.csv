@@ -1,5 +1,5 @@
 category,feature,description,phase,engine,platforms,priority
-Organize,Merge PDF,"Combine PDFs/images, page-range imports, drag reorder, bookmark and outline preservation",1,qpdf,"Desktop, Web",Must
+Organize,Merge PDF,"G02 combines 2–128 PDFs in exact order as a verified page-only result; page ranges, images, bookmarks and outline preservation remain later work",1,qpdf,"Desktop, Web",Must
 Organize,Split by ranges,Create files from explicit page ranges,1,qpdf,"Desktop, Web",Must
 Organize,Split every N pages,Split at a fixed page interval,1,qpdf,"Desktop, Web",Must
 Organize,Split by bookmarks,Use document outline levels as boundaries,2,qpdf,"Desktop, Web",Should

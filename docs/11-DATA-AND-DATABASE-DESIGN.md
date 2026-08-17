@@ -44,3 +44,9 @@ Job creation, compare-and-set state transitions, exact publication-partial reser
 ## Future cloud storage
 
 PostgreSQL stores account, job and policy metadata. Object storage holds encrypted inputs/outputs with short TTLs. Redis/Valkey coordinates queues and locks. Storage region and deletion deadline are recorded per object.
+
+## G02 storage use
+
+G02 adds no migration and no BLOB column. Existing `job_inputs.ordinal` stores exact merge order; each row stores only the already-authorized path/identity/size/time/MIME/hash metadata required for durable execution and recovery. Duplicate or hard-linked inputs retain separate ordinals and separate physical workspace snapshots.
+
+Source PDFs remain in their original locations and are never rewritten. Temporary PDF bytes exist only in the marker-owned per-job workspace until verified publication. SQLite stores staging/final hash and size evidence, dependency version, safe lifecycle codes, and sanitized errors—never PDF bytes, page text, raw qpdf output, passwords, thumbnails, or document metadata.

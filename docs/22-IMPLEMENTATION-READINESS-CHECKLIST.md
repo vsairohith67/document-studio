@@ -34,11 +34,13 @@
 - [ ] Create live Figma file from the handoff.
 - [x] Run and verify the Windows Tauri toolchain on the target machine.
 - [x] Complete the G01 Phase 0 interactive launch and screenshot evidence.
-- [ ] Commit the approved G01 implementation and prove final clean Git status.
+- [x] Commit the approved G01 implementation and prove final clean Git status.
+- [x] Implement G02 PDF Merge with bundled qpdf, process isolation, independent verification, safe publication, recovery, accessible UI, and bounded performance evidence.
+- [ ] Stage and independently review the G02 diff.
 
 ## Proceed/no-proceed
 
-The G01 implementation, locked checks, interactive Windows smoke and screenshot evidence are complete. Production PDF operations remain blocked until the G01 commit and clean-status review are approved and completed. Notion and Figma publication are separate external activities and are not Phase 0 runtime dependencies.
+G01 is accepted on `main`. G02 PDF Merge is ready to stage on its feature branch after the complete local suite, native UI review, and scope/security audit. The approximately 1 GiB performance corpus remains required before release acceptance, not before staging. Notion and Figma publication are separate external activities and are not runtime dependencies.
 
 ## Final local recheck
 

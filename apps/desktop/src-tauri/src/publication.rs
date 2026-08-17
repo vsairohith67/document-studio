@@ -32,7 +32,7 @@ pub struct PublicationResult {
 #[doc(hidden)]
 pub struct PublicationContext<'a> {
     pub staging_path: &'a Path,
-    pub input_path: &'a Path,
+    pub input_paths: &'a [&'a Path],
     pub destination_directory: &'a Path,
     pub requested_name: &'a str,
     pub job_id: &'a str,
@@ -72,7 +72,7 @@ where
     publish_verified_staging_with_observer(
         PublicationContext {
             staging_path,
-            input_path,
+            input_paths: &[input_path],
             destination_directory,
             requested_name,
             job_id,
@@ -109,7 +109,7 @@ where
 {
     let PublicationContext {
         staging_path,
-        input_path,
+        input_paths,
         destination_directory,
         requested_name,
         job_id,
@@ -119,7 +119,10 @@ where
     validate_output_name(requested_name)?;
     let destination_directory = canonical_directory(destination_directory)?;
     let (staging_path, _) = canonical_regular_file(staging_path)?;
-    let (input_path, _) = canonical_regular_file(input_path)?;
+    let input_paths = input_paths
+        .iter()
+        .map(|path| canonical_regular_file(path).map(|(path, _)| path))
+        .collect::<Result<Vec<_>, _>>()?;
     let (expected_size, expected_hash) = hash_file(&staging_path)?;
     if available_bytes(&destination_directory)?
         < expected_size.saturating_add(COPY_BUFFER_SIZE as u64)
@@ -134,7 +137,9 @@ where
         let resolved_name = collision_name(requested_name, attempt);
         validate_output_name(&resolved_name)?;
         let final_path = destination_directory.join(&resolved_name);
-        ensure_different_files(&input_path, &final_path)?;
+        for input_path in &input_paths {
+            ensure_different_files(input_path, &final_path)?;
+        }
         if final_path.exists() {
             continue;
         }

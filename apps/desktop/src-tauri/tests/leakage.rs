@@ -61,16 +61,23 @@ fn document_content_and_secrets_do_not_enter_metadata_events_errors_or_diagnosti
     assert!(!error.detail.contains(CONTENT_SENTINEL));
     assert!(!error.detail.contains(PASSWORD_SENTINEL));
 
-    let diagnostics = scan_dependencies(&mut state.database()).unwrap();
+    let diagnostics = scan_dependencies(&state).unwrap();
     assert!(diagnostics
         .iter()
         .filter(|dependency| {
             matches!(
                 dependency.id.as_str(),
-                "qpdf" | "pdfjs" | "libreoffice" | "ocrmypdf" | "tesseract"
+                "pdfjs" | "libreoffice" | "ocrmypdf" | "tesseract"
             )
         })
         .all(|dependency| dependency.status == DependencyStatus::NotRequired));
+    let qpdf = diagnostics
+        .iter()
+        .find(|dependency| dependency.id == "qpdf")
+        .expect("qpdf dependency diagnostic");
+    assert_eq!(qpdf.status, DependencyStatus::Unhealthy);
+    assert_eq!(qpdf.version.as_deref(), Some("12.3.2"));
+    assert_eq!(qpdf.error_code.as_deref(), Some("QPDF_RUNTIME_UNAVAILABLE"));
     assert!(diagnostics.iter().all(|dependency| {
         dependency.version.as_deref() != Some(CONTENT_SENTINEL)
             && dependency.error_code.as_deref() != Some(PASSWORD_SENTINEL)
