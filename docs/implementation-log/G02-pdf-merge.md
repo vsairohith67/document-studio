@@ -1,6 +1,6 @@
 # G02 Production PDF Merge Implementation Log
 
-Status: G02 READY TO STAGE; implementation and local acceptance evidence complete
+Status: G02 Review; implementation and bounded independent-review remediation committed on draft PR #5, with independent acceptance re-review pending
 Accepted base: `9bc92dd672fc120fb730a53f13a64abe50470f11`
 Implementation branch: `feat/g02-pdf-merge`
 Target: Windows x64, Tauri 2, qpdf 12.3.2
@@ -58,6 +58,17 @@ Target: Windows x64, Tauri 2, qpdf 12.3.2
 - Startup recovery fails every pre-publication merge state without resuming, reconciles only matching publication evidence, cleans only proven-owned artifacts, and preserves neighboring or identity-mismatched files.
 - The Precision Paper UI provides native add/drop, ordered rows, pointer and keyboard reorder, remove, safe destination/name, stage/byte/item progress, indeterminate qpdf merge, cancellation boundary, verified result path, failure/interrupted recovery, and precise page-only/signature wording. No viewer, PDF.js, thumbnail, or page-range feature was added.
 
+## Independent review remediation
+
+- Every selected PDF now receives a stable selection-row ID that is independent of its path and position. React keys use that ID, so intentionally repeated paths remain distinct through reorder and removal.
+- A post-render focus target restores focus deterministically after keyboard or button reorder. Removal focuses the row that takes the removed position, then the previous row, or Add PDFs when the list becomes empty.
+- Active-element regressions cover Alt+ArrowUp/Down, both move buttons, first/middle/last removal, Remove, repeated paths, and final-row removal.
+- Merge-order regressions no longer compare marker byte offsets in the serialized PDF. A bounded test-only reader asks bundled qpdf 12.3.2 for semantic page-tree order with `--show-pages`, reads each referenced content stream with `--show-object` and `--filtered-stream-data`, and fails closed on malformed, oversized or ambiguous inspection output.
+- Semantic regressions cover reordered documents, an intentionally repeated source, a hard-link alias, and document boundaries with multi-page sources.
+- Restart errors now use operation-neutral Document Studio wording. A real `pdf.merge` recovery regression checks that the detail is bounded, sanitized, does not name G01, and makes no automatic-resume promise.
+- Third-party notices, the repository manifest, this goal record and this log now reflect the bundled qpdf runtime and existing draft PR #5. Repository validation rejects the exact stale dependency and G02 state claims.
+- G02 remains incomplete and unmerged. Independent acceptance re-review is pending and G03 remains blocked. PR #5 and the canonical trackers record the exact remediation head and terminal CI run evidence after both CI events finish.
+
 ## Verification evidence
 
 | Gate | Result |
@@ -65,10 +76,10 @@ Target: Windows x64, Tauri 2, qpdf 12.3.2
 | Repository validator | Passed; 132 feature entries verified |
 | Link validator | Passed |
 | TypeScript | Passed for desktop and shared contracts |
-| Frontend/shared tests | Passed; 12 desktop tests and 12 shared-contract tests (24 total) |
+| Frontend/shared tests | Passed; 21 desktop tests and 12 shared-contract tests (33 total) |
 | Frontend production build | Passed |
 | Rust formatting and clippy | Passed with warnings denied |
-| Rust tests | Passed; 93 default tests, one separately executed ignored performance test, and 3 feature-gated AppContainer/Job Object tests |
+| Rust tests | Passed; 96 default tests, one separately executed ignored performance test, and 3 feature-gated AppContainer/Job Object tests |
 | Tauri no-bundle release compile | Passed; retained the known cross-platform `.app` identifier advisory |
 | PowerShell acquisition and verification | Passed, including signed fresh acquisition and byte-for-byte reproduction |
 | AppContainer and Job Object proof | Passed with real qpdf 12.3.2 and the test-only probe |
@@ -96,6 +107,6 @@ The small-merge, inspection, memory, and cancellation budgets passed. The 1,000-
 
 ## Final scope and security audit
 
-- No migration, schema file, Tauri capability file, npm dependency/lock, Cargo package/lock, cloud, telemetry, viewer, PDF.js, thumbnail, page-range, G03 feature, commit, push, or PR was added.
+- No migration, schema file, Tauri capability file, npm dependency/lock, Cargo package/lock, cloud, telemetry, viewer, PDF.js, thumbnail, page-range, or G03 feature was added. Draft PR #5 remains in review and unmerged.
 - Production source contains no shell or PATH-based qpdf launch and no `--deterministic-id`. Test-only `Command` usage is limited to fixture/probe setup.
 - The native window launched successfully against an isolated test-runtime profile and was visually reviewed at 1280×800. The existing ordinary development profile contains a pre-G01 migration checksum ledger that the unchanged G01 fail-closed database policy rejects; it was inspected read-only and not modified. This is local development-data cleanup/upgrade follow-up, not a G02 schema change.

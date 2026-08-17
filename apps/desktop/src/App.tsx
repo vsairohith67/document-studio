@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { DependencyDiagnostic, FileInspection, JobRecord, ProgressEvent, SystemStatus } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
 
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const maximumInputs = 128;
+
+type SelectedPdf = FileInspection & { selectionId: string };
+type RowFocusControl = 'row' | 'move-up' | 'move-down' | 'remove';
+type PendingFocus = { kind: 'add' } | { kind: 'row'; selectionId: string; control: RowFocusControl };
 
 function shortPath(path: string | null | undefined): string {
   if (!path) return 'Not available';
@@ -27,7 +31,7 @@ function validPdfOutputName(name: string): boolean {
 
 export default function App() {
   const [system, setSystem] = useState<SystemStatus | null>(null);
-  const [inputs, setInputs] = useState<FileInspection[]>([]);
+  const [inputs, setInputs] = useState<SelectedPdf[]>([]);
   const [destination, setDestination] = useState<string | null>(null);
   const [outputName, setOutputName] = useState('merged.pdf');
   const [job, setJob] = useState<JobRecord | null>(null);
@@ -38,9 +42,13 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const [busy, setBusy] = useState(false);
-  const draggedIndex = useRef<number | null>(null);
+  const draggedSelectionId = useRef<string | null>(null);
   const busyRef = useRef(false);
   const inputCountRef = useRef(0);
+  const nextSelectionId = useRef(0);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const mergeListRef = useRef<HTMLOListElement>(null);
+  const pendingFocus = useRef<PendingFocus | null>(null);
 
   useEffect(() => { busyRef.current = busy; }, [busy]);
   useEffect(() => { inputCountRef.current = inputs.length; }, [inputs.length]);
@@ -62,7 +70,11 @@ export default function App() {
         setError(`${invalid.displayName} is not a valid local PDF.`);
         return;
       }
-      setInputs((current) => [...current, ...inspected]);
+      const selected = inspected.map((input) => ({
+        ...input,
+        selectionId: `pdf-selection-${++nextSelectionId.current}`,
+      }));
+      setInputs((current) => [...current, ...selected]);
       setAnnouncement(`${inspected.length} PDF${inspected.length === 1 ? '' : 's'} added.`);
     } catch (reason) {
       setError(operationErrorMessage(reason));
@@ -105,21 +117,56 @@ export default function App() {
     return () => { active = false; unlistenProgress?.(); unlistenDrop?.(); };
   }, []);
 
+  useLayoutEffect(() => {
+    const target = pendingFocus.current;
+    if (!target) return;
+    pendingFocus.current = null;
+    if (target.kind === 'add') {
+      addButtonRef.current?.focus();
+      return;
+    }
+    const row = mergeListRef.current?.querySelector<HTMLElement>(`[data-selection-id="${target.selectionId}"]`);
+    if (!row) return;
+    const control = target.control === 'row'
+      ? row
+      : row.querySelector<HTMLButtonElement>(`[data-focus-control="${target.control}"]`);
+    if (control instanceof HTMLButtonElement && control.disabled) row.focus();
+    else control?.focus();
+  }, [inputs]);
+
   const chooseInputs = async () => addPaths(await api.dialogs.selectPdfInputs());
   const chooseDestination = async () => {
     setError(null);
     const path = await api.dialogs.selectDestination();
     if (path) setDestination(path);
   };
-  const moveInput = (from: number, to: number) => {
-    if (to < 0 || to >= inputs.length || from === to || busy) return;
-    setInputs((current) => { const next = [...current]; const [moved] = next.splice(from, 1); next.splice(to, 0, moved); return next; });
-    setAnnouncement(`${inputs[from]?.displayName ?? 'PDF'} moved to position ${to + 1}.`);
+  const moveInput = (selectionId: string, to: number, control: RowFocusControl = 'row') => {
+    if (busy) return;
+    setInputs((current) => {
+      const from = current.findIndex((input) => input.selectionId === selectionId);
+      if (from < 0 || to < 0 || to >= current.length || from === to) return current;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      pendingFocus.current = { kind: 'row', selectionId, control };
+      setAnnouncement(`${moved.displayName} moved to position ${to + 1}.`);
+      return next;
+    });
   };
-  const removeInput = (index: number) => {
-    const removed = inputs[index];
-    setInputs((current) => current.filter((_, itemIndex) => itemIndex !== index));
-    setAnnouncement(`${removed?.displayName ?? 'PDF'} removed.`);
+  const removeInput = (selectionId: string) => {
+    if (busy) return;
+    setInputs((current) => {
+      const index = current.findIndex((input) => input.selectionId === selectionId);
+      if (index < 0) return current;
+      const removed = current[index];
+      const next = current.filter((input) => input.selectionId !== selectionId);
+      const focusTarget = next[index] ?? next[index - 1];
+      pendingFocus.current = focusTarget
+        ? { kind: 'row', selectionId: focusTarget.selectionId, control: 'row' }
+        : { kind: 'add' };
+      setAnnouncement(`${removed.displayName} removed.`);
+      return next;
+    });
   };
   const startMerge = async () => {
     if (inputs.length < 2 || !destination || !validPdfOutputName(outputName)) return;
@@ -176,25 +223,25 @@ export default function App() {
         <section className="merge-layout" aria-label="PDF Merge workspace">
           <article className="card merge-card">
             <div className="card-heading"><div><p className="eyebrow">ORDERED INPUTS</p><h2>PDF merge list</h2></div><span className={`status-chip ${qpdfAvailable ? '' : 'unavailable'}`}>{qpdfAvailable ? 'qpdf 12.3.2 verified' : 'Engine unavailable'}</span></div>
-            <button type="button" className="drop-zone" onClick={chooseInputs} disabled={busy}><strong>Add PDFs</strong><span>Choose files or drop local PDFs anywhere in this window</span></button>
-            <ol className="merge-list" aria-label="PDFs in merge order">
+            <button ref={addButtonRef} type="button" className="drop-zone" onClick={chooseInputs} disabled={busy}><strong>Add PDFs</strong><span>Choose files or drop local PDFs anywhere in this window</span></button>
+            <ol ref={mergeListRef} className="merge-list" aria-label="PDFs in merge order">
               {inputs.length === 0 && <li className="empty-inputs">No PDFs added yet. The source files will remain in their current locations.</li>}
               {inputs.map((input, index) => (
-                <li className="merge-row" key={`${input.path}-${index}`} draggable={!busy} tabIndex={0} aria-label={`${index + 1}. ${input.displayName}`}
-                  onDragStart={() => { draggedIndex.current = index; }} onDragOver={(event) => event.preventDefault()}
-                  onDrop={() => { if (draggedIndex.current != null) moveInput(draggedIndex.current, index); draggedIndex.current = null; }}
+                <li className="merge-row" key={input.selectionId} data-selection-id={input.selectionId} draggable={!busy} tabIndex={0} aria-label={`${index + 1}. ${input.displayName}`}
+                  onDragStart={() => { draggedSelectionId.current = input.selectionId; }} onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => { if (draggedSelectionId.current != null) moveInput(draggedSelectionId.current, index); draggedSelectionId.current = null; }}
                   onKeyDown={(event) => {
-                    if (event.altKey && event.key === 'ArrowUp') { event.preventDefault(); moveInput(index, index - 1); }
-                    else if (event.altKey && event.key === 'ArrowDown') { event.preventDefault(); moveInput(index, index + 1); }
-                    else if (event.key === 'Delete') { event.preventDefault(); removeInput(index); }
+                    if (event.altKey && event.key === 'ArrowUp') { event.preventDefault(); moveInput(input.selectionId, index - 1); }
+                    else if (event.altKey && event.key === 'ArrowDown') { event.preventDefault(); moveInput(input.selectionId, index + 1); }
+                    else if (event.key === 'Delete') { event.preventDefault(); removeInput(input.selectionId); }
                   }}>
                   <span className="ordinal" aria-hidden="true">{index + 1}</span>
                   <div className="file-details"><strong title={input.path}>{input.displayName}</strong><small>{formatBytes(input.sizeBytes)} · Modified {new Date(input.modifiedAt).toLocaleDateString()}</small></div>
                   {duplicateIdentities.get(input.fileIdentity)! > 1 && <span className="duplicate-chip">Repeated</span>}
                   <div className="row-actions">
-                    <button type="button" className="icon-button" disabled={busy || index === 0} onClick={() => moveInput(index, index - 1)} aria-label={`Move ${input.displayName} up`}>↑</button>
-                    <button type="button" className="icon-button" disabled={busy || index === inputs.length - 1} onClick={() => moveInput(index, index + 1)} aria-label={`Move ${input.displayName} down`}>↓</button>
-                    <button type="button" className="icon-button remove" disabled={busy} onClick={() => removeInput(index)} aria-label={`Remove ${input.displayName}`}>×</button>
+                    <button type="button" className="icon-button" data-focus-control="move-up" disabled={busy || index === 0} onClick={() => moveInput(input.selectionId, index - 1, 'move-up')} aria-label={`Move ${input.displayName} up`}>↑</button>
+                    <button type="button" className="icon-button" data-focus-control="move-down" disabled={busy || index === inputs.length - 1} onClick={() => moveInput(input.selectionId, index + 1, 'move-down')} aria-label={`Move ${input.displayName} down`}>↓</button>
+                    <button type="button" className="icon-button remove" data-focus-control="remove" disabled={busy} onClick={() => removeInput(input.selectionId)} aria-label={`Remove ${input.displayName}`}>×</button>
                   </div>
                 </li>
               ))}

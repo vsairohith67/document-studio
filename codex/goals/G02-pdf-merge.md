@@ -1,6 +1,6 @@
 # G02 — Production PDF Merge
 
-Status: G02 READY TO STAGE on `feat/g02-pdf-merge`; implementation and local acceptance evidence are complete, with no staging, commit, push or release.
+Status: G02 is in Review on draft PR #5. The implementation and bounded independent-review remediation are committed on `feat/g02-pdf-merge`; G02 is not complete or merged, independent acceptance re-review remains pending, and G03 remains blocked. PR #5 and the canonical trackers record the exact remediation head and terminal CI evidence after those values exist.
 
 Outcome: add and inspect 2–128 local PDFs, preserve the exact displayed order including intentional duplicates, reorder/remove entries, choose a safe output name and destination, run a truthful cancellable merge, independently verify one page-only PDF, and publish it without overwrite through the G01 lifecycle.
 

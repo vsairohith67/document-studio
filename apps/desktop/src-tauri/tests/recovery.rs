@@ -962,11 +962,29 @@ fn pdf_merge_restarts_fail_every_prepublication_state_without_resuming() {
             "PDF Merge state {target:?}"
         );
         assert!(!workspace.root.exists());
-        assert!(recovered.errors.iter().any(|error| error.code
-            == if target == JobState::Queued {
-                "JOB_WORKER_NOT_STARTED"
-            } else {
-                "JOB_INTERRUPTED_BY_RESTART"
-            }));
+        let restart_error = recovered
+            .errors
+            .iter()
+            .find(|error| {
+                error.code
+                    == if target == JobState::Queued {
+                        "JOB_WORKER_NOT_STARTED"
+                    } else {
+                        "JOB_INTERRUPTED_BY_RESTART"
+                    }
+            })
+            .expect("sanitized restart error");
+        assert!(restart_error
+            .detail
+            .contains("Document Studio does not automatically resume interrupted jobs"));
+        assert!(!restart_error.detail.contains("G01"));
+        assert!(!restart_error.detail.contains("will automatically resume"));
+        assert!(!restart_error.detail.contains("automatically resumes"));
+        assert!(restart_error.detail.len() <= 160);
+        assert!(!restart_error.detail.contains("first.pdf"));
+        assert!(!restart_error.detail.contains("second.pdf"));
+        assert!(!restart_error
+            .detail
+            .contains(&destination.path().to_string_lossy().to_string()));
     }
 }

@@ -1,5 +1,6 @@
 mod support;
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::mem::size_of;
@@ -19,10 +20,12 @@ use document_studio_lib::pdf_merge::{
 };
 use document_studio_lib::process_sandbox::{
     authorize_qpdf_paths, ensure_production_profile, run_sandboxed_capture, SandboxLaunchSpec,
+    CAPTURE_LIMIT_BYTES,
 };
 use document_studio_lib::qpdf::QpdfRuntimeManager;
 use document_studio_lib::workspace::WorkspaceManager;
 use tempfile::tempdir;
+use uuid::Uuid;
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -97,14 +100,180 @@ fn request(inputs: &[PathBuf], destination: &Path, name: &str) -> JobsCreateRequ
     }
 }
 
+fn parse_indirect_reference(value: &str) -> Result<(u32, u32), String> {
+    let fields = value.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 3 || fields[2] != "R" {
+        return Err("invalid indirect reference".to_owned());
+    }
+    let object = fields[0]
+        .parse::<u32>()
+        .map_err(|_| "invalid object number".to_owned())?;
+    let generation = fields[1]
+        .parse::<u32>()
+        .map_err(|_| "invalid generation number".to_owned())?;
+    if object == 0 {
+        return Err("page or stream object must be nonzero".to_owned());
+    }
+    Ok((object, generation))
+}
+
+fn parse_page_content_references(
+    output: &[u8],
+    expected_pages: usize,
+) -> Result<Vec<(u32, u32)>, String> {
+    if output.is_empty() || output.len() >= CAPTURE_LIMIT_BYTES {
+        return Err("page inspection output is empty or exceeded its bound".to_owned());
+    }
+    let text = std::str::from_utf8(output)
+        .map_err(|_| "page inspection output is not UTF-8".to_owned())?;
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    let mut references = Vec::new();
+    while index < lines.len() {
+        let page = lines[index]
+            .strip_prefix("page ")
+            .ok_or_else(|| "missing page record".to_owned())?;
+        let (number, page_reference) = page
+            .split_once(": ")
+            .ok_or_else(|| "malformed page record".to_owned())?;
+        let parsed_number = number
+            .parse::<usize>()
+            .map_err(|_| "invalid page number".to_owned())?;
+        if parsed_number != references.len() + 1 {
+            return Err("page records are not sequential".to_owned());
+        }
+        parse_indirect_reference(page_reference)?;
+        index += 1;
+        if lines.get(index) != Some(&"  content:") {
+            return Err("missing page content section".to_owned());
+        }
+        index += 1;
+        let content = lines
+            .get(index)
+            .and_then(|line| line.strip_prefix("    "))
+            .ok_or_else(|| "missing page content stream reference".to_owned())?;
+        references.push(parse_indirect_reference(content)?);
+        index += 1;
+        if lines
+            .get(index)
+            .is_some_and(|line| !line.starts_with("page "))
+        {
+            return Err("page has multiple or malformed content stream references".to_owned());
+        }
+    }
+    if references.len() != expected_pages {
+        return Err("page count does not match the expected merge result".to_owned());
+    }
+    Ok(references)
+}
+
+fn parse_semantic_marker(output: &[u8]) -> Result<String, String> {
+    if output.is_empty() || output.len() >= CAPTURE_LIMIT_BYTES {
+        return Err("stream inspection output is empty or exceeded its bound".to_owned());
+    }
+    let text = std::str::from_utf8(output)
+        .map_err(|_| "stream inspection output is not UTF-8".to_owned())?;
+    let markers = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("% DS-G02-MARKER:"))
+        .collect::<Vec<_>>();
+    if markers.len() != 1 {
+        return Err("expected exactly one semantic page marker".to_owned());
+    }
+    let marker = markers[0];
+    if marker.is_empty()
+        || marker.len() > 64
+        || !marker
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err("semantic page marker is invalid".to_owned());
+    }
+    Ok(marker.to_owned())
+}
+
+fn semantic_page_markers(
+    state: &AppState,
+    published_output: &Path,
+    expected_pages: usize,
+) -> Result<Vec<String>, String> {
+    let inspection_id = Uuid::new_v4().hyphenated().to_string();
+    let workspace = state
+        .workspaces
+        .create_job(&inspection_id)
+        .map_err(|error| error.to_string())?;
+    let result = (|| {
+        fs::copy(
+            published_output,
+            workspace.inputs.join("semantic-output.pdf"),
+        )
+        .map_err(|error| error.to_string())?;
+        let runtime = state
+            .qpdf
+            .as_ref()
+            .ok_or_else(|| "qpdf runtime is unavailable".to_owned())?
+            .get_or_prepare()
+            .map_err(|error| error.to_string())?;
+        let profile = ensure_production_profile().map_err(|error| error.to_string())?;
+        authorize_qpdf_paths(&profile, &runtime.bin, &workspace)
+            .map_err(|error| error.to_string())?;
+        let run = |arguments: &[OsString]| -> Result<Vec<u8>, String> {
+            let execution = run_sandboxed_capture(
+                &profile,
+                &SandboxLaunchSpec {
+                    executable: &runtime.executable,
+                    arguments,
+                    working_directory: &workspace.root,
+                    temporary_directory: &workspace.temporary,
+                },
+                Duration::from_secs(10),
+            )
+            .map_err(|error| error.to_string())?;
+            if execution.exit_code != 0 || !execution.stderr.is_empty() {
+                return Err("qpdf semantic inspection failed".to_owned());
+            }
+            if execution.stdout.len() >= CAPTURE_LIMIT_BYTES {
+                return Err("qpdf semantic inspection exceeded its output bound".to_owned());
+            }
+            Ok(execution.stdout)
+        };
+        let page_output = run(&[
+            OsString::from(r"inputs\semantic-output.pdf"),
+            OsString::from("--suppress-recovery"),
+            OsString::from("--show-pages"),
+        ])?;
+        let references = parse_page_content_references(&page_output, expected_pages)?;
+        references
+            .into_iter()
+            .map(|(object, generation)| {
+                let stream_output = run(&[
+                    OsString::from(r"inputs\semantic-output.pdf"),
+                    OsString::from("--suppress-recovery"),
+                    OsString::from(format!("--show-object={object},{generation}")),
+                    OsString::from("--filtered-stream-data"),
+                ])?;
+                parse_semantic_marker(&stream_output)
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })();
+    let cleanup = state
+        .workspaces
+        .cleanup_job(&inspection_id)
+        .map_err(|error| error.to_string());
+    match (result, cleanup) {
+        (Ok(markers), Ok(())) => Ok(markers),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 #[test]
 fn production_merge_preserves_exact_order_and_cleans_every_snapshot() {
     let (_app_data, state, service) = service();
     let source = tempdir().unwrap();
     let destination = tempdir().unwrap();
-    let first = support::write_pdf_fixture(source.path(), "first.pdf", "ORDER-FIRST", 401);
-    let second = support::write_pdf_fixture(source.path(), "second.pdf", "ORDER-SECOND", 402);
-    let third = support::write_pdf_fixture(source.path(), "third.pdf", "ORDER-THIRD", 403);
+    let first = support::write_semantic_pdf_fixture(source.path(), "first.pdf", &["FIRST"]);
+    let second = support::write_semantic_pdf_fixture(source.path(), "second.pdf", &["SECOND"]);
+    let third = support::write_semantic_pdf_fixture(source.path(), "third.pdf", &["THIRD"]);
     let job = service
         .create_job(request(
             &[third.clone(), first.clone(), second.clone()],
@@ -124,29 +293,28 @@ fn production_merge_preserves_exact_order_and_cleans_every_snapshot() {
             .collect::<Vec<_>>(),
         [0, 1, 2]
     );
-    let output = fs::read(completed.outputs[0].final_path.as_ref().unwrap()).unwrap();
-    let positions = ["ORDER-THIRD", "ORDER-FIRST", "ORDER-SECOND"].map(|marker| {
-        output
-            .windows(marker.len())
-            .position(|window| window == marker.as_bytes())
-            .expect("merged output marker")
-    });
-    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        semantic_page_markers(
+            &state,
+            Path::new(completed.outputs[0].final_path.as_ref().unwrap()),
+            3,
+        )
+        .unwrap(),
+        ["THIRD", "FIRST", "SECOND"]
+    );
     assert!(!state.workspaces.root().join(&job.id).exists());
 }
 
 #[test]
-fn repeated_input_and_hard_link_get_distinct_ordinals_and_contribute_pages() {
-    let (_app_data, _state, service) = service();
+fn repeated_same_source_contributes_once_per_selected_ordinal() {
+    let (_app_data, state, service) = service();
     let source = tempdir().unwrap();
     let destination = tempdir().unwrap();
-    let original = support::write_pdf_fixture(source.path(), "original.pdf", "REPEATED", 410);
-    let alias = source.path().join("alias.pdf");
-    fs::hard_link(&original, &alias).unwrap();
-    let other = support::write_pdf_fixture(source.path(), "other.pdf", "OTHER", 420);
+    let first = support::write_semantic_pdf_fixture(source.path(), "a.pdf", &["A"]);
+    let second = support::write_semantic_pdf_fixture(source.path(), "b.pdf", &["B"]);
     let job = service
         .create_job(request(
-            &[original.clone(), original, alias, other],
+            &[first.clone(), second, first],
             destination.path(),
             "duplicates.pdf",
         ))
@@ -155,16 +323,95 @@ fn repeated_input_and_hard_link_get_distinct_ordinals_and_contribute_pages() {
     let completed = service.execute(&job.id, |_| {}).unwrap();
 
     assert_eq!(completed.state, JobState::Completed);
-    assert_eq!(completed.inputs.len(), 4);
-    assert_eq!(
-        completed.inputs[0].file_identity,
-        completed.inputs[1].file_identity
-    );
+    assert_eq!(completed.inputs.len(), 3);
     assert_eq!(
         completed.inputs[0].file_identity,
         completed.inputs[2].file_identity
     );
     assert!(completed.inputs.iter().all(|input| input.sha256.is_some()));
+    assert_eq!(
+        semantic_page_markers(
+            &state,
+            Path::new(completed.outputs[0].final_path.as_ref().unwrap()),
+            3,
+        )
+        .unwrap(),
+        ["A", "B", "A"]
+    );
+}
+
+#[test]
+fn hard_link_alias_contributes_at_each_selected_position() {
+    let (_app_data, state, service) = service();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let original = support::write_semantic_pdf_fixture(source.path(), "original.pdf", &["ALIAS"]);
+    let alias = source.path().join("alias.pdf");
+    fs::hard_link(&original, &alias).unwrap();
+    let middle = support::write_semantic_pdf_fixture(source.path(), "middle.pdf", &["MIDDLE"]);
+    let job = service
+        .create_job(request(
+            &[alias, middle, original],
+            destination.path(),
+            "hard-links.pdf",
+        ))
+        .unwrap();
+    let completed = service.execute(&job.id, |_| {}).unwrap();
+    assert_eq!(
+        completed.inputs[0].file_identity,
+        completed.inputs[2].file_identity
+    );
+    assert_eq!(
+        semantic_page_markers(
+            &state,
+            Path::new(completed.outputs[0].final_path.as_ref().unwrap()),
+            3,
+        )
+        .unwrap(),
+        ["ALIAS", "MIDDLE", "ALIAS"]
+    );
+}
+
+#[test]
+fn multi_page_merge_preserves_document_and_within_document_page_order() {
+    let (_app_data, state, service) = service();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let c = support::write_semantic_pdf_fixture(source.path(), "c.pdf", &["C1", "C2"]);
+    let a = support::write_semantic_pdf_fixture(source.path(), "a.pdf", &["A1"]);
+    let b = support::write_semantic_pdf_fixture(source.path(), "b.pdf", &["B1", "B2"]);
+    let job = service
+        .create_job(request(&[c, a, b], destination.path(), "multi-page.pdf"))
+        .unwrap();
+    let completed = service.execute(&job.id, |_| {}).unwrap();
+    assert_eq!(
+        semantic_page_markers(
+            &state,
+            Path::new(completed.outputs[0].final_path.as_ref().unwrap()),
+            5,
+        )
+        .unwrap(),
+        ["C1", "C2", "A1", "B1", "B2"]
+    );
+}
+
+#[test]
+fn semantic_page_inspection_parsers_fail_closed() {
+    assert!(parse_page_content_references(b"", 1).is_err());
+    assert!(parse_page_content_references(&[0xff], 1).is_err());
+    assert!(parse_page_content_references(b"page 1: missing\n", 1).is_err());
+    assert!(parse_page_content_references(b"page 1: 1 0 R\n", 1).is_err());
+    assert!(parse_page_content_references(b"page 1: 1 0 R\n  content:\n    invalid\n", 1).is_err());
+    assert!(
+        parse_page_content_references(b"page 1: 1 0 R\n  content:\n    2 0 R\n    3 0 R\n", 1)
+            .is_err()
+    );
+    assert!(parse_page_content_references(b"page 1: 1 0 R\n  content:\n    2 0 R\n", 2).is_err());
+    assert!(parse_page_content_references(&vec![b'x'; CAPTURE_LIMIT_BYTES], 1).is_err());
+    assert!(parse_semantic_marker(b"no marker\n").is_err());
+    assert!(parse_semantic_marker(b"% DS-G02-MARKER:A\n% DS-G02-MARKER:B\n").is_err());
+    assert!(parse_semantic_marker(b"% DS-G02-MARKER:lowercase\n").is_err());
+    assert!(parse_semantic_marker(&[0xff]).is_err());
 }
 
 #[test]

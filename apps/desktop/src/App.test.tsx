@@ -33,6 +33,7 @@ import App from './App';
 const system: SystemStatus = { product: 'Document Studio', phase: 'G02', offlineByDefault: true, databaseSchemaVersion: 3 };
 const inputOne: FileInspection = { path: 'C:\\input\\one.pdf', displayName: 'one.pdf', sizeBytes: 4096, modifiedAt: '2026-08-17T12:00:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-one' };
 const inputTwo: FileInspection = { path: 'C:\\input\\two.pdf', displayName: 'two.pdf', sizeBytes: 8192, modifiedAt: '2026-08-17T12:01:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-two' };
+const inputThree: FileInspection = { path: 'C:\\input\\three.pdf', displayName: 'three.pdf', sizeBytes: 12288, modifiedAt: '2026-08-17T12:02:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-three' };
 const dependencies: DependencyDiagnostic[] = [
   { id: 'document-studio-core', kind: 'built-in', status: 'available', version: '0.1.0', capabilities: ['diagnostic.copy'], checkedAt: '2026-08-17T12:00:00Z', errorCode: null },
   { id: 'qpdf', kind: 'external', status: 'available', version: '12.3.2', capabilities: ['pdf.merge'], checkedAt: '2026-08-17T12:00:00Z', errorCode: null },
@@ -52,6 +53,16 @@ function makeJob(state: JobRecord['state'] = 'queued'): JobRecord {
 
 function progress(messageCode: string, state: ProgressEvent['state'] = 'running'): ProgressEvent {
   return { schemaVersion: 1, sequence: state === 'completed' ? 3 : 2, emittedAt: '2026-08-17T12:00:02Z', jobId: makeJob().id, operationId: 'pdf.merge', state, stage: state === 'completed' ? 'cleanup' : 'execute', completedUnits: 0, totalUnits: 2, unit: 'items', messageCode, message: messageCode === 'MERGING_PDFS' ? 'Merging the ordered PDF snapshots' : 'The verified merged PDF is ready', cancellable: state !== 'completed' };
+}
+
+async function renderWithInputs(inspections: FileInspection[]) {
+  const user = userEvent.setup();
+  mocks.selectPdfInputs.mockResolvedValue(inspections.map((input) => input.path));
+  mocks.inspect.mockResolvedValue(inspections);
+  render(<App />);
+  await screen.findByText('Offline by default');
+  await user.click(screen.getByRole('button', { name: /Add PDFs/ }));
+  return user;
 }
 
 describe('G02 PDF Merge screen', () => {
@@ -75,19 +86,90 @@ describe('G02 PDF Merge screen', () => {
     expect(accessibility.violations).toEqual([]);
   });
 
-  it('adds, reorders and removes PDFs with equivalent keyboard controls', async () => {
-    const user = userEvent.setup(); render(<App />); await screen.findByText('Offline by default');
-    await user.click(screen.getByRole('button', { name: /Add PDFs/ }));
-    expect(screen.getByLabelText('1. one.pdf')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Move two.pdf up' }));
-    expect(screen.getAllByRole('listitem')[0]?.getAttribute('aria-label')).toBe('1. two.pdf');
-    screen.getByLabelText('1. two.pdf').focus();
+  it('keeps the same logical row focused after Alt+ArrowDown', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const movedRow = screen.getByLabelText('1. one.pdf');
+    movedRow.focus();
     await user.keyboard('{Alt>}{ArrowDown}{/Alt}');
-    expect(screen.getAllByRole('listitem')[0]?.getAttribute('aria-label')).toBe('1. one.pdf');
+    expect(screen.getByLabelText('2. one.pdf')).toBe(movedRow);
+    expect(document.activeElement).toBe(movedRow);
+  });
+
+  it('keeps the same logical row focused after Alt+ArrowUp', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const movedRow = screen.getByLabelText('2. two.pdf');
+    movedRow.focus();
+    await user.keyboard('{Alt>}{ArrowUp}{/Alt}');
+    expect(screen.getByLabelText('1. two.pdf')).toBe(movedRow);
+    expect(document.activeElement).toBe(movedRow);
+  });
+
+  it('keeps the same Move down control focused after button reorder', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const moveDown = screen.getByRole('button', { name: 'Move one.pdf down' });
+    await user.click(moveDown);
+    expect(screen.getByLabelText('2. one.pdf').contains(moveDown)).toBe(true);
+    expect(document.activeElement).toBe(moveDown);
+  });
+
+  it('keeps the same Move up control focused after button reorder', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const moveUp = screen.getByRole('button', { name: 'Move three.pdf up' });
+    await user.click(moveUp);
+    expect(screen.getByLabelText('2. three.pdf').contains(moveUp)).toBe(true);
+    expect(document.activeElement).toBe(moveUp);
+  });
+
+  it('focuses the next row after deleting the first row', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const nextRow = screen.getByLabelText('2. two.pdf');
+    screen.getByLabelText('1. one.pdf').focus();
+    await user.keyboard('{Delete}');
+    expect(screen.getByLabelText('1. two.pdf')).toBe(nextRow);
+    expect(document.activeElement).toBe(nextRow);
+  });
+
+  it('focuses the next row after deleting a middle row', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const nextRow = screen.getByLabelText('3. three.pdf');
     screen.getByLabelText('2. two.pdf').focus();
     await user.keyboard('{Delete}');
-    expect(screen.queryByText('two.pdf')).toBeNull();
-    expect(screen.getByText('two.pdf removed.')).toBeTruthy();
+    expect(screen.getByLabelText('2. three.pdf')).toBe(nextRow);
+    expect(document.activeElement).toBe(nextRow);
+  });
+
+  it('focuses the previous row after deleting the last row', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const previousRow = screen.getByLabelText('2. two.pdf');
+    screen.getByLabelText('3. three.pdf').focus();
+    await user.keyboard('{Delete}');
+    expect(document.activeElement).toBe(previousRow);
+  });
+
+  it('focuses the row taking the removed position after using Remove', async () => {
+    const user = await renderWithInputs([inputOne, inputTwo, inputThree]);
+    const nextRow = screen.getByLabelText('2. two.pdf');
+    await user.click(screen.getByRole('button', { name: 'Remove one.pdf' }));
+    expect(screen.getByLabelText('1. two.pdf')).toBe(nextRow);
+    expect(document.activeElement).toBe(nextRow);
+  });
+
+  it('distinguishes duplicate-path rows by stable selection ID while restoring focus', async () => {
+    const user = await renderWithInputs([inputOne, inputOne]);
+    const duplicateRows = screen.getAllByRole('listitem');
+    expect(duplicateRows[0]?.dataset.selectionId).not.toBe(duplicateRows[1]?.dataset.selectionId);
+    const remainingDuplicate = duplicateRows[1];
+    duplicateRows[0]?.focus();
+    await user.keyboard('{Delete}');
+    expect(screen.getByLabelText('1. one.pdf')).toBe(remainingDuplicate);
+    expect(document.activeElement).toBe(remainingDuplicate);
+  });
+
+  it('returns focus to Add PDFs after removing the final row', async () => {
+    const user = await renderWithInputs([inputOne]);
+    screen.getByLabelText('1. one.pdf').focus();
+    await user.keyboard('{Delete}');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /Add PDFs/ }));
   });
 
   it('passes the exact displayed order to pdf.merge and supports native drop', async () => {

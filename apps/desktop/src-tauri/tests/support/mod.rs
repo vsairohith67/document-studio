@@ -65,6 +65,41 @@ pub fn write_multi_page_pdf_fixture(
     write_pdf_objects(directory, name, &objects, 1)
 }
 
+pub fn write_semantic_pdf_fixture(directory: &Path, name: &str, page_markers: &[&str]) -> PathBuf {
+    assert!(!page_markers.is_empty());
+    let kids = (0..page_markers.len())
+        .map(|index| format!("{} 0 R", 3 + index * 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!(
+            "<< /Type /Pages /Count {} /Kids [{kids}] >>",
+            page_markers.len()
+        ),
+    ];
+    for (index, marker) in page_markers.iter().enumerate() {
+        assert!(
+            !marker.is_empty()
+                && marker.len() <= 64
+                && marker
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-')
+        );
+        let stream = format!("% DS-G02-MARKER:{marker}\nq\nQ\n");
+        let stream_object = 4 + index * 2;
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} 792] /Resources << >> /Contents {stream_object} 0 R >>",
+            600 + (index % 10)
+        ));
+        objects.push(format!(
+            "<< /Length {} >>\nstream\n{stream}endstream",
+            stream.len()
+        ));
+    }
+    write_pdf_objects(directory, name, &objects, 1)
+}
+
 pub fn write_zero_page_pdf(directory: &Path, name: &str) -> PathBuf {
     write_pdf_objects(
         directory,

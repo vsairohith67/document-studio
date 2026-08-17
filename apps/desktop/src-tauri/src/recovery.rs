@@ -384,7 +384,7 @@ fn worker_stopped_error(state: JobState) -> OperationError {
     OperationError::safe(
         code,
         "The job did not finish",
-        "Temporary data was safely reconciled; G01 does not automatically resume jobs.",
+        "Temporary data was safely reconciled; Document Studio does not automatically resume interrupted jobs.",
         OperationStage::Recovery,
         true,
     )

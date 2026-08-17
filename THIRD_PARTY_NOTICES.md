@@ -1,6 +1,6 @@
 # Third-Party Notices and Adoption Gate
 
-This repository does not bundle production document-engine binaries or model weights. G01 does bundle the public-domain SQLite C source through the MIT-licensed `rusqlite` crate. Its direct application and test dependencies are adopted from the official npm, crates.io, and PyPI registries under the licences recorded in the dependency register. Registry integrity data is preserved in committed lockfiles.
+G02 bundles the reviewed qpdf 12.3.2 production PDF engine and its required Windows runtime files. No model weights or unrelated production document engines are bundled. G01 also bundles the public-domain SQLite C source through the MIT-licensed `rusqlite` crate. Direct application and test dependencies are adopted from the official npm, crates.io, and PyPI registries under the licences recorded in the dependency register. Registry integrity data is preserved in committed lockfiles.
 
 The authoritative register is `docs/14-DEPENDENCY-AND-LICENSE-REGISTER.md`. Model-specific governance is in `docs/15-HUGGING-FACE-MODEL-PLAN.md` and `models/models.yaml`.
 
