@@ -1,11 +1,13 @@
 {
   "product": "Document Studio",
-  "version": "0.1.0-g01-foundation",
-  "audit_date": "16 August 2026",
+  "version": "0.2.0-g02-pdf-merge",
+  "audit_date": "17 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
+  "current_goal": "G02 — Production PDF Merge",
+  "current_goal_prompt": "codex/prompts/02-pdf-merge.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
   "report_generator": "scripts/generate_master_report.py",
@@ -24,8 +26,24 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G01 is local and offline by default. No cloud provider, external AI, account, installer or external project service is implemented.",
+  "publication_status": "G02 is in review on draft PR #5. Production PDF Merge and the bounded independent-review remediation are committed on feat/g02-pdf-merge; G02 is not complete or merged, independent acceptance re-review remains pending, and G03 remains blocked. The draft PR and canonical trackers record the exact remediation head and terminal CI evidence after those values exist.",
   "foundation_operation": "diagnostic.copy",
+  "production_operation": {
+    "id": "pdf.merge",
+    "version": "1.0.0",
+    "status": "review-remediation",
+    "engine": "qpdf 12.3.2",
+    "input_count": "2-128",
+    "ordering": "One UI row, database ordinal, physical workspace snapshot and qpdf --file argument per input ordinal.",
+    "output": "One independently verified page-only PDF published without overwrite.",
+    "boundaries": [
+      "No database migration",
+      "No Tauri capability expansion",
+      "No runtime download",
+      "No unsandboxed fallback",
+      "No G03 or later feature"
+    ]
+  },
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [
     "CONTRIBUTING.md",

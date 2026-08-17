@@ -27,7 +27,9 @@ pub enum WorkspaceError {
 #[derive(Debug, Clone)]
 pub struct JobWorkspace {
     pub root: PathBuf,
+    pub inputs: PathBuf,
     pub staging: PathBuf,
+    pub temporary: PathBuf,
     pub audit: PathBuf,
 }
 
@@ -59,12 +61,16 @@ impl WorkspaceManager {
         let job_id = Uuid::parse_str(job_id).map_err(|_| WorkspaceError::InvalidJobId)?;
         let root = self.root.join(job_id.hyphenated().to_string());
         fs::create_dir(&root)?;
+        fs::create_dir(root.join("inputs"))?;
         fs::create_dir(root.join("staging"))?;
+        fs::create_dir(root.join("temp"))?;
         fs::create_dir(root.join("audit"))?;
         create_marker(&root.join(JOB_MARKER), &job_id.hyphenated().to_string())?;
         reject_reparse_components(&root)?;
         Ok(JobWorkspace {
+            inputs: root.join("inputs"),
             staging: root.join("staging"),
+            temporary: root.join("temp"),
             audit: root.join("audit"),
             root,
         })

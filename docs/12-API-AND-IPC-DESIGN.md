@@ -49,3 +49,9 @@ SQLite-backed `jobs_get` and `history_list` are authoritative. The client ignore
   "helpId": "pdf-passwords"
 }
 ```
+
+## G02 IPC behavior
+
+`jobs_create` is a discriminated request: `diagnostic.copy` requires one input and `pdf.merge` requires 2–128. `files_inspect` accepts up to 128 paths and reports `application/pdf` only when extension and header inspection agree. Rust validates every path and ordinal again.
+
+The frontend submits its displayed array unchanged. It freezes the list after creation, follows `document-studio-job-progress-v1`, and reconciles from `jobs_get` after reload or an event gap. Native drop paths pass through the same inspection command as the file chooser. No general filesystem, shell, HTTP, or expanded Tauri capability is exposed.

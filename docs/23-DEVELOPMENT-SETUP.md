@@ -55,7 +55,7 @@ npm --workspace @document-studio/desktop run tauri -- build --no-bundle
 npm --workspace @document-studio/desktop run tauri -- dev
 ```
 
-The launched foundation window should show neutral Document Studio copy, offline status, dependency diagnostics, recent metadata-only history, a disabled viewer placeholder and the `diagnostic.copy` workflow. Test only with a synthetic file. Do not add PDF engines until this entire baseline builds and tests cleanly.
+The launched window shows the production PDF Merge workspace. Add 2–128 local PDFs, reorder or remove them, choose a destination and safe `.pdf` name, then merge. The runtime uses only the bundled qpdf and never downloads an engine.
 
 `pip-tools==7.6.0` is needed only when regenerating the Python lock. On the accepted machine it required project-local `pip==26.1`; runtime validation needs only the committed hash-locked PyYAML package.
 
@@ -63,7 +63,15 @@ The launched foundation window should show neutral Document Studio copy, offline
 
 ### qpdf
 
-Use the signed official Windows release. Verify its published checksum/signature, store provenance in `third_party/manifest.json`, and invoke it through validated argument arrays. It is the Phase 1 engine for structural transforms, encryption, linearization and integrity checks.
+G02 uses only the reviewed bundle under `apps/desktop/src-tauri/resources/qpdf/12.3.2`. Verify it without downloading anything:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-qpdf-bundle.ps1 -BundleRoot .\apps\desktop\src-tauri\resources\qpdf\12.3.2
+& .\apps\desktop\src-tauri\resources\qpdf\12.3.2\bin\qpdf.exe --version
+cargo test -p document-studio --locked --features test-runtime --test process_sandbox -- --test-threads=1
+```
+
+The acquisition script is for an explicitly reviewed dependency update only. It refuses an existing destination, downloads only the three pinned official assets, requires Cosign 3.0.6, verifies provenance and archive hash, and emits the exact reviewed runtime tree. Never put qpdf on PATH or invoke it through a shell.
 
 ### libvips
 

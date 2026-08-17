@@ -2,6 +2,7 @@ import Ajv2020 from 'ajv/dist/2020';
 import addFormats from 'ajv-formats';
 import { describe, expect, it } from 'vitest';
 import fixtures from '../fixtures/foundation-contracts.json';
+import pdfMergeFixtures from '../fixtures/pdf-merge-contracts.json';
 import ipcSchema from '../ipc.schema.json';
 import jobSchema from '../job.schema.json';
 import operationSchema from '../operation.schema.json';
@@ -15,6 +16,10 @@ const validateOperation = ajv.compile(operationSchema);
 const validateProgress = ajv.compile({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $ref: `${ipcSchema.$id}#/$defs/progressEvent`,
+});
+const validateJobsCreateRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${ipcSchema.$id}#/$defs/jobsCreateRequest`,
 });
 describe('foundation contracts', () => {
   it('accepts the shared golden job, operation, and event', () => {
@@ -44,5 +49,47 @@ describe('foundation contracts', () => {
 
   it('rejects progress events that leak unapproved fields', () => {
     expect(validateProgress({ ...fixtures.progressEvent, sourcePath: 'C:\\secret.txt' })).toBe(false);
+  });
+});
+
+describe('pdf.merge contracts', () => {
+  it('accepts the production manifest and minimum ordered request', () => {
+    expect(
+      validateOperation(pdfMergeFixtures.operationManifest),
+      JSON.stringify(validateOperation.errors),
+    ).toBe(true);
+    expect(
+      validateJobsCreateRequest(pdfMergeFixtures.minimumRequest),
+      JSON.stringify(validateJobsCreateRequest.errors),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['one input', ['C:\\input\\only.pdf']],
+    ['more than 128 inputs', Array.from({ length: 129 }, (_, index) => `C:\\input\\${index}.pdf`)],
+  ])('rejects %s', (_label, inputPaths) => {
+    expect(validateJobsCreateRequest({
+      ...pdfMergeFixtures.minimumRequest,
+      inputPaths,
+    })).toBe(false);
+  });
+
+  it('preserves duplicate paths as intentional ordered entries', () => {
+    const duplicate = 'C:\\input\\same.pdf';
+    expect(validateJobsCreateRequest({
+      ...pdfMergeFixtures.minimumRequest,
+      inputPaths: [duplicate, duplicate],
+    })).toBe(true);
+  });
+
+  it('rejects a non-PDF output name and extra settings', () => {
+    expect(validateJobsCreateRequest({
+      ...pdfMergeFixtures.minimumRequest,
+      requestedOutputName: 'merged.txt',
+    })).toBe(false);
+    expect(validateJobsCreateRequest({
+      ...pdfMergeFixtures.minimumRequest,
+      settings: {},
+    })).toBe(false);
   });
 });

@@ -13,5 +13,9 @@
     "windows": [{"title":"Document Studio","width":1280,"height":820,"minWidth":960,"minHeight":640}],
     "security": {"csp": "default-src 'self'; img-src 'self' asset: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"}
   },
-  "bundle": {"active":true,"targets":"all"}
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": ["resources/qpdf/12.3.2/**/*"]
+  }
 }

@@ -11,9 +11,9 @@ use thiserror::Error;
 use crate::contracts::{
     DependencyDiagnostic, JobInput, JobOutput, JobProgress, JobRecord, JobState, OperationError,
     OperationStage, OutputStatus, ProgressUnit, SettingRecord, DEFAULT_HISTORY_RETENTION_DAYS,
-    DIAGNOSTIC_COPY_OPERATION_ID, DIAGNOSTIC_COPY_VERSION, HISTORY_RETENTION_KEY,
-    HISTORY_RETENTION_SCOPE, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
-    LEGACY_DIAGNOSTIC_COPY_VERSION, MAX_HISTORY_PURGE,
+    DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY, HISTORY_RETENTION_SCOPE,
+    LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN, LEGACY_DIAGNOSTIC_COPY_VERSION,
+    MAX_HISTORY_PURGE,
 };
 use crate::job_engine::can_transition;
 
@@ -416,10 +416,15 @@ impl Database {
         Ok(sequence)
     }
 
-    pub fn update_input_hash(&mut self, id: &str, sha256: &str) -> Result<(), DatabaseError> {
+    pub fn update_input_hash(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        sha256: &str,
+    ) -> Result<(), DatabaseError> {
         let changed = self.connection.execute(
-            "UPDATE job_inputs SET sha256 = ?1 WHERE job_id = ?2 AND ordinal = 0",
-            params![sha256, id],
+            "UPDATE job_inputs SET sha256 = ?1 WHERE job_id = ?2 AND ordinal = ?3",
+            params![sha256, id, ordinal],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
@@ -519,16 +524,10 @@ impl Database {
             "SELECT EXISTS(
                 SELECT 1 FROM jobs
                 JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = 0
-                WHERE jobs.id = ?1 AND jobs.operation_id = ?2 AND jobs.operation_version = ?3
-                  AND jobs.state IN ('verifying', 'publishing')
-                  AND job_outputs.partial_path = ?4
+                WHERE jobs.id = ?1 AND jobs.state IN ('verifying', 'publishing')
+                  AND job_outputs.partial_path = ?2
              )",
-            params![
-                id,
-                DIAGNOSTIC_COPY_OPERATION_ID,
-                DIAGNOSTIC_COPY_VERSION,
-                expected_partial_path,
-            ],
+            params![id, expected_partial_path],
             |row| row.get(0),
         )?;
         if !reserved {
@@ -573,18 +572,11 @@ impl Database {
                     SELECT 1 FROM jobs
                     JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = 0
                     JOIN job_stage_runs ON job_stage_runs.job_id = jobs.id
-                    WHERE jobs.id = ?1 AND jobs.operation_id = ?2 AND jobs.operation_version = ?3
-                      AND job_outputs.partial_path = ?4
+                    WHERE jobs.id = ?1 AND job_outputs.partial_path = ?2
                       AND job_stage_runs.stage = 'publish'
-                      AND job_stage_runs.safe_result_code = ?5
+                      AND job_stage_runs.safe_result_code = ?3
                  )",
-                params![
-                    id,
-                    DIAGNOSTIC_COPY_OPERATION_ID,
-                    DIAGNOSTIC_COPY_VERSION,
-                    expected_partial_path,
-                    ownership_result_code,
-                ],
+                params![id, expected_partial_path, ownership_result_code],
                 |row| row.get(0),
             )
             .map_err(Into::into)

@@ -154,6 +154,7 @@ pub struct AppState {
     pub database: Arc<Mutex<Database>>,
     pub workspaces: WorkspaceManager,
     pub cancellations: Arc<CancellationRegistry>,
+    pub qpdf: Option<crate::qpdf::QpdfRuntimeManager>,
 }
 
 impl AppState {
@@ -162,7 +163,13 @@ impl AppState {
             database: Arc::new(Mutex::new(database)),
             workspaces,
             cancellations: Arc::new(CancellationRegistry::default()),
+            qpdf: None,
         }
+    }
+
+    pub fn with_qpdf(mut self, qpdf: crate::qpdf::QpdfRuntimeManager) -> Self {
+        self.qpdf = Some(qpdf);
+        self
     }
 
     pub fn database(&self) -> MutexGuard<'_, Database> {

@@ -10,15 +10,42 @@
       "properties": { "jobId": { "type": "string", "format": "uuid" } }
     },
     "jobsCreateRequest": {
+      "oneOf": [
+        { "$ref": "#/$defs/diagnosticCopyCreateRequest" },
+        { "$ref": "#/$defs/pdfMergeCreateRequest" }
+      ]
+    },
+    "diagnosticCopyCreateRequest": {
       "type": "object",
       "additionalProperties": false,
       "required": ["operationId", "inputPaths", "destinationDirectory", "requestedOutputName"],
       "properties": {
         "operationId": { "const": "diagnostic.copy" },
-        "inputPaths": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "type": "string", "minLength": 1, "maxLength": 32767 } },
-        "destinationDirectory": { "type": "string", "minLength": 1, "maxLength": 32767 },
-        "requestedOutputName": { "type": "string", "minLength": 1, "maxLength": 255 }
+        "inputPaths": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "$ref": "#/$defs/localPath" } },
+        "destinationDirectory": { "$ref": "#/$defs/localPath" },
+        "requestedOutputName": { "$ref": "#/$defs/outputName" }
       }
+    },
+    "pdfMergeCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operationId", "inputPaths", "destinationDirectory", "requestedOutputName"],
+      "properties": {
+        "operationId": { "const": "pdf.merge" },
+        "inputPaths": { "type": "array", "minItems": 2, "maxItems": 128, "items": { "$ref": "#/$defs/localPath" } },
+        "destinationDirectory": { "$ref": "#/$defs/localPath" },
+        "requestedOutputName": { "allOf": [{ "$ref": "#/$defs/outputName" }, { "type": "string", "pattern": "\\.[pP][dD][fF]$" }] }
+      }
+    },
+    "localPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32767
+    },
+    "outputName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
     },
     "progressEvent": {
       "type": "object",

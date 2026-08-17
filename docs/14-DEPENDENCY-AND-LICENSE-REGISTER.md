@@ -8,7 +8,7 @@ The dependency register distinguishes **adopt**, **evaluate**, **optional servic
 | React 19.2.7+ | UI | Adopt | MIT; pin a patched 19.2.x or later |
 | Vite 8.1.5+ | Front-end build | Adopt | MIT; Vite 8 uses Rolldown; pair with `@vitejs/plugin-react` 6.x |
 | PDF.js 5.7.284+ | Viewer, text layer, annotations | Adopt | Apache-2.0 |
-| qpdf 12.3.2+ | Structural PDF transforms/encryption | Adopt | Apache-2.0; verify release signatures/checksums |
+| qpdf 12.3.2 | Structural PDF merge and verification | Adopt for G02 | Apache-2.0; signed checksum, exact archive/runtime hashes and bundled license materials verified |
 | libvips 8.18.2+ | Image conversion/compression | Adopt | LGPL-2.1-or-later; dynamic-linking/distribution review |
 | OCRmyPDF 17.8.x | OCR orchestration | Evaluate as managed optional worker | MPL-2.0; native Windows needs Python, Tesseract and Ghostscript; packaging and sandboxing gate required |
 | Tesseract 5.5.2+ | OCR engine/language packs | Adopt | Apache-2.0; Windows installer is third-party, so binary provenance must be governed |
@@ -65,4 +65,12 @@ The versions above are recheck baselines, not permanent pins. Before each releas
 | `PyYAML` | Parse the existing model registry validator input | Exact `6.0.3` with hashes | MIT | PyPI | Existing validator requirement; a custom limited YAML parser is lighter but unnecessary | Validation |
 | `pip-tools` | Generate the hash-pinned validation lock | Exact `7.6.0` when invoked | BSD-3-Clause | PyPI | Reproducible hashes; hand-maintained hash lists are error-prone | Implementation tooling |
 
-G01 explicitly defers PDF.js, qpdf, libvips, OCRmyPDF, Tesseract, LibreOffice, Ghostscript, Go services, model runtimes, cloud/provider SDKs, SQLCipher, and general Tauri filesystem/shell plugins. Dependency diagnostics describe future engines as deferred and never install or download them. The single-instance plugin is Rust-side only and requires no capability-file change.
+G01 deferred production document engines. G02 adopts only qpdf 12.3.2; PDF.js, libvips, OCRmyPDF, Tesseract, LibreOffice, Ghostscript, Go services, model runtimes, cloud/provider SDKs, SQLCipher, and general Tauri filesystem/shell plugins remain deferred. Dependency diagnostics never install or download an engine. The single-instance plugin is Rust-side only and requires no capability-file change.
+
+## G02 qpdf adoption
+
+[ADR-009](adr/ADR-009-qpdf-and-production-pdf-merge.md) adopts only qpdf 12.3.2 for page-only PDF Merge. The official `qpdf-12.3.2-msvc64.zip` is pinned to 24,555,583 bytes and SHA-256 `8941870a604e7c87ed24566b038d46c24ce76616254d2383c578f60c0677f202`. Its checksum bundle verifies through Sigstore for `ejb@ql.org` and issuer `https://github.com/login/oauth`.
+
+The reviewed resource contains `qpdf.exe`, `qpdf30.dll`, the required Microsoft Visual C++ 14.44.35211 runtime DLLs, full Apache-2.0 text, upstream qpdf license pages and signed provenance. Fifteen controlled files have hard-coded relative paths, sizes and SHA-256 hashes; the resource manifest makes sixteen files and 8,574,799 bytes total. No PATH lookup, installer, registry change, runtime download, updater or alternate engine is allowed.
+
+Cosign 3.0.6 is acquisition/CI verification tooling, not a shipped application runtime. `windows-sys` remains the existing Rust dependency; G02 only enables its AppContainer, token, process and Job Object feature modules, so no Cargo package version or lockfile entry changes.

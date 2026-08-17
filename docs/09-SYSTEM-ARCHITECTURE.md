@@ -26,3 +26,11 @@ The desktop app uses Tauri as the trusted boundary. React renders the workbench.
 ## Architectural boundary
 
 The local desktop should not depend on the future Go service. Both implement the same operation contract and schemas, but desktop remains fully useful offline.
+
+## G02 production path
+
+`pdf.merge` is dispatched through the operation registry while `diagnostic.copy` remains a regression operation. Rust freezes one ASCII-named workspace snapshot per persisted ordinal. Expensive validation is shared only by source file identity and runs with bounded concurrency; snapshots and qpdf `--file` arguments are never deduplicated.
+
+The verified bundled qpdf 12.3.2 executable runs through direct `CreateProcessW` arguments in the fixed zero-capability `DocumentStudio.PdfEngine.Qpdf.V1` AppContainer. A private Job Object enforces kill-on-close, one active process, a 2 GiB process-memory limit, and owned termination. There is no shell, network capability, PATH discovery, random profile, or unsandboxed fallback.
+
+Output stays in the owned workspace until Rust file checks, a new SHA-256/size read, strict qpdf reopen, encryption check, and exact page-count sum pass. G01 then performs destination-local no-overwrite publication and final hash/size equality. Restart recovery never resumes a merge.

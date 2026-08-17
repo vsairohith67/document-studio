@@ -145,6 +145,37 @@ fn job_repository_round_trips_and_compare_and_set_rejects_stale_updates() {
 }
 
 #[test]
+fn input_hash_updates_address_the_exact_persisted_ordinal() {
+    let mut database = Database::open_in_memory().unwrap();
+    let mut job = sample_job();
+    let mut second = job.inputs[0].clone();
+    second.ordinal = 1;
+    second.display_name = "second.pdf".to_owned();
+    second.source_path = r"C:\Users\Example\Documents\second.pdf".to_owned();
+    second.canonical_path = second.source_path.clone();
+    second.file_identity = "volume-1:file-43".to_owned();
+    job.inputs.push(second);
+    database.create_job(&job).unwrap();
+
+    let first_hash = "1".repeat(64);
+    let second_hash = "2".repeat(64);
+    database
+        .update_input_hash(&job.id, 1, &second_hash)
+        .unwrap();
+    database.update_input_hash(&job.id, 0, &first_hash).unwrap();
+
+    let stored = database.get_job(&job.id).unwrap().unwrap();
+    assert_eq!(
+        stored.inputs[0].sha256.as_deref(),
+        Some(first_hash.as_str())
+    );
+    assert_eq!(
+        stored.inputs[1].sha256.as_deref(),
+        Some(second_hash.as_str())
+    );
+}
+
+#[test]
 fn retention_deletes_only_old_terminal_metadata() {
     let mut database = Database::open_in_memory().unwrap();
     let mut old_terminal = sample_job();

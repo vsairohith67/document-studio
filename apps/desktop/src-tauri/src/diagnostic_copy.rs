@@ -386,7 +386,7 @@ impl DiagnosticCopyService {
         {
             let mut database = self.state.database();
             database
-                .update_input_hash(job_id, &copied_hash)
+                .update_input_hash(job_id, 0, &copied_hash)
                 .map_err(|_| metadata_error())?;
             database
                 .set_output_staging(
@@ -429,7 +429,7 @@ impl DiagnosticCopyService {
         let result = publish_verified_staging_with_observer(
             PublicationContext {
                 staging_path: &staging_path,
-                input_path: &revalidated_input,
+                input_paths: &[&revalidated_input],
                 destination_directory: &destination,
                 requested_name: &requested_name,
                 job_id,

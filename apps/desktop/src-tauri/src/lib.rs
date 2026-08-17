@@ -5,8 +5,12 @@ pub mod diagnostic_copy;
 pub mod diagnostics;
 pub mod ipc;
 pub mod job_engine;
+pub mod operation_registry;
 pub mod path_policy;
+pub mod pdf_merge;
+pub mod process_sandbox;
 pub mod publication;
+pub mod qpdf;
 pub mod recovery;
 pub mod windows_security;
 pub mod workspace;
@@ -43,6 +47,25 @@ pub fn initialize_runtime(
     Ok(state)
 }
 
+pub fn initialize_runtime_with_resources(
+    app_data: &Path,
+    resource_directory: &Path,
+    maintenance_time: DateTime<Utc>,
+) -> Result<AppState, RuntimeInitializationError> {
+    let state = initialize_runtime(app_data, maintenance_time)?;
+    let bundle = resource_directory.join("resources/qpdf/12.3.2");
+    #[cfg(debug_assertions)]
+    let bundle = if bundle.is_dir() {
+        bundle
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/qpdf/12.3.2")
+    };
+    Ok(state.with_qpdf(crate::qpdf::QpdfRuntimeManager::new(
+        bundle,
+        app_data.join("engines"),
+    )))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -58,7 +81,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data = runtime_app_data_directory(app)?;
-            let state = initialize_runtime(&app_data, Utc::now())?;
+            let resource_directory = app.path().resource_dir()?;
+            let state =
+                initialize_runtime_with_resources(&app_data, &resource_directory, Utc::now())?;
             #[cfg(feature = "test-runtime")]
             std::fs::write(
                 app_data.join(format!("runtime-started-{}", std::process::id())),

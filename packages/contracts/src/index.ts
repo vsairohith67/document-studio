@@ -181,12 +181,21 @@ export interface FilesInspectRequest {
   paths: string[];
 }
 
-export interface JobsCreateRequest {
+export interface DiagnosticCopyCreateRequest {
   operationId: 'diagnostic.copy';
   inputPaths: [string];
   destinationDirectory: string;
   requestedOutputName: string;
 }
+
+export interface PdfMergeCreateRequest {
+  operationId: 'pdf.merge';
+  inputPaths: [string, string, ...string[]];
+  destinationDirectory: string;
+  requestedOutputName: string;
+}
+
+export type JobsCreateRequest = DiagnosticCopyCreateRequest | PdfMergeCreateRequest;
 
 export interface JobIdRequest {
   jobId: string;

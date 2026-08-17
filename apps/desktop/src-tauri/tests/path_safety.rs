@@ -108,7 +108,10 @@ fn owned_workspace_creation_and_exact_cleanup_succeeds() {
     let app_data = tempdir().unwrap();
     let manager = WorkspaceManager::initialize(app_data.path()).unwrap();
     let workspace = manager.create_job(JOB_ID).unwrap();
+    assert!(workspace.inputs.is_dir());
     fs::write(workspace.staging.join("owned.bin"), b"temporary").unwrap();
+    assert!(workspace.temporary.is_dir());
+    assert!(workspace.audit.is_dir());
     assert!(workspace.root.starts_with(manager.root()));
     manager.cleanup_job(JOB_ID).unwrap();
     assert!(!workspace.root.exists());
@@ -170,7 +173,7 @@ fn publication_collision_race_never_replaces_competing_file() {
     let result = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "report-copy.bin",
             job_id: JOB_ID,
@@ -209,7 +212,7 @@ fn publication_reserves_the_exact_partial_before_creation() {
     let result = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "journaled.bin",
             job_id: JOB_ID,
@@ -251,7 +254,7 @@ fn generated_partial_that_already_exists_is_preserved() {
     let result = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "existing-partial.bin",
             job_id: JOB_ID,
@@ -293,7 +296,7 @@ fn guard_create_new_already_exists_is_bounded_and_preserves_the_existing_file() 
     let result = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "guarded.bin",
             job_id: JOB_ID,
@@ -335,7 +338,7 @@ fn reservation_release_failure_never_deletes_a_preexisting_partial() {
     let error = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "release-failure.bin",
             job_id: JOB_ID,
@@ -375,7 +378,7 @@ fn failed_activation_removes_the_delete_on_close_guard_before_returning() {
     let error = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "activation-crash.bin",
             job_id: JOB_ID,
@@ -416,7 +419,7 @@ fn collision_retries_are_bounded_and_exhaust_without_overwrite_or_partial() {
     let error = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "bounded.bin",
             job_id: JOB_ID,
@@ -458,7 +461,7 @@ fn collision_cleanup_failure_overrides_exhaustion_and_retains_exact_partial() {
     let error = publish_verified_staging_with_observer(
         PublicationContext {
             staging_path: &staging,
-            input_path: &input,
+            input_paths: &[&input],
             destination_directory: destination.path(),
             requested_name: "cleanup.bin",
             job_id: JOB_ID,

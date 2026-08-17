@@ -3,7 +3,9 @@
 - Tauri project and security/capability documentation: https://tauri.app/
 - React 19.2 release: https://react.dev/blog/2025/10/01/react-19-2
 - Vite 8.1 announcement: https://vite.dev/blog/announcing-vite8-1
-- qpdf: https://github.com/qpdf/qpdf
+- qpdf 12.3.2 release: https://github.com/qpdf/qpdf/releases/tag/v12.3.2
+- qpdf 12.3.2 CLI: https://qpdf.readthedocs.io/en/12.3/cli.html
+- Sigstore Cosign: https://docs.sigstore.dev/cosign/system_config/installation/
 - PDF.js: https://github.com/mozilla/pdf.js
 - pdf-lib: https://github.com/Hopding/pdf-lib
 - pdfcpu: https://github.com/pdfcpu/pdfcpu

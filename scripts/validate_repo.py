@@ -93,6 +93,32 @@ manifest = json.loads((ROOT / 'MANIFEST.json').read_text(encoding='utf-8'))
 if manifest.get('product') != 'Document Studio':
     raise SystemExit('MANIFEST.json does not use the canonical product name')
 
+qpdf_resource_manifest = ROOT / 'apps/desktop/src-tauri/resources/qpdf/12.3.2/qpdf-manifest.json'
+if qpdf_resource_manifest.exists():
+    notices = (ROOT / 'THIRD_PARTY_NOTICES.md').read_text(encoding='utf-8')
+    stale_dependency_claim = 'This repository does not bundle production document-engine binaries or model weights.'
+    if stale_dependency_claim in notices:
+        raise SystemExit('THIRD_PARTY_NOTICES.md denies the manifest-controlled bundled qpdf runtime')
+
+    g02_state_documents = [
+        ROOT / 'MANIFEST.json',
+        ROOT / 'codex/goals/G02-pdf-merge.md',
+        ROOT / 'docs/implementation-log/G02-pdf-merge.md',
+    ]
+    stale_g02_claims = [
+        'G02 READY TO STAGE',
+        'No commit, push or release has occurred.',
+        'with no staging, commit, push or release.',
+        'commit, push, or PR was added',
+    ]
+    for document in g02_state_documents:
+        contents = document.read_text(encoding='utf-8')
+        for stale_claim in stale_g02_claims:
+            if stale_claim in contents:
+                raise SystemExit(
+                    f'Stale G02 repository-state claim found in {document.relative_to(ROOT)}: {stale_claim}'
+                )
+
 with (ROOT / 'docs/feature-catalog.csv').open(encoding='utf-8') as f:
     rows = list(csv.DictReader(f))
 if len(rows) != 132:
@@ -155,5 +181,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01 locks, workspaces, migrations, contracts and privacy rules verified.'
+    f'{len(rows)} feature entries found; G01 foundations and G02 dependency/document consistency verified.'
 )

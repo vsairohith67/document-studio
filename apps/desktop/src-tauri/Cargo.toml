@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Document Studio desktop application"
 authors = ["Document Studio"]
 edition = "2021"
+default-run = "document-studio"
 
 [lib]
 name = "document_studio_lib"
@@ -26,8 +27,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 windows-sys = { version = "~0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Security_Isolation",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
@@ -38,3 +45,8 @@ tempfile = "~3.27.0"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 test-runtime = []
+
+[[bin]]
+name = "sandbox-probe"
+path = "src/bin/sandbox_probe.rs"
+required-features = ["test-runtime"]

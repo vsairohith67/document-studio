@@ -3,6 +3,12 @@ use serde_json::Value;
 
 pub const DIAGNOSTIC_COPY_OPERATION_ID: &str = "diagnostic.copy";
 pub const DIAGNOSTIC_COPY_VERSION: &str = "1.0.1";
+pub const PDF_MERGE_OPERATION_ID: &str = "pdf.merge";
+pub const PDF_MERGE_VERSION: &str = "1.0.0";
+pub const PDF_MERGE_MIN_INPUTS: usize = 2;
+pub const PDF_MERGE_MAX_INPUTS: usize = 128;
+pub const QPDF_DEPENDENCY_ID: &str = "qpdf";
+pub const QPDF_VERSION: &str = "12.3.2";
 pub const LEGACY_DIAGNOSTIC_COPY_VERSION: &str = "1.0.0";
 pub const LEGACY_CLEANUP_PROVEN: &str = "LEGACY_CLEANUP_PROVEN";
 pub const LEGACY_CLEANUP_UNPROVEN: &str = "LEGACY_CLEANUP_UNPROVEN";

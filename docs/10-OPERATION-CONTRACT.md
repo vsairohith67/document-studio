@@ -52,3 +52,13 @@ Every tool must implement the same lifecycle.
 - Each partial is flushed, closed, reopened, size/hash verified, and moved with same-directory no-replace/write-through semantics. The final file is reopened and verified before publication evidence clears the matching partial ownership.
 - Collision retries are bounded by `MAX_COLLISION_ATTEMPTS = 1000`. A retry starts only after an activated exact-identity partial was deleted through its opened handle, or the owned identity was proven absent, and the matching database value was cleared. A pre-existing file at a reserved path or guard path is preserved.
 - `1.0.0` is the pre-fix development protocol. A null `partial_path` or terminal state does not prove that an earlier destination partial was removed. Unknown legacy files are never inferred from names or scanned by prefix.
+
+## G02 `pdf.merge` 1.0.0
+
+- Inputs: exactly 2–128 ordered `application/pdf` files. The request array, database ordinals, physical `inputs/source-NNNN.pdf` snapshots, and qpdf `--file=` arguments match one-to-one.
+- Settings: an empty object with no additional properties. Output: exactly one `application/pdf`.
+- Dependency: bundled qpdf exactly 12.3.2.
+- Page-only policy: document metadata, bookmarks, attachments, interactive forms, and signatures are unsupported/not preserved as supported features. Existing digital signatures will not remain valid.
+- Strict preflight: PDF extension and magic, regular local file, stable identity/size/modified time while copied, unencrypted, strict no-recovery structural check, and at least one page.
+- Verification: owned regular staging file, plausible PDF header/size, SHA-256, strict reopen, unencrypted result, page count equal to the ordinal-aware input sum, and final publication size/hash equality.
+- Lifecycle: the shared `inspect → preflight → estimate → plan → execute → verify → publish → audit → cleanup` stages. qpdf execution reports an indeterminate stage instead of inventing a percentage.

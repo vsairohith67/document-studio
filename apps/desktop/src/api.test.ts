@@ -70,9 +70,23 @@ describe('typed Tauri API', () => {
   });
 
   it('uses restricted native dialogs and the versioned event name', async () => {
+    native.open.mockResolvedValueOnce([
+      'C:\\input\\cover.pdf',
+      'C:\\input\\body.pdf',
+    ]);
+    expect(await api.dialogs.selectPdfInputs()).toEqual([
+      'C:\\input\\cover.pdf',
+      'C:\\input\\body.pdf',
+    ]);
+    expect(native.open).toHaveBeenNthCalledWith(1, {
+      directory: false,
+      multiple: true,
+      filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
+    });
+
     native.open.mockResolvedValueOnce('C:\\input\\report.pdf');
     expect(await api.dialogs.selectInput()).toBe('C:\\input\\report.pdf');
-    expect(native.open).toHaveBeenCalledWith({ directory: false, multiple: false });
+    expect(native.open).toHaveBeenNthCalledWith(2, { directory: false, multiple: false });
 
     const handler = vi.fn();
     await api.jobs.onProgress(handler);

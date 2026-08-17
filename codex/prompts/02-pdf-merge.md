@@ -1,3 +1,7 @@
-# Codex Prompt 02 - PDF Merge
+# Codex Prompt 02 — Production PDF Merge
 
-Implement `pdf.merge` as the first production operation using qpdf. Support multiple inputs, page-range selection, drag order, outline/bookmark policy, deterministic naming, cancellation, staged output, verification and history. Do not overwrite originals. Add corrupt/encrypted input errors and golden/cancel/collision/recovery tests.
+Implement `pdf.merge` `1.0.0` on the accepted G01 foundation for 2–128 ordered local PDFs. Use page-only semantics with no page ranges, viewer or thumbnails. State that document metadata, bookmarks, attachments, interactive forms and signatures are unsupported/not preserved as supported features and that existing digital signatures will not remain valid; do not claim every structure is physically removed. Preserve deliberate duplicates and displayed order.
+
+Bundle only approved qpdf 12.3.2. Invoke it directly with an argument array in the stable fixed-name zero-capability Windows AppContainer and an owned Job Object; never use a shell, random/per-job profile or unsandboxed fallback. Create one physical ASCII-named snapshot per persisted ordinal even for duplicate identities. Deduplicate expensive preflight by identity with bounded concurrency, but keep UI order, database ordinals, snapshots and qpdf `--file` arguments one-to-one. Use the accepted production argv without `--deterministic-id`; enforce the accepted structural/encryption exit-code tables and independently verify page-count sum, reopen, SHA-256 and final publication equality.
+
+Reuse G01 cancellation, no-overwrite publication, recovery, progress, retention, IPC and privacy rules. Do not add a migration or Tauri capability. The approved Cosign 3.0.6 and signed qpdf 12.3.2 dependency gates have passed; do not change versions or add runtime downloads. Stop before architecture deviation, destructive data actions, commit, push, PR, merge or release.
