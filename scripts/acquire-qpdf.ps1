@@ -1,7 +1,13 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Acquire')]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Destination
+    [Parameter(Mandatory = $true, ParameterSetName = 'Acquire')]
+    [string]$Destination,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Manifest')]
+    [string]$ManifestBundleRoot,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Manifest')]
+    [string]$ManifestOutput
 )
 
 Set-StrictMode -Version Latest
@@ -46,6 +52,75 @@ function Get-RelativePath([string]$BasePath, [string]$ChildPath) {
         throw "Path is outside the expected root: $normalizedChild"
     }
     return $normalizedChild.Substring($normalizedBase.Length).Replace('\', '/')
+}
+
+function Write-CanonicalQpdfManifest([string]$BundleRoot, [string]$OutputPath) {
+    $resolvedBundleRoot = [System.IO.Path]::GetFullPath($BundleRoot)
+    if (-not (Test-Path -LiteralPath $resolvedBundleRoot -PathType Container)) {
+        throw "Manifest bundle root does not exist: $resolvedBundleRoot"
+    }
+
+    $resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+    $payloadFiles = [System.Collections.Generic.SortedDictionary[string, string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($file in Get-ChildItem -LiteralPath $resolvedBundleRoot -File -Recurse) {
+        $relativePath = Get-RelativePath $resolvedBundleRoot $file.FullName
+        if ($relativePath -ceq 'qpdf-manifest.json') {
+            continue
+        }
+        if ($payloadFiles.ContainsKey($relativePath)) {
+            throw "Manifest payload path is duplicated: $relativePath"
+        }
+        $payloadFiles.Add($relativePath, $file.FullName)
+    }
+
+    $manifestFiles = @(
+        foreach ($payloadFile in $payloadFiles.GetEnumerator()) {
+            $file = Get-Item -LiteralPath $payloadFile.Value
+            [ordered]@{
+                path = $payloadFile.Key
+                sizeBytes = [int64]$file.Length
+                sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+    )
+    $manifest = [ordered]@{
+        schemaVersion = 1
+        dependency = 'qpdf'
+        version = $ExpectedVersion
+        sourceArchive = $ExpectedArchiveName
+        sourceArchiveSizeBytes = [int64]$ExpectedArchiveSizeBytes
+        sourceArchiveSha256 = $ExpectedArchiveSha256
+        signatureIdentity = 'ejb@ql.org'
+        signatureIssuer = 'https://github.com/login/oauth'
+        appContainerProfile = 'DocumentStudio.PdfEngine.Qpdf.V1'
+        appContainerConfigurationVersion = 1
+        appContainerCapabilities = @()
+        files = $manifestFiles
+    }
+
+    $manifestJson = ConvertTo-Json -InputObject $manifest -Depth 6 -Compress
+    if ($manifestJson.Contains("`r") -or $manifestJson.Contains("`n")) {
+        throw 'Canonical manifest serialization unexpectedly contained a newline.'
+    }
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $jsonBytes = $utf8.GetBytes($manifestJson)
+    $outputBytes = [byte[]]::new($jsonBytes.Length + 1)
+    [System.Buffer]::BlockCopy($jsonBytes, 0, $outputBytes, 0, $jsonBytes.Length)
+    $outputBytes[$outputBytes.Length - 1] = 0x0a
+
+    $outputParent = Split-Path -Parent $resolvedOutputPath
+    if ($outputParent -and -not (Test-Path -LiteralPath $outputParent -PathType Container)) {
+        [System.IO.Directory]::CreateDirectory($outputParent) | Out-Null
+    }
+    [System.IO.File]::WriteAllBytes($resolvedOutputPath, $outputBytes)
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'Manifest') {
+    Write-CanonicalQpdfManifest -BundleRoot $ManifestBundleRoot -OutputPath $ManifestOutput
+    Write-Output "Canonical qpdf manifest written to $([System.IO.Path]::GetFullPath($ManifestOutput))"
+    return
 }
 
 $resolvedDestination = [System.IO.Path]::GetFullPath($Destination)
@@ -164,38 +239,8 @@ try {
         throw "The selected runtime subset could not execute the approved qpdf version: $bundledVersion"
     }
 
-    $manifestFiles = @(
-        Get-ChildItem -LiteralPath $bundleRoot -File -Recurse |
-            Sort-Object FullName |
-            ForEach-Object {
-                [ordered]@{
-                    path = Get-RelativePath $bundleRoot $_.FullName
-                    sizeBytes = $_.Length
-                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-                }
-            }
-    )
-    $manifest = [ordered]@{
-        schemaVersion = 1
-        dependency = 'qpdf'
-        version = $ExpectedVersion
-        sourceArchive = $ExpectedArchiveName
-        sourceArchiveSizeBytes = $archiveSize
-        sourceArchiveSha256 = $ExpectedArchiveSha256
-        signatureIdentity = 'ejb@ql.org'
-        signatureIssuer = 'https://github.com/login/oauth'
-        appContainerProfile = 'DocumentStudio.PdfEngine.Qpdf.V1'
-        appContainerConfigurationVersion = 1
-        appContainerCapabilities = @()
-        files = $manifestFiles
-    }
-    $manifestJson = $manifest | ConvertTo-Json -Depth 6
     $manifestPath = Join-Path $bundleRoot 'qpdf-manifest.json'
-    [System.IO.File]::WriteAllText(
-        $manifestPath,
-        $manifestJson + [Environment]::NewLine,
-        [System.Text.UTF8Encoding]::new($false)
-    )
+    Write-CanonicalQpdfManifest -BundleRoot $bundleRoot -OutputPath $manifestPath
 
     [System.IO.Directory]::CreateDirectory($destinationParent) | Out-Null
     if (Test-Path -LiteralPath $resolvedDestination) {
