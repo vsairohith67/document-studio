@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$Executable,
-    [ValidateSet('None', 'PrimaryRuntimeNotReady', 'SecondaryNotExited', 'SecondaryReachedRuntime')]
+    [ValidateSet('None', 'ViteNotReady', 'VitePortOccupied', 'PrimaryRuntimeNotReady', 'SecondaryNotExited', 'SecondaryReachedRuntime')]
     [string]$FailureInjection = 'None',
     [switch]$SkipFailureSelfTests
 )
@@ -39,9 +39,13 @@ $primaryStdout = Join-Path $ownedRoot 'primary.stdout.log'
 $primaryStderr = Join-Path $ownedRoot 'primary.stderr.log'
 $secondaryStdout = Join-Path $ownedRoot 'secondary.stdout.log'
 $secondaryStderr = Join-Path $ownedRoot 'secondary.stderr.log'
+$viteStdout = Join-Path $ownedRoot 'vite.stdout.log'
+$viteStderr = Join-Path $ownedRoot 'vite.stderr.log'
 $metadataPath = Join-Path $appDataDirectory 'metadata.sqlite3'
 $workspacePath = Join-Path $appDataDirectory 'workspaces'
 $devUrl = 'http://localhost:1420'
+$vitePort = 1420
+$viteReadinessDeadlineMs = 30000
 
 $firstProgressDeadlineMs = 15000
 $setupDeadlineMs = 20000
@@ -54,7 +58,13 @@ if ($FailureInjection -eq 'PrimaryRuntimeNotReady') {
 if ($FailureInjection -eq 'SecondaryNotExited') {
     $secondaryExitDeadlineMs = 3000
 }
+if ($FailureInjection -eq 'ViteNotReady') {
+    $viteReadinessDeadlineMs = 3000
+}
 
+$vite = $null
+$vitePortReservation = $null
+$unrelatedVitePortOccupied = $false
 $primary = $null
 $secondary = $null
 $primaryMarker = $null
@@ -62,6 +72,7 @@ $secondaryMarker = $null
 $startupWatch = [System.Diagnostics.Stopwatch]::new()
 $secondaryWatch = [System.Diagnostics.Stopwatch]::new()
 $cleanupWatch = [System.Diagnostics.Stopwatch]::new()
+$viteWatch = [System.Diagnostics.Stopwatch]::new()
 $phase = 'INITIALIZING'
 $phaseStartedMs = 0L
 $failureCode = $null
@@ -70,6 +81,7 @@ $diagnosticsPrinted = $false
 $cleanupComplete = $false
 $primaryMarkerSuppressed = $false
 $metrics = [ordered]@{
+    viteReadyMs = $null
     processLaunchMs = $null
     metadataCreatedMs = $null
     workspaceCreatedMs = $null
@@ -328,6 +340,50 @@ function Test-DevUrlReachable {
     }
 }
 
+function Test-VitePortListening {
+    return @(
+        [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+            Where-Object { $_.Port -eq $vitePort }
+    ).Count -gt 0
+}
+
+function Start-OwnedVite {
+    $npmCommand = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
+    $arguments = @(
+        'run', 'dev',
+        '--workspace', '@document-studio/desktop',
+        '--', '--host', 'localhost', '--port', "$vitePort", '--strictPort'
+    )
+    $script:vite = Start-Process -FilePath $npmCommand -ArgumentList $arguments `
+        -WorkingDirectory $repositoryRoot -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput $viteStdout -RedirectStandardError $viteStderr
+    [void]$script:vite.Handle
+}
+
+function Wait-ForOwnedVite {
+    $phase = 'VITE_STARTUP'
+    $script:phase = $phase
+    $script:phaseStartedMs = 0L
+    $viteWatch.Start()
+    while ($true) {
+        $vite.Refresh()
+        if ($vite.HasExited) {
+            $vite.WaitForExit()
+            Throw-HarnessFailure -Code 'VITE_EXITED' -Message "The owned Vite process exited before readiness (exit $($vite.ExitCode))."
+        }
+        $reachable = Test-DevUrlReachable
+        if ($reachable -and $FailureInjection -ne 'ViteNotReady') {
+            $script:metrics.viteReadyMs = $viteWatch.ElapsedMilliseconds
+            $viteWatch.Stop()
+            return
+        }
+        if ($viteWatch.ElapsedMilliseconds -ge $viteReadinessDeadlineMs) {
+            Throw-HarnessFailure -Code 'VITE_NOT_READY' -Message "The owned Vite server did not return HTTP 200 from $devUrl within $viteReadinessDeadlineMs milliseconds."
+        }
+        Start-Sleep -Milliseconds 100
+    }
+}
+
 function Get-MarkerNames {
     if (-not (Test-Path -LiteralPath $appDataDirectory -PathType Container)) {
         return @()
@@ -352,7 +408,10 @@ function Write-FailureDiagnostics {
         $metadataSize = (Get-Item -LiteralPath $metadataPath).Length
     }
     $phaseElapsed = 0L
-    if ($startupWatch.IsRunning) {
+    if ($viteWatch.IsRunning) {
+        $phaseElapsed = $viteWatch.ElapsedMilliseconds
+    }
+    elseif ($startupWatch.IsRunning) {
         $phaseElapsed = $startupWatch.ElapsedMilliseconds - $phaseStartedMs
     }
     elseif ($secondaryWatch.IsRunning) {
@@ -364,6 +423,8 @@ function Write-FailureDiagnostics {
         primaryStartupElapsedMs = $startupWatch.ElapsedMilliseconds
         phase = $phase
         phaseElapsedMs = $phaseElapsed
+        vite = Get-ProcessDiagnosticState -Process $vite
+        vitePortListening = Test-VitePortListening
         primary = Get-ProcessDiagnosticState -Process $primary
         secondary = Get-ProcessDiagnosticState -Process $secondary
         primaryMarkerPresent = $(if ($null -ne $primaryMarker) { Test-Path -LiteralPath $primaryMarker } else { $false })
@@ -378,6 +439,8 @@ function Write-FailureDiagnostics {
         )
         devUrl = [ordered]@{ url = $devUrl; reachable = Test-DevUrlReachable }
         logs = [ordered]@{
+            viteStdout = Get-BoundedLog -Path $viteStdout
+            viteStderr = Get-BoundedLog -Path $viteStderr
             primaryStdout = Get-BoundedLog -Path $primaryStdout
             primaryStderr = Get-BoundedLog -Path $primaryStderr
             secondaryStdout = Get-BoundedLog -Path $secondaryStdout
@@ -392,7 +455,7 @@ function Write-FailureDiagnostics {
 
 function Stop-OwnedProcesses {
     $rootIds = @()
-    foreach ($process in @($secondary, $primary)) {
+    foreach ($process in @($secondary, $primary, $vite)) {
         if ($null -ne $process) {
             try {
                 $process.Refresh()
@@ -504,6 +567,8 @@ function Assert-EnvironmentRestored {
 function Invoke-FailureSelfTests {
     $hostExecutable = (Get-Process -Id $PID).Path
     $cases = @(
+        @{ Injection = 'ViteNotReady'; Code = 'VITE_NOT_READY' },
+        @{ Injection = 'VitePortOccupied'; Code = 'VITE_PORT_OCCUPIED' },
         @{ Injection = 'PrimaryRuntimeNotReady'; Code = 'PRIMARY_RUNTIME_NOT_READY' },
         @{ Injection = 'SecondaryNotExited'; Code = 'SECONDARY_NOT_EXITED' },
         @{ Injection = 'SecondaryReachedRuntime'; Code = 'SECONDARY_REACHED_RUNTIME' }
@@ -562,7 +627,7 @@ function Invoke-FailureSelfTests {
     if ($leftoverWebViews.Count -ne 0) {
         throw 'Failure self-tests left owned WebView2 processes.'
     }
-    Write-Output 'Single-instance failure-path self-tests passed: 3 cases produced bounded diagnostics and complete cleanup.'
+    Write-Output 'Single-instance failure-path self-tests passed: 5 cases produced bounded diagnostics and complete cleanup.'
 }
 
 try {
@@ -590,6 +655,22 @@ try {
     [void](Assert-OwnedDirectory -Path $ownedRoot)
     [void](Assert-OwnedDirectory -Path $appDataDirectory)
     [void](Assert-OwnedDirectory -Path $primaryUdfDirectory -MustBeEmpty)
+
+    if (Test-VitePortListening) {
+        $unrelatedVitePortOccupied = $true
+        Throw-HarnessFailure -Code 'VITE_PORT_OCCUPIED' -Message 'Port 1420 was already occupied before the harness started Vite.'
+    }
+    if ($FailureInjection -eq 'VitePortOccupied') {
+        $vitePortReservation = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $vitePort)
+        $vitePortReservation.Start()
+        if (Test-VitePortListening) {
+            Throw-HarnessFailure -Code 'VITE_PORT_OCCUPIED' -Message 'Port 1420 was occupied by the test-only failure injection before Vite launch.'
+        }
+        Throw-HarnessFailure -Code 'HARNESS_ERROR' -Message 'The Vite port-occupied failure injection did not create a listener.'
+    }
+
+    Start-OwnedVite
+    Wait-ForOwnedVite
 
     Set-TestEnvironmentValue -Name 'DOCUMENT_STUDIO_TEST_APP_DATA' -Value $appDataDirectory
     Set-TestEnvironmentValue -Name 'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR' -Value $primaryUdfDirectory
@@ -759,6 +840,9 @@ catch {
 finally {
     $cleanupWatch.Start()
     try {
+        if ($null -ne $vitePortReservation) {
+            $vitePortReservation.Stop()
+        }
         Stop-OwnedProcesses
         Restore-TestEnvironment
         Remove-OwnedDirectory
@@ -768,6 +852,9 @@ finally {
         }
         if (@(Get-WebViewProcesses -BrowserDataDirectories @($primaryBrowserDataDirectory, $secondaryBrowserDataDirectory)).Count -ne 0) {
             throw 'Owned WebView2 processes remained after cleanup.'
+        }
+        if (-not $unrelatedVitePortOccupied -and (Test-VitePortListening)) {
+            throw 'Port 1420 remained listening after owned Vite cleanup.'
         }
         $cleanupComplete = $true
     }
