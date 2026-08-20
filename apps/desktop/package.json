@@ -12,6 +12,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:pdfjs-assets": "node ./scripts/test-pdfjs-assets.mjs",
     "test:browser": "playwright test",
     "test:webview2": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-webview2-smoke.ps1",
     "verify:g03": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g03-boundaries.ps1",

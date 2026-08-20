@@ -16,7 +16,10 @@ export const MAX_RANGE_BYTES = 1024 * 1024;
 export const MAX_RANGE_READS = 4;
 export const PAGE_DPR_CAP = 2;
 export const THUMBNAIL_DPR_CAP = 1.25;
-export const MAX_CANVAS_PIXELS = 16_000_000;
+export const MAX_CANVAS_PIXELS = 16_777_216;
+export const MAX_CANVAS_WIDTH = 8_192;
+export const MAX_CANVAS_HEIGHT = 8_192;
+export const MAX_PAGE_CSS_DIMENSION = 32_767;
 
 GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.mjs';
 export { PasswordResponses };
@@ -93,11 +96,18 @@ export interface LoadedPdfSession {
   close(): Promise<void>;
 }
 
+export interface PdfLoadingResources {
+  loadingTask: PDFDocumentLoadingTask;
+  transport: SessionRangeTransport;
+  close(): Promise<void>;
+}
+
 export async function loadPdfSession(
   session: ViewerDocumentMetadata,
   onPassword: (challenge: PdfPasswordChallenge) => void,
   onFatalRangeError: (error: unknown) => void,
   signal?: AbortSignal,
+  onLoadingResources?: (resources: PdfLoadingResources) => void,
 ): Promise<LoadedPdfSession> {
   if (signal?.aborted) throw new DOMException('Loading cancelled', 'AbortError');
   const initialEnd = Math.min(session.sizeBytes, RANGE_CHUNK_BYTES);
@@ -127,6 +137,7 @@ export async function loadPdfSession(
     useWasm: true,
     useSystemFonts: false,
     enableXfa: false,
+    renderForms: false,
     stopAtErrors: true,
     maxImageSize: 50_000_000,
     canvasMaxAreaInBytes: 64 * 1024 * 1024,
@@ -134,32 +145,48 @@ export async function loadPdfSession(
     // PDF.js 6 no longer branches on this former evaluator flag. Keeping the
     // explicit false documents the boundary; CSP also omits unsafe-eval.
     isEvalSupported: false,
-  } satisfies NonNullable<Parameters<typeof getDocument>[0]> & { isEvalSupported: false };
+  } satisfies NonNullable<Parameters<typeof getDocument>[0]>
+    & { isEvalSupported: false; renderForms: false };
   const loadingTask = getDocument(documentOptions);
+  let alive = true;
+  let closed = false;
   loadingTask.onPassword = (updatePassword: (password: string) => void, reason: number) => {
+    if (!alive || signal?.aborted) return;
     onPassword({
       reason,
       submit(password: string) {
-        updatePassword(password);
+        if (alive && !signal?.aborted) updatePassword(password);
       },
     });
   };
-  const onAbort = () => {
+  const closeLoadingResources = async () => {
+    if (closed) return;
+    closed = true;
+    alive = false;
+    loadingTask.onPassword = () => undefined;
     transport.abort();
-    void loadingTask.destroy();
+    signal?.removeEventListener('abort', onAbort);
+    await loadingTask.destroy().catch(() => undefined);
   };
+  const onAbort = () => { void closeLoadingResources(); };
   signal?.addEventListener('abort', onAbort, { once: true });
-  const document = await loadingTask.promise.finally(() => signal?.removeEventListener('abort', onAbort));
-  let closed = false;
+  onLoadingResources?.({ loadingTask, transport, close: closeLoadingResources });
+  let document: PDFDocumentProxy;
+  try {
+    document = await loadingTask.promise;
+    if (signal?.aborted) throw new DOMException('Loading cancelled', 'AbortError');
+  } catch (error) {
+    await closeLoadingResources();
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
   return {
     document,
     loadingTask,
     transport,
     async close() {
-      if (closed) return;
-      closed = true;
-      transport.abort();
-      await loadingTask.destroy();
+      await closeLoadingResources();
     },
   };
 }

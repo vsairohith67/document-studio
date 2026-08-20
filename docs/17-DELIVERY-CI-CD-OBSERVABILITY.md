@@ -29,7 +29,7 @@ Progress events and SQLite history use allow-listed fields rather than raw logs.
 
 ## G03 clean CI evidence
 
-The Windows desktop job keeps immutable action SHAs and exact Node/Rust tools. After `npm ci --ignore-scripts`, CI stages and verifies local PDF.js assets, checks exact dependency/worker parity, the exact CSP, unchanged capabilities, raw range IPC and production/test separation. It runs TypeScript, all Vitest/shared tests, production build and Playwright Chromium tests with `PLAYWRIGHT_BROWSERS_PATH` under the workspace cache. No browser is installed system-wide.
+The Windows desktop job keeps immutable action SHAs and exact Node/Rust tools. After `npm ci --ignore-scripts`, CI runs the dependency-free PDF.js manifest/atomic-stage regressions, stages only exact allow-listed local assets, and independently checks membership/hash, dependency/worker parity, CSP, unchanged capabilities, raw range IPC and production/test separation. Optional package metadata may declare lifecycle scripts, but `--ignore-scripts` prevents execution. CI runs TypeScript, all Vitest/shared tests, production build and Playwright Chromium tests with `PLAYWRIGHT_BROWSERS_PATH` under the workspace cache. No browser is installed system-wide.
 
 Cargo formatting, clippy and workspace tests include migration 4, opaque sessions, five qpdf operations, split/recovery, sandbox and leakage coverage. Windows then runs the real WebView2 raw-IPC smoke under `test-runtime`, the existing single-instance proof and Tauri `--no-bundle`. Production builds do not expose the test fixture command or preserve remote-debugging arguments.
 

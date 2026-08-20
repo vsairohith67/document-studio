@@ -18,7 +18,8 @@ use crate::page_plan::{validate_plan, PlannedOutput, ValidatedPagePlan};
 use crate::path_policy::{canonical_directory, canonical_regular_file};
 use crate::pdf_merge::{qpdf_page_count, run_qpdf, verify_qpdf_version};
 use crate::process_sandbox::{
-    authorize_qpdf_paths, ensure_production_profile, QPDF_PROCESS_TIMEOUT,
+    authorize_qpdf_paths, ensure_production_profile, validate_command_line_budget,
+    QPDF_PROCESS_TIMEOUT,
 };
 use crate::publication::{
     hash_file, is_exact_owned_partial_path, partial_ownership_result_code,
@@ -201,7 +202,7 @@ impl PdfPageOperationService {
             .state
             .database()
             .get_operation_plan(job_id)
-            .map_err(|_| metadata_error())?
+            .map_err(operation_plan_load_error)?
             .ok_or_else(metadata_error)?;
         let validated = validate_plan(stored.envelope.clone())?;
         if validated.stored.canonical_json != stored.canonical_json
@@ -209,6 +210,7 @@ impl PdfPageOperationService {
         {
             return Err(invalid_plan());
         }
+        validate_output_command_lines(&validated)?;
         let workspace = self
             .state
             .workspaces
@@ -747,12 +749,20 @@ pub fn build_page_output_arguments(
     .map(OsString::from)
     .collect::<Vec<_>>();
     if plan.stored.envelope.operation_id == PDF_ROTATE_OPERATION_ID {
-        for (page_index, rotation) in &plan.rotations {
-            arguments.push(OsString::from(format!(
-                "--rotate=+{}:{}",
-                rotation.degrees(),
-                page_index + 1
-            )));
+        for degrees in [90_u16, 180, 270] {
+            let pages = plan
+                .rotations
+                .iter()
+                .filter_map(|(page_index, rotation)| {
+                    (rotation.degrees() == degrees).then_some(*page_index + 1)
+                })
+                .collect::<Vec<_>>();
+            if !pages.is_empty() {
+                arguments.push(OsString::from(format!(
+                    "--rotate=+{degrees}:{}",
+                    compact_page_ranges(&pages)
+                )));
+            }
         }
     }
     arguments.push(OsString::from("--pages"));
@@ -762,13 +772,53 @@ pub fn build_page_output_arguments(
     let pages = output
         .page_indexes
         .iter()
-        .map(|index| (index + 1).to_string())
-        .collect::<Vec<_>>()
-        .join(",");
+        .map(|index| index + 1)
+        .collect::<Vec<_>>();
+    let pages = compact_page_ranges(&pages);
     arguments.push(OsString::from(format!("--range={pages}")));
     arguments.push(OsString::from("--"));
     arguments.push(output_relative.as_os_str().to_owned());
     Ok(arguments)
+}
+
+fn compact_page_ranges(pages: &[u32]) -> String {
+    let mut ranges = Vec::new();
+    let mut start = pages[0];
+    let mut end = start;
+    for page in pages.iter().copied().skip(1) {
+        if page == end + 1 {
+            end = page;
+            continue;
+        }
+        ranges.push(if start == end {
+            start.to_string()
+        } else {
+            format!("{start}-{end}")
+        });
+        start = page;
+        end = page;
+    }
+    ranges.push(if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
+    });
+    ranges.join(",")
+}
+
+fn validate_output_command_lines(plan: &ValidatedPagePlan) -> Result<(), OperationError> {
+    let input = if plan.stored.envelope.operation_id == PDF_ROTATE_OPERATION_ID {
+        Path::new(NORMALIZED_RELATIVE_PATH)
+    } else {
+        Path::new(SNAPSHOT_RELATIVE_PATH)
+    };
+    for (ordinal, output) in plan.outputs.iter().enumerate() {
+        let output_relative = output_relative_path(ordinal)?;
+        let arguments = build_page_output_arguments(input, &output_relative, output, plan)?;
+        validate_command_line_budget(std::ffi::OsStr::new("qpdf.exe"), &arguments)
+            .map_err(|_| command_line_too_long())?;
+    }
+    Ok(())
 }
 
 fn normalize_rotations(
@@ -1193,6 +1243,30 @@ fn metadata_error() -> OperationError {
     )
 }
 
+fn operation_plan_load_error(error: DatabaseError) -> OperationError {
+    if matches!(error, DatabaseError::OperationPlanMismatch) {
+        OperationError::safe(
+            "PLAN_OPERATION_MISMATCH",
+            "The saved page plan does not match its job",
+            "The operation stopped before creating temporary files or starting qpdf.",
+            OperationStage::Plan,
+            false,
+        )
+    } else {
+        metadata_error()
+    }
+}
+
+fn command_line_too_long() -> OperationError {
+    OperationError::safe(
+        "QPDF_COMMAND_LINE_TOO_LONG",
+        "The page operation is too large to launch safely",
+        "Reduce the page selection or split the operation into smaller jobs.",
+        OperationStage::Plan,
+        false,
+    )
+}
+
 fn workspace_error() -> OperationError {
     OperationError::safe(
         "WORKSPACE_CREATE_FAILED",
@@ -1266,9 +1340,13 @@ fn cleanup_error() -> OperationError {
 #[cfg(test)]
 mod tests {
     use super::{build_page_output_arguments, output_relative_path};
-    use crate::contracts::{CorePdfPlanPayload, OperationPlanEnvelope, ReorderPagesPlan};
-    use crate::page_plan::validate_plan;
-    use std::ffi::OsString;
+    use crate::contracts::{
+        CorePdfPlanPayload, OperationPlanEnvelope, OutputRotation, ReorderPagesPlan,
+        StoredOperationPlan, PDF_ROTATE_OPERATION_ID,
+    };
+    use crate::page_plan::{validate_plan, PlannedOutput, ValidatedPagePlan};
+    use crate::process_sandbox::validate_command_line_budget;
+    use std::ffi::{OsStr, OsString};
     use std::path::Path;
 
     #[test]
@@ -1290,11 +1368,80 @@ mod tests {
             &plan,
         )
         .unwrap();
-        assert!(args.contains(&OsString::from("--range=3,1,2")));
+        assert!(args.contains(&OsString::from("--range=3,1-2")));
         assert_eq!(
             args.last(),
             Some(&OsString::from(r"staging\output-0000.pdf"))
         );
         assert!(args.iter().all(|argument| argument.as_os_str().is_ascii()));
+    }
+
+    fn synthetic_rotate_plan(rotation: impl Fn(u32) -> OutputRotation) -> ValidatedPagePlan {
+        let page_count = 4096_u32;
+        ValidatedPagePlan {
+            stored: StoredOperationPlan {
+                envelope: OperationPlanEnvelope {
+                    schema_version: 1,
+                    operation_id: PDF_ROTATE_OPERATION_ID.to_owned(),
+                    source_page_count: page_count,
+                    payload: CorePdfPlanPayload::Rotate(crate::contracts::RotatePagesPlan {
+                        rotations: Vec::new(),
+                        output_name: "rotated.pdf".to_owned(),
+                    }),
+                },
+                canonical_json: "{}".to_owned(),
+                sha256: "0".repeat(64),
+                created_at: "2026-08-21T00:00:00.000Z".to_owned(),
+            },
+            outputs: vec![PlannedOutput {
+                output_name: "rotated.pdf".to_owned(),
+                page_indexes: (0..page_count).collect(),
+            }],
+            rotations: (0..page_count)
+                .map(|page_index| (page_index, rotation(page_index)))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn compact_rotation_arguments_cover_all_4096_pages_below_windows_budget() {
+        let all_ninety = synthetic_rotate_plan(|_| OutputRotation::Clockwise90);
+        let arguments = build_page_output_arguments(
+            Path::new(r"inputs\source-0000.pdf"),
+            Path::new(r"staging\output-0000.pdf"),
+            &all_ninety.outputs[0],
+            &all_ninety,
+        )
+        .unwrap();
+        let text = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(text
+            .iter()
+            .any(|argument| argument == "--rotate=+90:1-4096"));
+        assert!(text.iter().any(|argument| argument == "--range=1-4096"));
+        assert!(validate_command_line_budget(OsStr::new("qpdf.exe"), &arguments).is_ok());
+
+        let alternating = synthetic_rotate_plan(|page| match page % 3 {
+            0 => OutputRotation::Clockwise90,
+            1 => OutputRotation::Clockwise180,
+            _ => OutputRotation::Clockwise270,
+        });
+        let arguments = build_page_output_arguments(
+            Path::new(r"inputs\source-0000.pdf"),
+            Path::new(r"staging\output-0000.pdf"),
+            &alternating.outputs[0],
+            &alternating,
+        )
+        .unwrap();
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| argument.to_string_lossy().starts_with("--rotate="))
+                .count(),
+            3
+        );
+        assert!(validate_command_line_budget(OsStr::new("qpdf.exe"), &arguments).is_ok());
     }
 }

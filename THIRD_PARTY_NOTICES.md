@@ -34,9 +34,10 @@ The bundled Microsoft Visual C++ 14.44.35211 runtime DLLs are the unmodified red
 
 ## G03 viewer and test dependency notices
 
-- Mozilla `pdfjs-dist` 6.2.108 is Apache-2.0. Document Studio ships its locally staged worker, CMaps, standard fonts, ICC profiles and WASM assets; it does not ship the generic viewer UI or fetch a CDN.
+- Mozilla `pdfjs-dist` 6.2.108 is Apache-2.0. Document Studio ships exactly the 191 worker/CMap/standard-font/ICC/WASM files in `apps/desktop/scripts/pdfjs-assets-6.2.108.json`, verified by path, byte size and SHA-256 before atomic staging. QuickJS, no-WASM fallbacks, source maps and the generic viewer UI are excluded; no CDN is used.
 - TanStack React Virtual 3.14.9 and resolved Virtual Core 3.17.7 are MIT.
 - Playwright Test, Playwright and Playwright Core 1.62.1 are Apache-2.0 and are development/CI only. Project-local Chrome for Testing 151.0.7922.34, Headless Shell and helper binaries are ignored test artifacts and are not part of a production package.
 - `pdfjs-dist` resolves optional `@napi-rs/canvas` 1.0.6 packages under MIT for Node environments. The desktop webview viewer does not import them; the lock still records their exact platform packages and integrity.
+- The lock also contains optional platform-specific package metadata, including `fsevents`, that may declare install scripts. Document Studio does not claim such metadata is absent: approved installs and CI use `--ignore-scripts`, so package lifecycle scripts are not executed.
 
 A distributable build must retain all applicable PDF.js asset licence/notices and regenerate the complete shipped-runtime notice inventory from the lockfile and staged asset tree. Any package or browser revision change requires a fresh dependency review.

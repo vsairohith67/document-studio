@@ -2,7 +2,7 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository contains the Document Studio product specifications, the accepted Windows foundation/PDF Merge slices, and the implemented G03 local PDF workspace. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and six production PDF operations.
+This repository contains the Document Studio product specifications, the accepted Windows foundation/PDF Merge slices, and the draft G03 local PDF workspace under independent review on PR #6. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and six production PDF operations. G03 is not complete or merged, and G04 remains blocked.
 
 ## G03 Viewer and Core PDF status
 
@@ -17,7 +17,7 @@ G01 proved the safety architecture before a production document engine was adopt
 - qpdf 12.3.2 is bundled from its signed official Windows archive with exact hashes, retained licenses, a zero-capability AppContainer, and owned Job Object limits.
 - PDF Merge accepts 2–128 local PDFs, preserves the displayed order including intentional duplicates, creates one private snapshot per ordinal, verifies the output independently, and never overwrites by default.
 - An opaque retained-handle viewer session streams 256 KiB ranges through raw bounded Tauri IPC without giving PDF.js or React a source path.
-- Locally bundled PDF.js 6.2.108 renders virtualized pages/thumbnails and an ephemeral text layer/search index; PDF code, forms, attachments and external navigation are disabled.
+- Locally bundled PDF.js 6.2.108 uses an exact path/size/hash asset manifest and atomically staged worker assets. It renders measured-visible virtual pages/thumbnails and an ephemeral text layer/search index; PDF JavaScript, interactive form/annotation layers, attachments and external navigation are disabled.
 - The shared Precision Paper organizer prepares selection, reorder, removal, output rotation and split ranges without creating history until Apply/Export.
 - `pdf.extract-pages`, `pdf.remove-pages`, `pdf.reorder-pages`, `pdf.rotate-pages` and `pdf.split` 1.0.0 persist typed plans and reuse the accepted qpdf/publication/recovery boundary.
 - Every split output is planned before processing. Completion requires every verified publication; partial publication is a truthful failed state that preserves already published user files.

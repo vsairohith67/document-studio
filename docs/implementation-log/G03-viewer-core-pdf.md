@@ -1,6 +1,6 @@
 # G03 Viewer and Core PDF Implementation Log
 
-Status: Draft PR #6; WebView2 CI smoke remediation locally verified
+Status: Draft PR #6; independent review returned CHANGES REQUIRED; F01–F10 remediation pending exact-head CI and independent re-review
 Accepted base: `6e96b394eba7fafe787920e9d6bdd0c4b99f2670`
 Implementation branch: `feat/g03-viewer-core-pdf`
 Target: Windows x64, Tauri 2, WebView2, PDF.js 6.2.108 and qpdf 12.3.2
@@ -38,19 +38,19 @@ Target: Windows x64, Tauri 2, WebView2, PDF.js 6.2.108 and qpdf 12.3.2
 
 ## PDF.js packaging and security
 
-- The local staging script verifies API/worker version parity and stages only the legacy ESM worker, CMaps, standard fonts, ICC profiles and WASM. The staged 202-file set is 5,892,091 bytes; worker SHA-256 is `b4e582882f5e811f4d1b7b511f68d9a0c3209141e6f68856f01408c5cc155131`.
+- The local staging script verifies API/worker version parity and stages only the 191 exact legacy worker/CMap/standard-font/ICC/WASM files in `pdfjs-assets-6.2.108.json` (4,799,952 asset bytes). Every path, size and SHA-256 is verified in a fresh owned sibling before atomic replacement; the boundary verifier independently proves exact membership. QuickJS, no-WASM fallbacks, source maps, debug files and generic viewer UI are excluded. Worker SHA-256 is `b4e582882f5e811f4d1b7b511f68d9a0c3209141e6f68856f01408c5cc155131`.
 - There is no CDN, runtime fetch fallback, React PDF wrapper or copied generic viewer. The production UI is Document Studio's Precision Paper workbench.
-- Explicit PDF.js settings include `isEvalSupported: false`, `enableXfa: false`, `renderForms: false` and `stopAtErrors: true`. The app creates no scripting manager, annotation layer, form UI, attachment UI or external navigation.
+- Explicit PDF.js loading/configuration settings include `isEvalSupported: false`, `enableXfa: false`, `renderForms: false` and `stopAtErrors: true`. Page rendering uses `AnnotationMode.DISABLE`; Document Studio creates no interactive annotation/form layer, scripting manager, attachment UI or external navigation.
 - The exact approved CSP permits only same-origin scripts/workers and required local/data/blob image/font assets, includes `wasm-unsafe-eval`, and denies objects, bases, frames and form actions. Rust blocks external navigation and new windows.
 - Password entry exists only in React component memory and is cleared on Close. It is never logged, persisted or passed to qpdf; encrypted structural operations remain rejected.
 
 ## Progressive viewer, search and organizer
 
-- TanStack virtualizers mount visible pages/thumbnails plus small overscan only. Mixed page sizes are measured; first page and visible thumbnails are prioritized; obsolete PDF.js RenderTasks are cancelled.
-- Page canvases cap DPR/pixel area. Eviction zeros canvases, cancels text layers and releases mounted resources. Close destroys the PDF.js loading task/document/worker transport and opaque Rust session deterministically.
+- TanStack virtualizers mount viewport pages plus one page of overscan. Measured scroll-container geometry separately marks truly visible and overscan-only rows; current page uses greatest visible area, nearest-top and visual-index tie breaks, while missing measurements retain the prior page. Search/render preparation orders actual visibility before overscan.
+- Page canvases fail closed before allocation unless finite integer dimensions remain within DPR 2, 8,192 pixels per axis, 16,777,216 total pixels and the CSS-dimension guard. Rejected pages expose an accessible safe-render message without invoking PDF.js render or completion. Eviction zeros canvases, cancels text layers and releases mounted resources.
 - Navigation covers first/previous/next/last, page number, Page Up/Down, Home/End, actual size, fit page, fit width, zoom shortcuts and temporary view rotation.
 - Search uses Unicode NFKC case-folding, two bounded extraction tasks, per-page item/character limits, a 16-million-character memory cache and a 100,000-result cap. It starts before full indexing, yields between page extractions, prioritizes visible pages, cancels on query/session change and persists nothing. Image-only pages truthfully report that OCR is unavailable.
-- The shared organizer keeps selection, reorder, remove, output rotation and split planning ephemeral. It creates a durable job only when Apply/Export is pressed. Pointer and keyboard reorder retain stable focus; all icon buttons have accessible names.
+- The shared organizer keeps selection, reorder, remove, output rotation and split planning ephemeral. It creates a durable job only when Apply/Export is pressed. Alt+ArrowUp/Down and the accessible buttons move a selected contiguous or non-contiguous group with stable logical focus, bounded announcements and unchanged ordinary Arrow navigation.
 
 ## Five core operations
 
@@ -99,17 +99,15 @@ The reference machine was Windows 11 Home build 26200, Intel Core i7-11800H (8 c
 | Tauri no-bundle release build | Passed; known `.app` identifier advisory and chunk warning only |
 | Git/diff audit | Passed; clean index, accepted base/head, one approved migration, no capability/Cargo dependency change, no forbidden boundary or scope expansion |
 
-## Ready-to-stage synchronization
+## Initial implementation tracking history
 
-- Notion page `3bdc9801-27a8-812c-bf27-cef7f57da017` reads back `G03 Viewer and Core PDF — READY TO STAGE`, Status Review and the final evidence summary.
-- Asana task `1217527657971162` reads back the same name and remains incomplete.
-- Canvs element `fMN31pCJ5JSlRAk53FZwW` in the existing room reads back the same text.
-- No GitHub object, duplicate tracker or duplicate board was created.
+- The existing Notion, Asana and Canvs records were updated during the initial implementation gate. They were later superseded by draft PR #6 and the independent CHANGES REQUIRED verdict; no duplicate tracker or board was created.
+- PR #6 is the single draft GitHub review object. It remains open, draft and unmerged.
 
 ## Remaining bounded evidence
 
-- Physical Explorer-to-app drag/drop is a manual pre-PR check: the available GUI driver cannot drag across window boundaries. The compiled Rust Tauri drag/drop handler and validation/session tests are present; failure in real manual testing triggers the approved native-drop gate and does not authorize COM.
-- Forced colors, 200% application zoom and host reduced-motion settings remain manual pre-PR accessibility evidence.
+- The physical Explorer-to-app gate passed before the acceptance-remediation batch. It remains evidence only for Explorer-to-Rust delivery, retained-handle rename/delete locking, non-PDF/folder rejection and absence of durable jobs from viewing. Replacement, organizer keyboard and focus behavior are covered by Chromium/WebView2 automation after this batch.
+- Forced colors, 200% application zoom and host reduced-motion settings remain manual release evidence.
 - The approximately 1 GiB image-heavy viewer corpus, 128-output split and 128-input preflight benchmarks remain clean-reference/release evidence. No performance claim is made for them now.
 
 ## WebView2 clean-runner remediation
@@ -128,7 +126,7 @@ The reference machine was Windows 11 Home build 26200, Intel Core i7-11800H (8 c
 ## Scope and repository safety
 
 - G03 added no custom protocol, COM drop, shell/HTTP/general-filesystem capability, runtime CDN, telemetry, extra migration, extra dependency or G04 feature.
-- No staging, commit, push, pull request, merge or release action was performed during implementation.
+- G03 implementation and focused remediations are committed on existing draft PR #6. The PR is not ready, merged or released; independent re-review remains required and G04 is blocked.
 - The protected external Excalidraw library was not accessed or modified.
 
 ## Incremental-search determinism remediation
@@ -143,3 +141,24 @@ The reference machine was Windows 11 Home build 26200, Intel Core i7-11800H (8 c
 - The focused 1,000-page Chromium case passed 50 consecutive executions with one worker and no retries. Three consecutive complete nine-test browser suites also passed (27 tests); their measured first-result p95 remained 85–109 ms and every close retained zero canvases.
 - Full post-remediation acceptance passed: repository and link validation; desktop/contracts typecheck; 49 frontend/shared unit tests; production frontend build; Rust format, warning-denied clippy, 116 default tests and locked check; 19 focused database tests; 2 page-plan tests; 6 feature-gated operation tests; 17 recovery tests; 3 real AppContainer/Job Object tests; qpdf 12.3.2 bundle verification; single-instance and real WebView2 raw-IPC smokes; the production G03 boundary scan; and the Tauri no-bundle release build.
 - This remediation changes only the search scheduler, its unit tests, the focused browser assertion and this log. Physical drag/drop, retained-handle sessions, raw IPC, Tauri/WebView2 construction, PDF.js, CSP, navigation and production window behavior remain byte-identical to the manually accepted build.
+
+## Independent acceptance findings remediation
+
+The independent exact-head review returned **CHANGES REQUIRED** with G03-F01 through G03-F10. This bounded batch stays inside the approved G03 architecture and remains pending exact-head CI plus a fresh independent re-review.
+
+- **F01:** Viewer ownership is now explicit and transactional. A candidate owns its Rust session, generation, abort controller, PDF.js loading task/range transport/document and candidate indexer until page-one metadata validates. A failed, cancelled or superseded candidate uses one idempotent disposer and cannot clear the active document, search, thumbnails, selection or name. Successful commit clears stale document state before disposing the old active owner exactly once. `loadPdfSession` also destroys its task and aborts its transport on every pre-return failure.
+- **F02:** `pdfjs-assets-6.2.108.json` is the exact 191-file production allow-list. Staging uses a fresh owned sibling, verifies package source and staged path/size/hash/membership, swaps with an owned backup and restores the prior valid directory on injected replacement failure. Independent PowerShell verification rejects missing, extra, map, debug, generic-viewer and modified assets.
+- **F03:** Canonical canvas limits are 16,777,216 pixels, 8,192 pixels per axis and DPR 2. Finite rounded allocation is checked before setting canvas dimensions; unsafe pages receive a page-level accessible message and never invoke PDF.js render or the first-page completion callback.
+- **F04:** Mounted rows, true viewport intersections and overscan-only rows are distinct. Greatest visible area chooses the current page with stable top/visual tie breaks; absent geometry retains the prior current page. Actual visible pages are prioritized before overscan and background work.
+- **F05:** The single stored-plan loader joins `job_operation_plans` to `jobs` and compares both operation IDs before workspace creation. Tampering only `jobs.operation_id` returns bounded `PLAN_OPERATION_MISMATCH`, creates no workspace, starts no qpdf process and publishes nothing.
+- **F06:** Rotation deltas are grouped into at most one compact qpdf range argument for each of 90/180/270 degrees. Ordered output ranges coalesce only consecutive ascending runs, preserving permutations. The exact launcher serializer rejects complete command lines at or above the 32,767 UTF-16-unit limit, and structural output argv is preflighted before workspace creation.
+- **F07:** Alt+ArrowUp/Down and inspector buttons share one selected-group reorder function. Contiguous and non-contiguous selections retain their relative order; an unselected focused page becomes the only selection. Logical focus, boundary announcements and ordinary Arrow navigation remain deterministic.
+- **F08:** Production clears the entire inherited WebView2 argument value when case-insensitive raw input contains any `--remote-debugging-*` or `--remote-allow-origins` marker, or malformed quoting. Benign-only input remains byte-identical. The feature-gated test builder remains unchanged.
+- **F09:** A persistent toolbar Open PDF ref plus post-commit layout effect restores exact keyboard focus only after user Close or empty-state password Cancel. Failed candidate Cancel preserves the active document and does not focus Open; stale abort and unmount paths request no focus.
+- **F10:** Canonical status, asset, visibility, canvas, keyboard, candidate, WebView2 and lifecycle-script claims now match production. The lock may contain optional install-script metadata such as `fsevents`; approved `--ignore-scripts` commands prevent execution rather than claiming metadata is absent.
+
+Focused local evidence includes 16 real Chromium/PDF.js cases, the 4,096-page compact-argv unit case, a real largest-size-bounded rotate job, job/plan tampering before workspace creation, the remote-debug sanitizer matrix, nine exact-asset/atomic-stage cases and eight repository-validator negative probes.
+
+The complete local acceptance run passed repository/link validation; desktop/contracts typecheck; 57 frontend/shared unit tests; production frontend build; 16 real Chromium/PDF.js cases; Rust format, warning-denied clippy, locked check and 123 default tests (plus one intentionally ignored manual benchmark); 8 feature-gated core-operation tests; 17 recovery tests; 3 real AppContainer/Job Object tests; qpdf bundle verification; single-instance, real raw-IPC WebView2 and production inherited-argument smokes; the exact-asset and G03 production-boundary scans; and the Tauri no-bundle release build. Raw WebView2 evidence returned 262,144 bytes without base64, rejected a stale session and closed all owned processes. Exact-head CI remains pending and is not claimed here.
+
+The 1,000-page remediation measurement recorded cold p95 564.2 ms first page and 623.3 ms first thumbnail, warm p95 390 ms Close, and interaction p95 618 ms visible page, 329 ms zoom, 283 ms first result and 49.77 ms mean frame. It retained at most two full canvases and ten thumbnails and retained zero after Close. Several engineering targets were missed in this run, so release performance acceptance remains an explicit follow-up rather than a claimed pass.

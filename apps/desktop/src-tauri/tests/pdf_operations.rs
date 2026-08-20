@@ -490,6 +490,125 @@ fn persisted_source_page_count_tampering_is_caught_before_output_execution() {
 }
 
 #[test]
+fn owning_job_operation_tampering_fails_before_workspace_or_qpdf() {
+    let (_app_data, state, service) = service();
+    let source_directory = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let source = support::write_semantic_pdf_fixture(
+        source_directory.path(),
+        "operation-mismatch.pdf",
+        &["ONE", "TWO"],
+    );
+    let source_before = std::fs::read(&source).unwrap();
+    let session = state.viewer_sessions.open_pdf(&source).unwrap();
+    let grant = state
+        .viewer_sessions
+        .grant_destination(destination.path())
+        .unwrap();
+    let (job, pinned) = service
+        .create_job(CorePdfJobCreateRequest {
+            viewer_session_id: session.session_id,
+            viewer_generation: session.generation,
+            destination_grant_id: grant.grant_id,
+            plan: OperationPlanEnvelope {
+                schema_version: 1,
+                operation_id: PDF_EXTRACT_OPERATION_ID.to_owned(),
+                source_page_count: 2,
+                payload: CorePdfPlanPayload::Extract(ExtractPagesPlan {
+                    selected_page_indexes: vec![0],
+                    output_name: "must-not-publish.pdf".to_owned(),
+                }),
+            },
+        })
+        .unwrap();
+    state
+        .database()
+        .connection()
+        .execute(
+            "UPDATE jobs SET operation_id = ?1 WHERE id = ?2",
+            (PDF_ROTATE_OPERATION_ID, &job.id),
+        )
+        .unwrap();
+    let token = state.cancellations.register(&job.id);
+    let error = service
+        .execute_with_registered_token(&job.id, pinned, token, |_| {})
+        .unwrap_err();
+    assert_eq!(error.code, "PLAN_OPERATION_MISMATCH");
+    assert!(!error.title.contains(PDF_EXTRACT_OPERATION_ID));
+    assert!(!error.detail.contains(PDF_ROTATE_OPERATION_ID));
+    assert!(!state.workspaces.root().join(&job.id).exists());
+    assert!(std::fs::read_dir(destination.path())
+        .unwrap()
+        .next()
+        .is_none());
+    assert_eq!(std::fs::read(&source).unwrap(), source_before);
+}
+
+#[test]
+fn largest_size_bounded_rotate_plan_executes_without_argv_truncation() {
+    let (_app_data, state, service) = service();
+    let source_directory = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let mut accepted_count = 1_u32;
+    for count in 2..=4096_u32 {
+        let envelope = OperationPlanEnvelope {
+            schema_version: 1,
+            operation_id: PDF_ROTATE_OPERATION_ID.to_owned(),
+            source_page_count: count,
+            payload: CorePdfPlanPayload::Rotate(RotatePagesPlan {
+                rotations: (0..count)
+                    .map(|page_index| PageRotation {
+                        page_index,
+                        clockwise_degrees: OutputRotation::Clockwise90,
+                    })
+                    .collect(),
+                output_name: "largest-rotate.pdf".to_owned(),
+            }),
+        };
+        if serde_json::to_string(&envelope).unwrap().len()
+            <= document_studio_lib::contracts::OPERATION_PLAN_MAX_BYTES
+        {
+            accepted_count = count;
+        } else {
+            break;
+        }
+    }
+    assert!(accepted_count > 1000);
+    assert!(accepted_count < 4096);
+    let markers = (0..accepted_count)
+        .map(|index| format!("PAGE-{index:04}"))
+        .collect::<Vec<_>>();
+    let marker_refs = markers.iter().map(String::as_str).collect::<Vec<_>>();
+    let source = support::write_semantic_pdf_fixture(
+        source_directory.path(),
+        "largest-rotate.pdf",
+        &marker_refs,
+    );
+    let completed = execute(
+        &state,
+        &service,
+        &source,
+        destination.path(),
+        PDF_ROTATE_OPERATION_ID,
+        CorePdfPlanPayload::Rotate(RotatePagesPlan {
+            rotations: (0..accepted_count)
+                .map(|page_index| PageRotation {
+                    page_index,
+                    clockwise_degrees: OutputRotation::Clockwise90,
+                })
+                .collect(),
+            output_name: "largest-rotate-output.pdf".to_owned(),
+        }),
+        accepted_count,
+    );
+    assert_eq!(completed.state, JobState::Completed);
+    assert_eq!(
+        semantic_markers(output_path(&completed, 0)).len(),
+        accepted_count as usize
+    );
+}
+
+#[test]
 fn split_partial_publication_is_failed_truthful_and_preserves_published_files() {
     let (_app_data, state, _service) = service();
     let service = PdfPageOperationService::new(state.clone()).with_hooks(PdfPageOperationHooks {

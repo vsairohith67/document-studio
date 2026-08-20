@@ -77,7 +77,7 @@ Cosign 3.0.6 is acquisition/CI verification tooling, not a shipped application r
 
 ## G03 viewer and browser-test adoption
 
-All installs used exact versions plus `--ignore-scripts`. No lifecycle script ran. The lockfile contains registry URLs and Subresource Integrity; no runtime package fetch occurs.
+All installs used exact versions plus `--ignore-scripts`, so no lifecycle script executed. The lockfile may still record optional platform-package install-script metadata such as `fsevents`; that metadata is not claimed absent. The lockfile contains registry URLs and Subresource Integrity; no runtime package fetch occurs.
 
 | Package | Exact/locked version | Licence | Official registry integrity | Role and boundary |
 |---|---:|---|---|---|
@@ -90,4 +90,4 @@ All installs used exact versions plus `--ignore-scripts`. No lifecycle script ra
 
 The project-local Playwright acquisition contains Chrome for Testing and Headless Shell 151.0.7922.34 at revision 1234, ffmpeg revision 1011 and winldd revision 1007 under `.cache/ms-playwright/`; it is ignored, not system-wide, and not shipped. CI downloads only this locked test browser. Production remote debugging is absent.
 
-The PDF.js staging script checks package/API/worker version parity, copies only the legacy worker, CMaps, standard fonts, ICC profiles and WASM, and writes a local asset manifest. The application makes no CDN or network request. Security review is monthly, version review quarterly, and every update requires explicit dependency approval, lock/integrity/licence review, worker hash/parity proof and the complete browser/WebView/security suite.
+The PDF.js staging script checks package/API/worker version parity and copies only the 191 files in `apps/desktop/scripts/pdfjs-assets-6.2.108.json`. It verifies every source and staged path, byte size and SHA-256 in a fresh sibling, proves exact membership, then atomically replaces the old directory with rollback. QuickJS, no-WASM fallbacks, maps, debug/test/example content and generic viewer UI are excluded. The application makes no CDN or network request. Security review is monthly, version review quarterly, and every update requires explicit dependency approval, lock/integrity/licence review, worker hash/parity proof and the complete browser/WebView/security suite.

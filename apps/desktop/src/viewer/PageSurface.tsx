@@ -6,6 +6,9 @@ import {
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
   MAX_CANVAS_PIXELS,
+  MAX_CANVAS_HEIGHT,
+  MAX_CANVAS_WIDTH,
+  MAX_PAGE_CSS_DIMENSION,
   PAGE_DPR_CAP,
   SAFE_PAGE_RENDER_OPTIONS,
   THUMBNAIL_DPR_CAP,
@@ -28,6 +31,7 @@ interface PageSurfaceProps {
   selected: boolean;
   searchQuery: string;
   searchHits: number;
+  visible: boolean;
   onSelect(pageIndex: number, event: React.MouseEvent): void;
   onRendered(pageIndex: number): void;
 }
@@ -48,12 +52,30 @@ function effectiveScale(
   return zoom;
 }
 
-function safeOutputScale(width: number, height: number, cap: number): number {
-  const requested = Math.min(window.devicePixelRatio || 1, cap);
-  const pixels = width * height * requested * requested;
-  return pixels <= MAX_CANVAS_PIXELS
-    ? requested
-    : Math.max(0.25, Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height)));
+export interface SafeCanvasAllocation {
+  width: number;
+  height: number;
+  outputScale: number;
+}
+
+export function safeCanvasAllocation(
+  viewportWidth: number,
+  viewportHeight: number,
+  devicePixelRatio: number,
+  cap: number,
+): SafeCanvasAllocation | null {
+  if (!Number.isFinite(viewportWidth) || !Number.isFinite(viewportHeight)
+    || viewportWidth < 1 || viewportHeight < 1
+    || viewportWidth > MAX_PAGE_CSS_DIMENSION || viewportHeight > MAX_PAGE_CSS_DIMENSION) return null;
+  const ratio = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const outputScale = Math.min(ratio, cap);
+  const width = Math.ceil(viewportWidth * outputScale);
+  const height = Math.ceil(viewportHeight * outputScale);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)
+    || width < 1 || height < 1 || width > MAX_CANVAS_WIDTH || height > MAX_CANVAS_HEIGHT) return null;
+  const pixels = width * height;
+  if (!Number.isSafeInteger(pixels) || pixels > MAX_CANVAS_PIXELS) return null;
+  return { width, height, outputScale };
 }
 
 export const PageSurface = memo(function PageSurface({
@@ -68,6 +90,7 @@ export const PageSurface = memo(function PageSurface({
   selected,
   searchQuery,
   searchHits,
+  visible,
   onSelect,
   onRendered,
 }: PageSurfaceProps) {
@@ -75,18 +98,19 @@ export const PageSurface = memo(function PageSurface({
   const textLayerRef = useRef<HTMLDivElement>(null);
   const onRenderedRef = useRef(onRendered);
   const [dimensions, setDimensions] = useState({ width: 612, height: 792 });
-  const [renderError, setRenderError] = useState(false);
+  const [renderError, setRenderError] = useState<'too-large' | 'failed' | null>(null);
   useEffect(() => { onRenderedRef.current = onRendered; }, [onRendered]);
 
   useEffect(() => {
     let active = true;
     let renderTask: RenderTask | null = null;
     let textLayer: TextLayer | null = null;
+    let deferredFrame: number | null = null;
     const canvas = canvasRef.current;
     const textContainer = textLayerRef.current;
     if (!canvas || !textContainer) return;
-    setRenderError(false);
-    void document.getPage(pageIndex + 1).then(async (page) => {
+    setRenderError(null);
+    const render = () => { void document.getPage(pageIndex + 1).then(async (page) => {
       if (!active) return;
       const base = page.getViewport({ scale: 1, rotation: viewRotation });
       const scale = effectiveScale(
@@ -98,9 +122,22 @@ export const PageSurface = memo(function PageSurface({
         availableHeight,
       );
       const viewport = page.getViewport({ scale, rotation: viewRotation });
-      const outputScale = safeOutputScale(viewport.width, viewport.height, PAGE_DPR_CAP);
-      canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
-      canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
+      const allocation = safeCanvasAllocation(
+        viewport.width,
+        viewport.height,
+        window.devicePixelRatio || 1,
+        PAGE_DPR_CAP,
+      );
+      if (!allocation) {
+        canvas.width = 0;
+        canvas.height = 0;
+        textContainer.replaceChildren();
+        setRenderError('too-large');
+        return;
+      }
+      const { outputScale } = allocation;
+      canvas.width = allocation.width;
+      canvas.height = allocation.height;
       canvas.style.width = `${Math.floor(viewport.width)}px`;
       canvas.style.height = `${Math.floor(viewport.height)}px`;
       textContainer.style.width = `${Math.floor(viewport.width)}px`;
@@ -152,24 +189,28 @@ export const PageSurface = memo(function PageSurface({
       if (active) onRenderedRef.current(pageIndex);
     }).catch((error: unknown) => {
       if (active && !(error instanceof Error && error.name === 'RenderingCancelledException')) {
-        setRenderError(true);
+        setRenderError('failed');
       }
-    });
+    }); };
+    if (visible) render();
+    else deferredFrame = window.requestAnimationFrame(render);
     return () => {
       active = false;
+      if (deferredFrame !== null) window.cancelAnimationFrame(deferredFrame);
       renderTask?.cancel();
       textLayer?.cancel();
       textContainer.replaceChildren();
       canvas.width = 0;
       canvas.height = 0;
     };
-  }, [availableHeight, availableWidth, document, fitMode, pageIndex, searchQuery, viewRotation, zoom]);
+  }, [availableHeight, availableWidth, document, fitMode, pageIndex, searchQuery, viewRotation, visible, zoom]);
 
   return (
     <article
       className={`pdf-page-surface${selected ? ' selected' : ''}${searchHits > 0 ? ' search-result-page' : ''}`}
       style={{ width: dimensions.width, minHeight: dimensions.height }}
       data-page-index={pageIndex}
+      data-visible={visible ? 'true' : 'false'}
       aria-label={`Page ${pageIndex + 1} of ${pageCount}${selected ? ', selected' : ''}`}
       aria-selected={selected}
       onClick={(event) => {
@@ -180,7 +221,8 @@ export const PageSurface = memo(function PageSurface({
       <canvas ref={canvasRef} aria-label={`Rendered page ${pageIndex + 1}`} />
       <div ref={textLayerRef} className="textLayer" aria-label={`Selectable text for page ${pageIndex + 1}`} />
       {searchHits > 0 && <span className="page-search-count" aria-label={`${searchHits} search results on page ${pageIndex + 1}`}>{searchHits}</span>}
-      {renderError && <div className="page-render-error" role="status">Page {pageIndex + 1} could not be rendered.</div>}
+      {renderError === 'too-large' && <div className="page-render-error" role="status">This page is too large to render safely.</div>}
+      {renderError === 'failed' && <div className="page-render-error" role="status">Page {pageIndex + 1} could not be rendered.</div>}
     </article>
   );
 });
@@ -193,6 +235,8 @@ interface ThumbnailProps {
   current: boolean;
   onSelect(pageIndex: number, event: React.MouseEvent): void;
   onNavigate(pageIndex: number, direction: -1 | 1 | 'first' | 'last'): void;
+  onReorder(pageIndex: number, direction: -1 | 1): void;
+  onFocusPage(pageIndex: number): void;
 }
 
 export const PageThumbnail = memo(function PageThumbnail({
@@ -203,6 +247,8 @@ export const PageThumbnail = memo(function PageThumbnail({
   current,
   onSelect,
   onNavigate,
+  onReorder,
+  onFocusPage,
 }: ThumbnailProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -214,9 +260,16 @@ export const PageThumbnail = memo(function PageThumbnail({
       if (!active) return;
       const base = page.getViewport({ scale: 1 });
       const viewport = page.getViewport({ scale: 112 / base.width });
-      const outputScale = safeOutputScale(viewport.width, viewport.height, THUMBNAIL_DPR_CAP);
-      canvas.width = Math.max(1, Math.floor(viewport.width * outputScale));
-      canvas.height = Math.max(1, Math.floor(viewport.height * outputScale));
+      const allocation = safeCanvasAllocation(
+        viewport.width,
+        viewport.height,
+        window.devicePixelRatio || 1,
+        THUMBNAIL_DPR_CAP,
+      );
+      if (!allocation) return;
+      const { outputScale } = allocation;
+      canvas.width = allocation.width;
+      canvas.height = allocation.height;
       canvas.style.width = `${Math.floor(viewport.width)}px`;
       canvas.style.height = `${Math.floor(viewport.height)}px`;
       const context = canvas.getContext('2d', { alpha: false });
@@ -246,8 +299,15 @@ export const PageThumbnail = memo(function PageThumbnail({
       aria-pressed={selected}
       data-page-index={pageIndex}
       tabIndex={current ? 0 : -1}
+      onFocus={() => onFocusPage(pageIndex)}
       onClick={(event) => onSelect(pageIndex, event)}
       onKeyDown={(event) => {
+        if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+          event.preventDefault();
+          event.stopPropagation();
+          onReorder(pageIndex, event.key === 'ArrowUp' ? -1 : 1);
+          return;
+        }
         const direction = event.key === 'ArrowUp' || event.key === 'ArrowLeft'
           ? -1
           : event.key === 'ArrowDown' || event.key === 'ArrowRight'

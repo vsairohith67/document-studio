@@ -14,12 +14,22 @@ declare global {
       plans: unknown[];
       pageCount: number;
       fixtureBytes: number;
+      openCount: number;
+      closeCount: number;
+      activeSessions: number;
+      candidateSessions: number;
+      maxActiveSessions: number;
+      closedSessionIds: string[];
     };
     __G03_PRINT_CALLED__: boolean;
   }
 }
 
-function syntheticPdf(pageCount: number, includeText = true): Uint8Array {
+function syntheticPdf(
+  pageCount: number,
+  includeText = true,
+  dimensions?: Array<{ width: number; height: number; userUnit?: number }>,
+): Uint8Array {
   const encoder = new TextEncoder();
   const objects: string[] = [];
   const pageReferences = Array.from({ length: pageCount }, (_, index) => `${4 + index * 2} 0 R`).join(' ');
@@ -29,9 +39,10 @@ function syntheticPdf(pageCount: number, includeText = true): Uint8Array {
   for (let index = 0; index < pageCount; index += 1) {
     const pageObject = 4 + index * 2;
     const streamObject = pageObject + 1;
-    const width = index % 3 === 0 ? 612 : index % 3 === 1 ? 792 : 540;
-    const height = index % 3 === 1 ? 612 : 792;
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}] /Resources << /Font << /F1 3 0 R >> >> /Contents ${streamObject} 0 R /Annots [<< /Type /Annot /Subtype /Link /Rect [0 0 100 20] /A << /S /URI /URI (https://example.com/) >> >>] >>`);
+    const width = dimensions?.[index]?.width ?? (index % 3 === 0 ? 612 : index % 3 === 1 ? 792 : 540);
+    const height = dimensions?.[index]?.height ?? (index % 3 === 1 ? 612 : 792);
+    const userUnit = dimensions?.[index]?.userUnit ? ` /UserUnit ${dimensions[index].userUnit}` : '';
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}]${userUnit} /Resources << /Font << /F1 3 0 R >> >> /Contents ${streamObject} 0 R /Annots [<< /Type /Annot /Subtype /Link /Rect [0 0 100 20] /A << /S /URI /URI (https://example.com/) >> >>] >>`);
     const stream = includeText
       ? `BT /F1 14 Tf 72 72 Td (Page ${index + 1} unique-text-${index + 1}) Tj ET\n`
       : '0 0 100 100 re S\n';
@@ -54,17 +65,34 @@ function syntheticPdf(pageCount: number, includeText = true): Uint8Array {
 }
 
 async function installTransport(page: Page, pageCount: number, suppliedBytes = syntheticPdf(pageCount)) {
-  await page.addInitScript(({ pages, fixture }) => {
-    const bytes = Uint8Array.from(fixture);
+  await installTransportSequence(page, [{
+    pageCount,
+    bytes: suppliedBytes,
+    displayName: `fixture-${pageCount}-pages.pdf`,
+  }]);
+}
+
+interface BrowserFixture {
+  pageCount: number;
+  bytes: Uint8Array;
+  displayName: string;
+  readDelayMs?: number;
+}
+
+async function installTransportSequence(page: Page, suppliedFixtures: BrowserFixture[]) {
+  await page.addInitScript((serializedFixtures) => {
+    const fixtures = serializedFixtures.map((fixture) => ({
+      ...fixture,
+      bytes: Uint8Array.from(fixture.bytes),
+    }));
     const evidence = window.__G03_TEST_EVIDENCE__ = {
       rangeCalls: [], peakReads: 0, activeReads: 0, closed: false,
-      dropEnabled: false, plans: [], pageCount: pages, fixtureBytes: bytes.byteLength,
+      dropEnabled: false, plans: [], pageCount: fixtures[0].pageCount,
+      fixtureBytes: fixtures[0].bytes.byteLength, openCount: 0, closeCount: 0,
+      activeSessions: 0, candidateSessions: 0, maxActiveSessions: 0, closedSessionIds: [],
     };
-    const metadata = {
-      sessionId: 'browser-opaque-session', generation: 41, displayName: `fixture-${pages}-pages.pdf`,
-      sizeBytes: bytes.byteLength, modifiedAt: '2026-08-17T00:00:00Z',
-      mimeType: 'application/pdf', fileIdentity: 'browser-opaque-identity',
-    } as const;
+    const sessions = new Map<string, { bytes: Uint8Array; generation: number; delay: number }>();
+    let fixtureIndex = 0;
     const makeJob = (request: { plan: { operationId: string }; viewerSessionId: string }) => ({
       id: 'browser-job-0001', operationId: request.plan.operationId, operationVersion: '1.0.0',
       state: 'queued', stage: null, sequence: 0,
@@ -75,25 +103,53 @@ async function installTransport(page: Page, pageCount: number, suppliedBytes = s
       finishedAt: null, version: 0, inputs: [], outputs: [], errors: [],
     });
     globalThis.__DOCUMENT_STUDIO_G03_TEST_TRANSPORT__ = {
-      async open() { evidence.closed = false; return metadata; },
+      async open() {
+        const fixture = fixtures[Math.min(fixtureIndex, fixtures.length - 1)];
+        const ordinal = fixtureIndex;
+        fixtureIndex += 1;
+        evidence.openCount += 1;
+        const sessionId = fixtures.length === 1 ? 'browser-opaque-session' : `browser-opaque-session-${ordinal + 1}`;
+        const generation = 41 + ordinal;
+        sessions.set(sessionId, { bytes: fixture.bytes, generation, delay: fixture.readDelayMs ?? 2 });
+        evidence.closed = false;
+        evidence.activeSessions = sessions.size;
+        evidence.candidateSessions = Math.max(0, sessions.size - 1);
+        evidence.maxActiveSessions = Math.max(evidence.maxActiveSessions, sessions.size);
+        return {
+          sessionId, generation, displayName: fixture.displayName,
+          sizeBytes: fixture.bytes.byteLength, modifiedAt: '2026-08-17T00:00:00Z',
+          mimeType: 'application/pdf', fileIdentity: `browser-opaque-identity-${ordinal + 1}`,
+        };
+      },
       async readRange(request: { sessionId: string; generation: number; begin: number; end: number }) {
-        if (request.sessionId !== metadata.sessionId || request.generation !== metadata.generation || evidence.closed) throw new Error('expired session');
-        if (request.begin < 0 || request.end <= request.begin || request.end > bytes.byteLength || request.end - request.begin > 1024 * 1024) throw new Error('invalid range');
+        const session = sessions.get(request.sessionId);
+        if (!session || request.generation !== session.generation) throw new Error('expired session');
+        if (request.begin < 0 || request.end <= request.begin || request.end > session.bytes.byteLength || request.end - request.begin > 1024 * 1024) throw new Error('invalid range');
         evidence.rangeCalls.push({ ...request });
         evidence.activeReads += 1;
         evidence.peakReads = Math.max(evidence.peakReads, evidence.activeReads);
-        await new Promise((resolve) => setTimeout(resolve, 2));
+        await new Promise((resolve) => setTimeout(resolve, session.delay));
         evidence.activeReads -= 1;
-        return bytes.slice(request.begin, request.end);
+        return session.bytes.slice(request.begin, request.end);
       },
-      async close() { evidence.closed = true; },
+      async close(request: { sessionId: string; generation: number }) {
+        const session = sessions.get(request.sessionId);
+        if (session?.generation === request.generation) {
+          sessions.delete(request.sessionId);
+          evidence.closeCount += 1;
+          evidence.closedSessionIds.push(request.sessionId);
+        }
+        evidence.activeSessions = sessions.size;
+        evidence.candidateSessions = Math.max(0, sessions.size - 1);
+        evidence.closed = sessions.size === 0;
+      },
       async setDropEnabled(enabled: boolean) { evidence.dropEnabled = enabled; },
       async chooseDestination() { return { grantId: 'opaque-destination-grant', displayName: 'Test outputs' }; },
       async revokeDestination() {},
       async createCorePdf(request: unknown) { evidence.plans.push(request); return makeJob(request as never); },
       async onProgress() { return () => undefined; },
     };
-  }, { pages: pageCount, fixture: Array.from(suppliedBytes) });
+  }, suppliedFixtures.map((fixture) => ({ ...fixture, bytes: Array.from(fixture.bytes) })));
 }
 
 async function openViewer(page: Page) {
@@ -127,7 +183,7 @@ test('renders progressively through the matching worker and bounded raw range co
   expect(marks.page).toBeDefined();
   expect(marks.thumbnail).toBeDefined();
   expect(marks.page!).toBeLessThanOrEqual(marks.thumbnail!);
-  expect(await page.locator('.pdf-page-surface').count()).toBeLessThanOrEqual(8);
+  expect(await page.locator('.pdf-page-surface').count()).toBeLessThanOrEqual(6);
   expect(await page.locator('.page-thumbnail').count()).toBeLessThanOrEqual(20);
   expect(await page.locator('a[href]').count()).toBe(0);
   expect(await page.evaluate(() => window.__G03_PRINT_CALLED__)).toBe(false);
@@ -196,7 +252,7 @@ test('virtualizes a 1000-page mixed-size document and searches before full index
   await page.getByRole('button', { name: 'Last page' }).click();
   await expect(page.locator('[data-page-index="999"]')).toBeAttached();
   await expect(page.locator('.virtual-page-stack [data-page-index="0"]')).toHaveCount(0);
-  expect(await page.locator('.pdf-page-surface').count()).toBeLessThanOrEqual(8);
+  expect(await page.locator('.pdf-page-surface').count()).toBeLessThanOrEqual(6);
   expect(await page.locator('.page-thumbnail').count()).toBeLessThanOrEqual(20);
   await page.getByRole('button', { name: 'Zoom in' }).click();
   await page.getByRole('button', { name: 'Fit width' }).click();
@@ -210,6 +266,111 @@ test('reports damaged PDF data without retaining a canvas', async ({ page }) => 
   await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
   await expect(page.getByRole('alert')).toContainText('Document Studio could not complete that request.');
   await expect(page.locator('.pdf-page-surface canvas')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(1);
+});
+
+test('keeps active A through damaged B and commits valid C transactionally', async ({ page }) => {
+  await installTransportSequence(page, [
+    { pageCount: 2, bytes: syntheticPdf(2), displayName: 'active-a.pdf' },
+    { pageCount: 1, bytes: new TextEncoder().encode('%PDF-1.7\nstructurally damaged'), displayName: 'damaged-b.pdf' },
+    { pageCount: 3, bytes: syntheticPdf(3), displayName: 'replacement-c.pdf' },
+  ]);
+  await openViewer(page);
+  await page.keyboard.press('Control+f');
+  await page.getByPlaceholder('Find in document').fill('Page 1 unique-text-1');
+  await expect(page.locator('.search-bar [role="status"]')).toContainText('1 of 1');
+  const firstThumbnail = page.getByRole('button', { name: 'Page 1 of 2' }).first();
+  await firstThumbnail.click();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.locator('.viewer-document-name')).toHaveText('active-a.pdf');
+  await expect(firstThumbnail).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('.search-bar [role="status"]')).toContainText('1 of 1');
+  await expect(page.locator('.pdf-page-surface canvas').first()).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(1);
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closedSessionIds)).toContain('browser-opaque-session-2');
+
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.locator('.viewer-document-name')).toHaveText('replacement-c.pdf');
+  await expect(page.getByRole('button', { name: 'Page 1 of 3' }).first()).toBeVisible();
+  await expect(page.locator('.search-bar')).toHaveCount(0);
+  await expect(page.getByLabel('Pages and selection').getByText('0 selected')).toBeVisible();
+  await expect(page.getByText('active-a.pdf')).toHaveCount(0);
+  const replacementEvidence = await page.evaluate(() => window.__G03_TEST_EVIDENCE__);
+  expect(replacementEvidence.activeSessions).toBe(1);
+  expect(replacementEvidence.maxActiveSessions).toBe(2);
+  expect(replacementEvidence.closeCount).toBe(2);
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  expect(await page.locator('.pdf-page-surface').count()).toBe(0);
+});
+
+test('candidate password Cancel preserves A without moving focus to Open', async ({ page }, testInfo) => {
+  const clearPath = testInfo.outputPath('candidate-clear.pdf');
+  const encryptedPath = testInfo.outputPath('candidate-encrypted.pdf');
+  await writeFile(clearPath, syntheticPdf(1));
+  execFileSync(
+    resolve(import.meta.dirname, '..', 'src-tauri', 'resources', 'qpdf', '12.3.2', 'bin', 'qpdf.exe'),
+    [clearPath, '--encrypt', 'candidate-secret', 'test-owner', '256', '--', encryptedPath],
+    { stdio: 'pipe' },
+  );
+  await installTransportSequence(page, [
+    { pageCount: 2, bytes: syntheticPdf(2), displayName: 'active-a.pdf' },
+    { pageCount: 1, bytes: await readFile(encryptedPath), displayName: 'encrypted-b.pdf' },
+  ]);
+  await openViewer(page);
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Password required' })).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('dialog', { name: 'Password required' })).toHaveCount(0);
+  await expect(page.locator('.viewer-document-name')).toHaveText('active-a.pdf');
+  await expect(page.locator('.pdf-page-surface canvas').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open PDF', exact: true }).first()).not.toBeFocused();
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(1);
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(1);
+});
+
+test('slow B is disposed when C supersedes it and close disposes active plus candidate', async ({ page }) => {
+  await installTransportSequence(page, [
+    { pageCount: 2, bytes: syntheticPdf(2), displayName: 'active-a.pdf' },
+    { pageCount: 2, bytes: syntheticPdf(2), displayName: 'slow-b.pdf', readDelayMs: 500 },
+    { pageCount: 3, bytes: syntheticPdf(3), displayName: 'fast-c.pdf' },
+    { pageCount: 2, bytes: syntheticPdf(2), displayName: 'slow-d.pdf', readDelayMs: 500 },
+  ]);
+  await openViewer(page);
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.getByText('Opening and validating the selected PDF…')).toBeVisible();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.locator('.viewer-document-name')).toHaveText('fast-c.pdf');
+  await page.waitForTimeout(600);
+  await expect(page.locator('.viewer-document-name')).toHaveText('fast-c.pdf');
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(1);
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.getByText('Opening and validating the selected PDF…')).toBeVisible();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(page.locator('.pdf-page-surface')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(4);
+});
+
+test('rejects an extreme page without blocking normal neighboring pages', async ({ page }) => {
+  const bytes = syntheticPdf(3, true, [
+    { width: 612, height: 792 },
+    { width: 10, height: 1_000_000, userUnit: 1000 },
+    { width: 792, height: 612 },
+  ]);
+  await installTransport(page, 3, bytes);
+  await openViewer(page);
+  await page.getByRole('button', { name: 'Actual size' }).click();
+  await page.getByRole('button', { name: 'Page 2 of 3' }).first().click();
+  await page.keyboard.press('PageDown');
+  await expect(page.getByText('This page is too large to render safely.')).toBeVisible();
+  const extreme = page.locator('.pdf-page-surface[data-page-index="1"] canvas');
+  expect(await extreme.evaluate((canvas) => ({ width: (canvas as HTMLCanvasElement).width, height: (canvas as HTMLCanvasElement).height })))
+    .toEqual({ width: 0, height: 0 });
+  await page.getByRole('button', { name: 'Last page' }).click();
+  await expect.poll(() => page.locator('.pdf-page-surface[data-page-index="2"] canvas').evaluate((canvas) => (canvas as HTMLCanvasElement).width)).toBeGreaterThan(0);
 });
 
 test('truthfully reports that image-only pages have no searchable text', async ({ page }) => {
@@ -251,6 +412,8 @@ test('supports thumbnail keyboard navigation and preserves focus after accessibl
   await second.focus();
   await page.keyboard.press('ArrowDown');
   await expect(third).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(second).toBeFocused();
   await page.getByRole('button', { name: 'Move up' }).click();
   await expect(second).toBeFocused();
   await expect(page.locator('.sr-announcement')).toHaveText('Page 2 moved to position 1.');
@@ -264,6 +427,135 @@ test('supports thumbnail keyboard navigation and preserves focus after accessibl
       payload: { orderedPageIndexes: [1, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] },
     },
   });
+});
+
+test('supports Alt+Arrow block reorder, boundaries, announcements and persisted visual order', async ({ page }) => {
+  await installTransport(page, 8);
+  await openViewer(page);
+  const pageOne = page.getByRole('button', { name: 'Page 1 of 8' }).first();
+  const pageTwo = page.getByRole('button', { name: 'Page 2 of 8' }).first();
+  const pageThree = page.getByRole('button', { name: 'Page 3 of 8' }).first();
+  const pageFour = page.getByRole('button', { name: 'Page 4 of 8' }).first();
+  await pageOne.click();
+  await pageOne.focus();
+  await page.keyboard.press('Alt+ArrowUp');
+  await expect(page.locator('.sr-announcement')).toHaveText('Selected pages are already at the beginning.');
+  await expect(pageOne).toBeFocused();
+
+  await pageTwo.click();
+  await pageTwo.focus();
+  await page.keyboard.press('Alt+ArrowUp');
+  await expect(pageTwo).toBeFocused();
+  await expect(page.locator('.sr-announcement')).toHaveText('Page 2 moved to position 1.');
+  await page.keyboard.press('Alt+ArrowDown');
+  await expect(pageTwo).toBeFocused();
+  await expect(page.locator('.sr-announcement')).toHaveText('Page 2 moved to position 2.');
+
+  await pageTwo.click();
+  await pageThree.click({ modifiers: ['Control'] });
+  await pageTwo.focus();
+  await page.keyboard.press('Alt+ArrowUp');
+  await expect(pageTwo).toBeFocused();
+  await expect(page.locator('.sr-announcement')).toHaveText('2 selected pages moved to positions 1–2.');
+
+  await pageOne.click();
+  await pageFour.click({ modifiers: ['Control'] });
+  await pageFour.focus();
+  await page.keyboard.press('Alt+ArrowDown');
+  await expect(pageFour).toBeFocused();
+  await expect(page.locator('.sr-announcement')).toContainText('2 selected pages moved to positions');
+  await page.keyboard.press('ArrowUp');
+  await expect(pageFour).not.toBeFocused();
+
+  const last = page.getByRole('button', { name: 'Page 8 of 8' }).first();
+  await last.click();
+  await last.focus();
+  await page.keyboard.press('Alt+ArrowDown');
+  await expect(last).toBeFocused();
+  await expect(page.locator('.sr-announcement')).toHaveText('Selected pages are already at the end.');
+
+  await page.getByRole('combobox', { name: /Operation/ }).selectOption('pdf.reorder-pages');
+  await page.getByRole('button', { name: 'Choose destination' }).click();
+  await page.getByRole('button', { name: 'Apply / Export' }).click();
+  const planOrder = await page.evaluate(() => (
+    window.__G03_TEST_EVIDENCE__.plans.at(-1) as { plan: { payload: { orderedPageIndexes: number[] } } }
+  ).plan.payload.orderedPageIndexes);
+  const visualOrder = await page.locator('.page-thumbnail').evaluateAll((buttons) => buttons
+    .map((button) => Number((button as HTMLElement).dataset.pageIndex)));
+  const persistedPositions = visualOrder.map((sourcePage) => planOrder.indexOf(sourcePage));
+  expect(persistedPositions).toEqual([...persistedPositions].sort((left, right) => left - right));
+});
+
+test('tracks true viewport visibility instead of the TanStack overscan range', async ({ page }) => {
+  await installTransport(page, 40);
+  await openViewer(page);
+  await page.getByRole('button', { name: 'Page 10 of 40' }).first().click();
+  await page.locator('.page-canvas-scroll').evaluate((element) => {
+    element.scrollTop = 8_000;
+  });
+  await expect.poll(() => page.locator('.virtual-page-row[data-visible="true"]').count()).toBeGreaterThan(0);
+  await expect.poll(() => page.locator('.virtual-page-row[data-visible="false"]').count()).toBeGreaterThan(0);
+  const expectedCurrent = await page.locator('.page-canvas-scroll').evaluate((root) => {
+    const rootRect = root.getBoundingClientRect();
+    return [...root.querySelectorAll<HTMLElement>('.virtual-page-row')]
+      .map((row) => {
+        const rect = row.getBoundingClientRect();
+        const width = Math.max(0, Math.min(rect.right, rootRect.right) - Math.max(rect.left, rootRect.left));
+        const height = Math.max(0, Math.min(rect.bottom, rootRect.bottom) - Math.max(rect.top, rootRect.top));
+        return {
+          page: Number(row.dataset.sourcePageIndex),
+          visual: Number(row.dataset.visualIndex),
+          area: width * height,
+          top: Math.abs(rect.top - rootRect.top),
+        };
+      })
+      .filter((entry) => entry.area > 0)
+      .sort((left, right) => right.area - left.area || left.top - right.top || left.visual - right.visual)[0].page;
+  });
+  const pageNumber = page.locator('.page-number-field input');
+  await expect(pageNumber).toHaveValue(String(expectedCurrent + 1));
+  const firstMounted = Number(await page.locator('.virtual-page-row').first().getAttribute('data-source-page-index'));
+  if (firstMounted !== expectedCurrent) {
+    await expect(page.locator('.virtual-page-row').first()).toHaveAttribute('data-visible', 'false');
+  }
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await expect.poll(async () => Number(await pageNumber.inputValue())).toBeGreaterThan(1);
+  await page.getByRole('button', { name: 'Fit width' }).click();
+  await expect.poll(() => page.locator('.virtual-page-row[data-visible="true"]').count()).toBeGreaterThan(0);
+  expect(await page.locator('.pdf-page-surface').count()).toBeLessThanOrEqual(6);
+});
+
+test('restores Open PDF focus after user Close and empty password Cancel only', async ({ page }, testInfo) => {
+  await installTransport(page, 3);
+  await openViewer(page);
+  await page.keyboard.press('Control+f');
+  await page.getByPlaceholder('Find in document').focus();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  const openButton = page.getByRole('button', { name: 'Open PDF', exact: true }).first();
+  await expect(openButton).toBeFocused();
+  await openButton.click();
+  const thumbnail = page.getByRole('button', { name: 'Page 1 of 3' }).first();
+  await thumbnail.focus();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(openButton).toBeFocused();
+
+  const clearPath = testInfo.outputPath('focus-clear.pdf');
+  const encryptedPath = testInfo.outputPath('focus-encrypted.pdf');
+  await writeFile(clearPath, syntheticPdf(1));
+  execFileSync(
+    resolve(import.meta.dirname, '..', 'src-tauri', 'resources', 'qpdf', '12.3.2', 'bin', 'qpdf.exe'),
+    [clearPath, '--encrypt', 'focus-secret', 'test-owner', '256', '--', encryptedPath],
+    { stdio: 'pipe' },
+  );
+  await page.goto('/');
+  await installTransport(page, 1, await readFile(encryptedPath));
+  await page.reload();
+  await page.getByRole('button', { name: 'Viewer', exact: true }).click();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('button', { name: 'Open PDF', exact: true }).first()).toBeFocused();
+  await page.goto('about:blank');
+  expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('BODY');
 });
 
 type PerformanceSample = {

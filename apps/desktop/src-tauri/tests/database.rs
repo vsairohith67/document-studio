@@ -604,9 +604,32 @@ fn job_and_plan_operation_mismatch_rolls_back_without_leaking_plan_details() {
             params![PDF_ROTATE_OPERATION_ID, stored_job.id],
         )
         .unwrap();
+    let tampered_plan_result = database.get_operation_plan(&stored_job.id);
+    assert!(
+        matches!(
+            tampered_plan_result,
+            Err(DatabaseError::OperationPlanMismatch)
+        ),
+        "unexpected tampered-plan result: {tampered_plan_result:?}"
+    );
+
+    database
+        .connection()
+        .execute(
+            "UPDATE job_operation_plans SET operation_id = ?1 WHERE job_id = ?2",
+            params![stored_plan.envelope.operation_id, stored_job.id],
+        )
+        .unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE jobs SET operation_id = ?1 WHERE id = ?2",
+            params![PDF_ROTATE_OPERATION_ID, stored_job.id],
+        )
+        .unwrap();
     assert!(matches!(
         database.get_operation_plan(&stored_job.id),
-        Err(DatabaseError::OperationPlanInvalid)
+        Err(DatabaseError::OperationPlanMismatch)
     ));
 }
 

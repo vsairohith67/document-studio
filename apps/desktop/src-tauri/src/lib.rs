@@ -447,19 +447,27 @@ fn remove_remote_debugging_arguments() {
     let Some(arguments) = std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") else {
         return;
     };
-    let filtered = arguments
-        .to_string_lossy()
-        .split_whitespace()
-        .filter(|argument| {
-            !argument.starts_with("--remote-debugging-port")
-                && !argument.starts_with("--remote-allow-origins")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    if filtered.is_empty() {
+    if sanitize_inherited_webview_arguments(&arguments.to_string_lossy()).is_none() {
         std::env::remove_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS");
+    }
+}
+
+#[cfg(any(not(feature = "test-runtime"), test))]
+fn sanitize_inherited_webview_arguments(arguments: &str) -> Option<&str> {
+    let lowercase = arguments.to_ascii_lowercase();
+    let malformed_quotes = arguments
+        .chars()
+        .filter(|character| *character == '"')
+        .count()
+        % 2
+        != 0;
+    if malformed_quotes
+        || lowercase.contains("--remote-debugging-")
+        || lowercase.contains("--remote-allow-origins")
+    {
+        None
     } else {
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", filtered);
+        Some(arguments)
     }
 }
 
@@ -631,5 +639,47 @@ mod test_webview_override_tests {
                 "arguments must not contain {forbidden}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod inherited_webview_argument_tests {
+    use super::sanitize_inherited_webview_arguments;
+
+    #[test]
+    fn benign_arguments_are_preserved_byte_for_byte() {
+        let value = "--disable-gpu --force-color-profile=srgb";
+        assert_eq!(sanitize_inherited_webview_arguments(value), Some(value));
+    }
+
+    #[test]
+    fn every_remote_debugging_family_variant_clears_the_entire_value() {
+        for value in [
+            "--remote-debugging-port=43127",
+            "--remote-debugging-port 43127",
+            "--remote-debugging-pipe",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-new-variant=yes",
+            "\"--remote-debugging-port=43127\"",
+            "--REMOTE-DEBUGGING-PORT=43127",
+            "--Remote-Debugging-Pipe --disable-gpu",
+            "--remote-allow-origins=*",
+            "--remote-allow-origins http://127.0.0.1:43127",
+            "--disable-gpu --remote-debugging-pipe",
+        ] {
+            assert_eq!(
+                sanitize_inherited_webview_arguments(value),
+                None,
+                "dangerous value must fail closed: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_quoting_fails_closed() {
+        assert_eq!(
+            sanitize_inherited_webview_arguments("--disable-gpu \"unterminated"),
+            None
+        );
     }
 }

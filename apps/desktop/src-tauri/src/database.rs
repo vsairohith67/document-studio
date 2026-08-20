@@ -83,6 +83,8 @@ pub enum DatabaseError {
     Json(#[from] serde_json::Error),
     #[error("operation plan is not canonical, bounded, or consistent with the job")]
     OperationPlanInvalid,
+    #[error("operation plan does not match the owning job operation")]
+    OperationPlanMismatch,
 }
 
 pub struct Database {
@@ -275,9 +277,12 @@ impl Database {
         let stored = self
             .connection
             .query_row(
-                "SELECT schema_version, operation_id, source_page_count,
-                        plan_json, plan_sha256, created_at
-                 FROM job_operation_plans WHERE job_id = ?1",
+                "SELECT plans.schema_version, plans.operation_id, plans.source_page_count,
+                        plans.plan_json, plans.plan_sha256, plans.created_at,
+                        jobs.operation_id
+                 FROM job_operation_plans AS plans
+                 INNER JOIN jobs ON jobs.id = plans.job_id
+                 WHERE plans.job_id = ?1",
                 [job_id],
                 |row| {
                     Ok((
@@ -287,6 +292,7 @@ impl Database {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
@@ -298,6 +304,7 @@ impl Database {
             canonical_json,
             sha256,
             created_at,
+            job_operation_id,
         )) = stored
         else {
             return Ok(None);
@@ -307,6 +314,9 @@ impl Database {
             || sha256_hex(canonical_json.as_bytes()) != sha256
         {
             return Err(DatabaseError::OperationPlanInvalid);
+        }
+        if operation_id != job_operation_id {
+            return Err(DatabaseError::OperationPlanMismatch);
         }
         let envelope: crate::contracts::OperationPlanEnvelope =
             serde_json::from_str(&canonical_json)?;

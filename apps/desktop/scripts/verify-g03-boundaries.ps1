@@ -4,6 +4,17 @@ $desktopRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Resolve-Path (Join-Path $desktopRoot '..\..')
 $expectedCsp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';"
 
+function Get-Sha256File([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    return ([System.BitConverter]::ToString($hasher.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+    $stream.Dispose()
+  }
+}
+
 $package = Get-Content -Raw (Join-Path $desktopRoot 'package.json') | ConvertFrom-Json
 $lockPath = Join-Path $repositoryRoot 'package-lock.json'
 $lockSummaryJson = & node -e "const fs=require('fs');const l=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));const p=l.packages;console.log(JSON.stringify({pdfjs:p['node_modules/pdfjs-dist']?.version,tanstack:p['node_modules/@tanstack/react-virtual']?.version,playwrightTest:p['node_modules/@playwright/test']?.version,virtualCore:p['node_modules/@tanstack/virtual-core']?.version,playwright:p['node_modules/playwright']?.version,playwrightCore:p['node_modules/playwright-core']?.version}))" $lockPath
@@ -34,36 +45,43 @@ if ($locked.playwright -ne '1.62.1' -or $locked.playwrightCore -ne '1.62.1') {
   throw 'The reviewed Playwright transitive resolution changed.'
 }
 
-$pdfManifestPath = Join-Path $desktopRoot 'public\pdfjs\pdfjs-manifest.json'
-$pdfManifest = Get-Content -Raw $pdfManifestPath | ConvertFrom-Json
-$workerPath = Join-Path $desktopRoot 'public\pdfjs\pdf.worker.mjs'
+$pdfManifestPath = Join-Path $desktopRoot 'scripts\pdfjs-assets-6.2.108.json'
+$stagedPdfRoot = Join-Path $desktopRoot 'public\pdfjs'
+$stagedPdfManifestPath = Join-Path $stagedPdfRoot 'pdfjs-manifest.json'
+$pdfManifestText = Get-Content -Raw $pdfManifestPath
+$pdfManifest = $pdfManifestText | ConvertFrom-Json
 if ($pdfManifest.version -ne '6.2.108' -or $pdfManifest.build -ne 'legacy' -or !$pdfManifest.localOnly) {
   throw 'The staged PDF.js manifest does not match the reviewed local legacy build.'
 }
-$sha256 = [System.Security.Cryptography.SHA256]::Create()
-$workerStream = [System.IO.File]::OpenRead($workerPath)
-try {
-  $workerHash = ([System.BitConverter]::ToString($sha256.ComputeHash($workerStream))).Replace('-', '').ToLowerInvariant()
-} finally {
-  $workerStream.Dispose()
-  $sha256.Dispose()
+if ((Get-Content -Raw $stagedPdfManifestPath) -ne $pdfManifestText) {
+  throw 'The staged PDF.js manifest differs from the checked-in exact manifest.'
 }
-if ($workerHash -ne $pdfManifest.workerSha256 -or
-    $workerHash -ne 'b4e582882f5e811f4d1b7b511f68d9a0c3209141e6f68856f01408c5cc155131') {
-  throw 'The PDF.js worker hash changed or does not match its staged manifest.'
+$expectedPdfPaths = @($pdfManifest.files | ForEach-Object { $_.path }) + @('pdfjs-manifest.json') | Sort-Object
+$resolvedStagedPdfRoot = (Resolve-Path -LiteralPath $stagedPdfRoot).Path.TrimEnd('\')
+$actualPdfPaths = Get-ChildItem -LiteralPath $stagedPdfRoot -File -Recurse | ForEach-Object {
+  $_.FullName.Substring($resolvedStagedPdfRoot.Length + 1).Replace('\', '/')
+} | Sort-Object
+if ((Compare-Object $expectedPdfPaths $actualPdfPaths).Count -ne 0) {
+  throw 'The staged PDF.js directory contains missing or unexpected files.'
+}
+foreach ($file in $pdfManifest.files) {
+  if ($file.path -match '(?i)(\.map$|debug|viewer\.html|quickjs|nowasm_fallback|(^|/)web/|(^|/)test/|(^|/)examples/)') {
+    throw "The PDF.js exact manifest contains a forbidden asset: $($file.path)"
+  }
+  $path = Join-Path $stagedPdfRoot ($file.path.Replace('/', '\'))
+  $status = Get-Item -LiteralPath $path
+  $hash = Get-Sha256File $path
+  if ($status.Length -ne $file.sizeBytes -or $hash -ne $file.sha256) {
+    throw "The PDF.js staged asset failed exact size/hash verification: $($file.path)"
+  }
+}
+$worker = @($pdfManifest.files | Where-Object { $_.path -eq 'pdf.worker.mjs' })
+if ($worker.Count -ne 1 -or $worker[0].sha256 -ne 'b4e582882f5e811f4d1b7b511f68d9a0c3209141e6f68856f01408c5cc155131') {
+  throw 'The PDF.js worker hash changed or is not uniquely allow-listed.'
 }
 
 $tauriConfigurationPath = Join-Path $desktopRoot 'src-tauri\tauri.conf.json'
-$tauriConfigurationStream = [System.IO.File]::OpenRead($tauriConfigurationPath)
-$tauriConfigurationHasher = [System.Security.Cryptography.SHA256]::Create()
-try {
-  $tauriConfigurationHash = ([System.BitConverter]::ToString(
-    $tauriConfigurationHasher.ComputeHash($tauriConfigurationStream)
-  )).Replace('-', '').ToLowerInvariant()
-} finally {
-  $tauriConfigurationHasher.Dispose()
-  $tauriConfigurationStream.Dispose()
-}
+$tauriConfigurationHash = Get-Sha256File $tauriConfigurationPath
 if ($tauriConfigurationHash -ne 'b97a850398a47fb391bae2f076ea7e37775c5fc88b6de264cadd5f38638e4217') {
   throw 'tauri.conf.json changed from the manually tested G03 production configuration.'
 }
@@ -106,6 +124,12 @@ if ($runtimeSource -match 'WEBVIEW2_USER_DATA_FOLDER' -or
     $runtimeSource -notmatch '\.run\(context\)') {
   throw 'Runtime source does not preserve the production/test WebView2 window boundary.'
 }
+if ($runtimeSource -notmatch 'to_ascii_lowercase' -or
+    $runtimeSource -notmatch 'contains\("--remote-debugging-"\)' -or
+    $runtimeSource -notmatch 'contains\("--remote-allow-origins"\)' -or
+    $runtimeSource -match 'split_whitespace\(\)\s*\.filter') {
+  throw 'Production WebView2 arguments are not cleared by the fail-closed remote-debug family sanitizer.'
+}
 $webViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\test-webview2-smoke.ps1')
 if ($webViewSmoke -notmatch '\[System\.Net\.Sockets\.TcpListener\]::new\(\[System\.Net\.IPAddress\]::Loopback, 0\)' -or
     $webViewSmoke -notmatch "'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR'" -or
@@ -113,6 +137,14 @@ if ($webViewSmoke -notmatch '\[System\.Net\.Sockets\.TcpListener\]::new\(\[Syste
     $webViewSmoke -match 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS|WEBVIEW2_USER_DATA_FOLDER' -or
     $webViewSmoke -match '--remote-allow-origins=\*|\b9333\b') {
   throw 'The WebView2 smoke must use the test builder, dynamic loopback CDP and an isolated profile.'
+}
+$productionWebViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\test-production-webview2-arguments.ps1')
+if ($productionWebViewSmoke -notmatch 'Get-OwnedDescendants' -or
+    $productionWebViewSmoke -notmatch 'document-studio-production-webview2-' -or
+    $productionWebViewSmoke -notmatch 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS' -or
+    $productionWebViewSmoke -notmatch '\(\?i\)--remote-debugging-\|--remote-allow-origins' -or
+    $productionWebViewSmoke -match 'Get-Process\s+msedgewebview2|taskkill') {
+  throw 'The production WebView2 argument smoke must isolate profiles and inspect/clean only owned descendants.'
 }
 $viewerSource = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src\viewer') -File -Recurse |
   Where-Object { $_.Extension -in @('.ts', '.tsx') } |
@@ -151,7 +183,7 @@ if (Test-Path -LiteralPath $releaseBinary) {
       throw "The production executable contains test-only WebView2 token $forbidden."
     }
   }
-  if (-not $releaseText.Contains('--remote-debugging-port') -or
+  if (-not $releaseText.Contains('--remote-debugging-') -or
       -not $releaseText.Contains('--remote-allow-origins')) {
     throw 'The production executable no longer contains the required remote-debug argument deny-list.'
   }
@@ -161,4 +193,4 @@ if ($browserTransportSource -notmatch "import\.meta\.env\.MODE === 'test-browser
   throw 'The browser test transport is not compile-time gated to test-browser mode.'
 }
 
-Write-Output 'G03 dependency pins, worker parity, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug tokens are deny-list only.'
+Write-Output 'G03 dependency pins, exact PDF.js assets, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug arguments fail closed.'

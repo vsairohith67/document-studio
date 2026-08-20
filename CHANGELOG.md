@@ -11,6 +11,7 @@ All notable planning-package and software releases are recorded here.
 - Added `pdf.extract-pages`, `pdf.remove-pages`, `pdf.reorder-pages`, `pdf.rotate-pages` and `pdf.split` 1.0.0 through bundled qpdf 12.3.2 with strict independent verification and truthful partial publication.
 - Added Vitest, deterministic qpdf integration, real Chromium PDF.js, real WebView2 raw IPC, security/leakage, recovery and measured 100/1,000-page evidence.
 - Redacted every G03 durable-job source, destination, staging, partial and final path at IPC serialization while retaining trusted recovery metadata and unchanged G01/G02 behavior.
+- Remediated independent review findings with transactional candidate replacement, exact atomic PDF.js asset staging, strict canvas/visibility bounds, runtime job/plan matching, compact command-budgeted qpdf argv, Alt+Arrow group reorder, fail-closed production WebView2 filtering and deterministic Close/password-Cancel focus. PR #6 remains draft and pending independent re-review.
 
 ## 0.2.0-g02-pdf-merge - unreleased
 

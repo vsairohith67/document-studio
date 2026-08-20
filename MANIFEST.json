@@ -19,6 +19,7 @@
     "npm ci --ignore-scripts",
     "npm run typecheck",
     "npm test",
+    "npm run test:pdfjs-assets --workspace @document-studio/desktop",
     "npm run test:browser --workspace @document-studio/desktop",
     "npm run build",
     "cargo fmt --all -- --check",
@@ -27,7 +28,7 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G01 and G02 are accepted on main. G03 Viewer and Core PDF is implemented on feat/g03-viewer-core-pdf and is undergoing its complete pre-stage acceptance audit; no G03 changes are staged or published.",
+  "publication_status": "G01 and G02 are accepted on main. G03 Viewer and Core PDF is under remediation on draft PR #6 after an independent CHANGES REQUIRED verdict; independent exact-head re-review is pending, G03 is not merged or complete, and G04 remains blocked.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
@@ -49,7 +50,11 @@
     "renderer": "pdfjs-dist 6.2.108 legacy ESM API and worker",
     "transport": "Opaque retained-handle session with raw bounded Tauri range IPC",
     "persistence": "Ephemeral; no thumbnails or extracted text in SQLite",
-    "network": "No CDN or runtime fetch"
+    "network": "No CDN or runtime fetch",
+    "replacement": "Candidate sessions validate transactionally while the active document remains usable; failed candidates are disposed without replacing active state.",
+    "assets": "Exact checked-in 6.2.108 manifest, independent size/hash/membership verification, and atomic owned-directory replacement.",
+    "render_limits": "DPR 2, 8192x8192 axes, 16,777,216 pixels, and fail-closed invalid/extreme page handling.",
+    "visibility": "Mounted overscan is distinct from measured viewport visibility and cannot define the current page."
   },
   "core_pdf_operations": [
     "pdf.extract-pages@1.0.0",

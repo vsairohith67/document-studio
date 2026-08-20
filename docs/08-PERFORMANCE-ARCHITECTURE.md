@@ -58,13 +58,17 @@ Reference machine: Windows 11 build 26200; Intel Core i7-11800H (8 cores/16 logi
 | Cancellation API acknowledgement | 2 ms p95 | Within 250 ms |
 | Started qpdf cancellation to terminal cleanup | 16 ms p95 | Within 2 s termination and 5 s ordinary cleanup targets |
 
-The generated 1,000-page corpus is structurally representative but intentionally tiny. Creating and processing the planned approximately 1 GiB corpus five cold and five warm times was not practical inside this bounded pre-stage run because it would cause over 10 GiB of avoidable temporary I/O. This does not block staging; it remains a blocking clean-machine release-acceptance benchmark. The 128-input full-preflight budget also remains a pre-release measurement. No unmeasured number is presented as achieved.
+### Acceptance-remediation measurement — 21 August 2026
+
+The complete 16-case Chromium/PDF.js suite repeated the 100- and 1,000-page measurements after the transactional viewer, strict canvas and measured-visibility changes. The 1,000-page cold p95 was 1.3 ms acknowledgement, 11.5 ms session creation, 564.2 ms first page and 623.3 ms first thumbnail; the warm close p95 was 390 ms. Interaction p95 was 618 ms newly visible page, 329 ms zoom and 283 ms first search result, with a 49.77 ms mean-frame p95. The run retained at most two full canvases and ten thumbnails and retained zero of either after Close. The structural suite passed, but the visible-page, zoom, search, frame and warm-close engineering targets were not met in this measurement; no performance-budget pass is claimed, and clean-machine release measurement remains required.
+
+The generated 1,000-page corpus is structurally representative but intentionally tiny. Creating and processing the planned approximately 1 GiB corpus five cold and five warm times was not practical inside this bounded review run because it would cause over 10 GiB of avoidable temporary I/O. This remains a blocking clean-machine release-acceptance benchmark. The 128-input full-preflight budget also remains a pre-release measurement. No unmeasured number is presented as achieved.
 
 ## G03 measured baseline — 17 August 2026
 
 Reference machine: Windows 11 Home build 26200; Intel Core i7-11800H (8 cores/16 logical processors); 16,866,865,152 bytes RAM; Samsung MZVL21T0HCLR NVMe SSD. Browser evidence used project-local Chrome for Testing 151.0.7922.34; real desktop IPC used WebView2/Edge 151.0.0.0. Renderer was PDF.js 6.2.108 and operations used qpdf 12.3.2. Browser p95 is the slowest of five samples.
 
-Targets for G03 are acknowledgement <=100 ms, first page <=1 s, first thumbnail <=1.5 s, newly requested visible page <=300 ms, zoom response <=250 ms, search first result <=250 ms, mean scripted scroll frame <=20 ms, close/resource release <=250 ms, no more than 8 full canvases/20 thumbnails, positive JS heap growth <=150 MiB on the synthetic 1,000-page case, operation preflight <=1.5 s for the named small fixture, and cancellation acknowledgement/cleanup <=250 ms when cancelled before processing. These are named engineering targets, not universal document guarantees.
+Targets for G03 are acknowledgement <=100 ms, first page <=1 s, first thumbnail <=1.5 s, newly requested visible page <=300 ms, zoom response <=250 ms, search first result <=250 ms, mean scripted scroll frame <=20 ms, close/resource release <=250 ms, no more than 6 full canvases/48 thumbnails, positive JS heap growth <=150 MiB on the synthetic 1,000-page case, operation preflight <=1.5 s for the named small fixture, and cancellation acknowledgement/cleanup <=250 ms when cancelled before processing. These are named engineering targets, not universal document guarantees.
 
 | Browser viewer measurement | 100 pages cold median / p95 | 100 pages warm median / p95 | 1,000 pages cold median / p95 | 1,000 pages warm median / p95 |
 |---|---:|---:|---:|---:|
