@@ -53,9 +53,28 @@ if ($workerHash -ne $pdfManifest.workerSha256 -or
   throw 'The PDF.js worker hash changed or does not match its staged manifest.'
 }
 
-$tauri = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\tauri.conf.json') | ConvertFrom-Json
+$tauriConfigurationPath = Join-Path $desktopRoot 'src-tauri\tauri.conf.json'
+$tauriConfigurationStream = [System.IO.File]::OpenRead($tauriConfigurationPath)
+$tauriConfigurationHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+  $tauriConfigurationHash = ([System.BitConverter]::ToString(
+    $tauriConfigurationHasher.ComputeHash($tauriConfigurationStream)
+  )).Replace('-', '').ToLowerInvariant()
+} finally {
+  $tauriConfigurationHasher.Dispose()
+  $tauriConfigurationStream.Dispose()
+}
+if ($tauriConfigurationHash -ne 'b97a850398a47fb391bae2f076ea7e37775c5fc88b6de264cadd5f38638e4217') {
+  throw 'tauri.conf.json changed from the manually tested G03 production configuration.'
+}
+$tauri = Get-Content -Raw $tauriConfigurationPath | ConvertFrom-Json
 if ($tauri.app.security.csp -ne $expectedCsp) {
   throw 'The reviewed G03 CSP changed.'
+}
+if (@($tauri.app.windows).Count -ne 1 -or
+    $tauri.app.windows[0].label -and $tauri.app.windows[0].label -ne 'main' -or
+    $tauri.app.windows[0].create -eq $false) {
+  throw 'Production must retain exactly one automatically created main window.'
 }
 $capability = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\capabilities\default.json') | ConvertFrom-Json
 if (($capability.permissions -join '|') -ne 'core:default|dialog:allow-open') {
@@ -67,17 +86,33 @@ if ($ipc -notmatch 'Result<Response, OperationError>' -or $ipc -notmatch '\.map\
   throw 'viewer_read_range must return raw tauri::ipc::Response bytes.'
 }
 $runtimeSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\lib.rs')
-if ($runtimeSource -match 'WEBVIEW2_USER_DATA_FOLDER|DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR' -or
-    $runtimeSource -notmatch '#\[cfg\(not\(feature = "test-runtime"\)\)\]\s+fn remove_remote_debugging_arguments') {
-  throw 'Production runtime source changed the reviewed WebView2 profile or debug-argument boundary.'
+foreach ($testOnlyDeclaration in @(
+  'const TEST_WEBVIEW2_DATA_DIRECTORY_ENV: &str = "DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR";',
+  'const TEST_WEBVIEW2_CDP_PORT_ENV: &str = "DOCUMENT_STUDIO_TEST_CDP_PORT";',
+  'const TEST_APP_DATA_ENV: &str = "DOCUMENT_STUDIO_TEST_APP_DATA";',
+  'const WEBVIEW2_REQUIRED_DISABLED_FEATURES: &str ='
+)) {
+  $escapedDeclaration = [regex]::Escape($testOnlyDeclaration)
+  if ($runtimeSource -notmatch "#\[cfg\(feature = `"test-runtime`"\)\]\s+$escapedDeclaration") {
+    throw "Test-only WebView2 declaration is not feature gated: $testOnlyDeclaration"
+  }
+}
+if ($runtimeSource -match 'WEBVIEW2_USER_DATA_FOLDER' -or
+    $runtimeSource -notmatch '#\[cfg\(not\(feature = "test-runtime"\)\)\]\s+fn remove_remote_debugging_arguments' -or
+    $runtimeSource -notmatch '#\[cfg\(feature = "test-runtime"\)\]\s+let test_webview_override = prepare_test_webview_context' -or
+    $runtimeSource -notmatch 'WebviewWindowBuilder::from_config' -or
+    $runtimeSource -notmatch '\.data_directory\(test_webview_override\.settings\.data_directory\.clone\(\)\)' -or
+    $runtimeSource -notmatch '\.additional_browser_args\(arguments\)' -or
+    $runtimeSource -notmatch '\.run\(context\)') {
+  throw 'Runtime source does not preserve the production/test WebView2 window boundary.'
 }
 $webViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\test-webview2-smoke.ps1')
 if ($webViewSmoke -notmatch '\[System\.Net\.Sockets\.TcpListener\]::new\(\[System\.Net\.IPAddress\]::Loopback, 0\)' -or
-    $webViewSmoke -notmatch "'WEBVIEW2_USER_DATA_FOLDER'" -or
-    $webViewSmoke -notmatch '--remote-allow-origins=http://127\.0\.0\.1:\$cdpPort' -or
-    ([regex]::Matches($webViewSmoke, '--user-data-dir').Count -ne 2) -or
+    $webViewSmoke -notmatch "'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR'" -or
+    $webViewSmoke -notmatch "'DOCUMENT_STUDIO_TEST_CDP_PORT'" -or
+    $webViewSmoke -match 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS|WEBVIEW2_USER_DATA_FOLDER' -or
     $webViewSmoke -match '--remote-allow-origins=\*|\b9333\b') {
-  throw 'The WebView2 smoke must use dynamic loopback CDP and a harness-only isolated profile.'
+  throw 'The WebView2 smoke must use the test builder, dynamic loopback CDP and an isolated profile.'
 }
 $viewerSource = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src\viewer') -File -Recurse |
   Where-Object { $_.Extension -in @('.ts', '.tsx') } |
@@ -103,6 +138,7 @@ if (Test-Path -LiteralPath $releaseBinary) {
   foreach ($forbidden in @(
     'DOCUMENT_STUDIO_TEST_CDP_PORT',
     'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
+    'DOCUMENT_STUDIO_TEST_APP_DATA',
     'WEBVIEW2_USER_DATA_FOLDER',
     'VITE_NOT_READY',
     'WEBVIEW2_CDP_NOT_READY',

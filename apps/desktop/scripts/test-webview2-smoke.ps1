@@ -13,8 +13,8 @@ $repositoryRootForward = $repositoryRoot.Replace('\', '/')
 $cacheRoot = Join-Path $repositoryRoot '.cache'
 $evidenceRoot = Join-Path $cacheRoot ('g03-webview2-' + [guid]::NewGuid().ToString('N'))
 $appData = Join-Path $evidenceRoot 'app-data'
-$webViewDataOverride = Join-Path $evidenceRoot 'webview2-user-data'
-$webViewData = Join-Path $webViewDataOverride 'EBWebView'
+$webViewData = Join-Path $appData 'webview2-user-data'
+$webViewCommandData = Join-Path $webViewData 'EBWebView'
 $fixture = (Resolve-Path (Join-Path $repositoryRoot 'report\Document_Studio_Master_Blueprint.pdf')).Path
 $devUrl = 'http://localhost:1420'
 $vite = $null
@@ -68,12 +68,19 @@ function Get-WebViewDataFolderFromCommandLine {
   $null
 }
 
+function Get-NormalizedComparisonPath {
+  param([string]$Path)
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  if ($fullPath.StartsWith('\\?\')) { $fullPath = $fullPath.Substring(4) }
+  $fullPath.TrimEnd('\')
+}
+
 function Test-ExactWebViewDataFolder {
   param([string]$CommandLine)
   $actual = Get-WebViewDataFolderFromCommandLine -CommandLine $CommandLine
   if (-not $actual) { return $false }
-  [System.IO.Path]::GetFullPath($actual).TrimEnd('\') -eq
-    [System.IO.Path]::GetFullPath($webViewData).TrimEnd('\')
+  (Get-NormalizedComparisonPath $actual) -eq
+    (Get-NormalizedComparisonPath $webViewCommandData)
 }
 
 function Get-SanitizedRelevantSwitches {
@@ -87,8 +94,8 @@ function Get-SanitizedRelevantSwitches {
   )) {
     foreach ($match in [regex]::Matches([string]$CommandLine, $pattern)) {
       $switch = $match.Value
+      $switch = $switch.Replace($webViewCommandData, '<WEBVIEW2_UDF>')
       $switch = $switch.Replace($webViewData, '<WEBVIEW2_UDF>')
-      $switch = $switch.Replace($webViewDataOverride, '<WEBVIEW2_DATA_ROOT>')
       $switch = $switch.Replace($evidenceRoot, '<EVIDENCE>')
       $switch = $switch.Replace($repositoryRoot, '<REPO>')
       $switch = $switch.Replace($repositoryRootForward, '<REPO>')
@@ -151,6 +158,10 @@ function Wait-ForDesktop {
           [string]$browser.CommandLine -notmatch "--remote-debugging-port=$cdpPort(?: |$)") {
         throw 'DESKTOP_NOT_READY: the dynamic CDP argument did not reach the WebView2 browser process.'
       }
+      if ($FailureInjection -ne 'CdpNotReady' -and
+          [string]$browser.CommandLine -notmatch "--remote-allow-origins=http://127\.0\.0\.1:$cdpPort(?: |$)") {
+        throw 'DESKTOP_NOT_READY: the exact loopback CDP allow-origin did not reach the WebView2 browser process.'
+      }
       return
     }
     Start-Sleep -Milliseconds 100
@@ -210,8 +221,8 @@ function Get-BoundedSanitizedLog {
   if (-not (Test-Path -LiteralPath $Path)) { return '<absent>' }
   $lines = @(Get-Content -LiteralPath $Path -Tail 200 -ErrorAction SilentlyContinue)
   $text = $lines -join [Environment]::NewLine
+  $text = $text.Replace($webViewCommandData, '<WEBVIEW2_UDF>')
   $text = $text.Replace($webViewData, '<WEBVIEW2_UDF>')
-  $text = $text.Replace($webViewDataOverride, '<WEBVIEW2_DATA_ROOT>')
   $text = $text.Replace($evidenceRoot, '<EVIDENCE>')
   $text = $text.Replace($repositoryRoot, '<REPO>')
   $text = $text.Replace($repositoryRootForward, '<REPO>')
@@ -298,8 +309,8 @@ function Remove-EvidenceRoot {
 }
 
 New-Item -ItemType Directory -Path $appData -Force | Out-Null
-New-Item -ItemType Directory -Path $webViewDataOverride | Out-Null
-if (@(Get-ChildItem -LiteralPath $webViewDataOverride -Force).Count -ne 0) {
+New-Item -ItemType Directory -Path $webViewData | Out-Null
+if (@(Get-ChildItem -LiteralPath $webViewData -Force).Count -ne 0) {
   throw 'The isolated WebView2 user-data folder was not empty before launch.'
 }
 
@@ -307,8 +318,7 @@ foreach ($name in @(
   'DOCUMENT_STUDIO_TEST_APP_DATA',
   'DOCUMENT_STUDIO_TEST_VIEWER_PATH',
   'DOCUMENT_STUDIO_TEST_CDP_PORT',
-  'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
-  'WEBVIEW2_USER_DATA_FOLDER'
+  'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR'
 )) {
   $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
@@ -354,14 +364,17 @@ try {
 
   [Environment]::SetEnvironmentVariable('DOCUMENT_STUDIO_TEST_APP_DATA', $appData, 'Process')
   [Environment]::SetEnvironmentVariable('DOCUMENT_STUDIO_TEST_VIEWER_PATH', $fixture, 'Process')
-  [Environment]::SetEnvironmentVariable('DOCUMENT_STUDIO_TEST_CDP_PORT', [string]$cdpPort, 'Process')
-  [Environment]::SetEnvironmentVariable('WEBVIEW2_USER_DATA_FOLDER', $webViewDataOverride, 'Process')
+  [Environment]::SetEnvironmentVariable(
+    'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
+    $webViewData,
+    'Process'
+  )
   if ($FailureInjection -eq 'CdpNotReady') {
-    [Environment]::SetEnvironmentVariable('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('DOCUMENT_STUDIO_TEST_CDP_PORT', $null, 'Process')
   } else {
     [Environment]::SetEnvironmentVariable(
-      'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
-      "--remote-debugging-port=$cdpPort --remote-allow-origins=http://127.0.0.1:$cdpPort",
+      'DOCUMENT_STUDIO_TEST_CDP_PORT',
+      [string]$cdpPort,
       'Process'
     )
   }
