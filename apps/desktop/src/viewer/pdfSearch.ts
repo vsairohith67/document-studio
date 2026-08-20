@@ -40,8 +40,8 @@ export class PdfTextIndexer {
   private readonly unavailable = new Set<number>();
   private queue: number[] = [];
   private queued = new Set<number>();
+  private readonly inFlight = new Set<number>();
   private active = 0;
-  private generation = 0;
   private cachedCharacters = 0;
   private searched = new Set<number>();
   private resultPages = new Map<number, readonly number[]>();
@@ -64,7 +64,9 @@ export class PdfTextIndexer {
 
   prioritize(pageIndexes: readonly number[]): void {
     for (const pageIndex of [...pageIndexes].reverse()) {
-      if (pageIndex < 0 || pageIndex >= this.snapshot.totalPages || this.textCache.has(pageIndex)) continue;
+      if (pageIndex < 0 || pageIndex >= this.snapshot.totalPages
+        || this.textCache.has(pageIndex) || this.unavailable.has(pageIndex)
+        || this.inFlight.has(pageIndex)) continue;
       if (this.queued.has(pageIndex)) {
         this.queue = this.queue.filter((entry) => entry !== pageIndex);
       }
@@ -80,7 +82,6 @@ export class PdfTextIndexer {
     this.resultCount = 0;
     this.searched = new Set();
     this.limited = false;
-    this.generation += 1;
     if (!this.query) {
       this.queue = [];
       this.queued.clear();
@@ -91,23 +92,25 @@ export class PdfTextIndexer {
       const text = this.textCache.get(pageIndex);
       if (text !== undefined) this.searchPage(pageIndex, text);
       else if (this.unavailable.has(pageIndex)) this.searched.add(pageIndex);
-      else this.enqueue(pageIndex);
+      else if (!this.inFlight.has(pageIndex)) this.enqueue(pageIndex);
     }
     this.publish();
     this.pump();
   }
 
   destroy(): void {
-    this.generation += 1;
     this.document = null;
     this.queue = [];
     this.queued.clear();
+    this.inFlight.clear();
     this.textCache.clear();
     this.listeners.clear();
   }
 
   private enqueue(pageIndex: number): void {
-    if (this.queued.has(pageIndex)) return;
+    if (pageIndex < 0 || pageIndex >= this.snapshot.totalPages
+      || this.queued.has(pageIndex) || this.inFlight.has(pageIndex)
+      || this.textCache.has(pageIndex) || this.unavailable.has(pageIndex)) return;
     this.queue.push(pageIndex);
     this.queued.add(pageIndex);
   }
@@ -117,25 +120,29 @@ export class PdfTextIndexer {
       const pageIndex = this.queue.shift();
       if (pageIndex === undefined) return;
       this.queued.delete(pageIndex);
-      const generation = this.generation;
+      if (pageIndex < 0 || pageIndex >= this.snapshot.totalPages
+        || this.textCache.has(pageIndex) || this.unavailable.has(pageIndex)
+        || this.inFlight.has(pageIndex)) continue;
+      this.inFlight.add(pageIndex);
       this.active += 1;
       void this.extract(pageIndex).then((text) => {
         if (!this.document) return;
         if (text === null) {
           this.unavailable.add(pageIndex);
-          this.searched.add(pageIndex);
+          if (this.query) this.markUnavailableSearched(pageIndex);
         } else {
           this.cache(pageIndex, text);
           if (text.length === 0) this.imageOnly.add(pageIndex);
-          if (generation === this.generation && this.query) this.searchPage(pageIndex, text);
+          if (this.query) this.searchPage(pageIndex, text);
         }
       }).catch(() => {
         if (this.document) {
           this.unavailable.add(pageIndex);
-          if (generation === this.generation) this.searched.add(pageIndex);
+          if (this.query) this.markUnavailableSearched(pageIndex);
         }
       }).finally(() => {
-        this.active -= 1;
+        this.inFlight.delete(pageIndex);
+        this.active = Math.max(0, this.active - 1);
         if (this.document) {
           this.publish();
           window.setTimeout(() => this.pump(), 0);
@@ -175,8 +182,9 @@ export class PdfTextIndexer {
 
   private searchPage(pageIndex: number, text: string): void {
     this.searched.add(pageIndex);
+    this.replacePageResults(pageIndex, []);
     if (!this.query || this.resultCount >= MAX_RECORDED_RESULTS) {
-      if (this.resultCount >= MAX_RECORDED_RESULTS) this.limited = true;
+      if (this.query && this.resultCount >= MAX_RECORDED_RESULTS) this.limited = true;
       return;
     }
     const offsets: number[] = [];
@@ -191,6 +199,18 @@ export class PdfTextIndexer {
       offsets.push(found);
       offset = found + Math.max(1, this.query.length);
     }
+    this.replacePageResults(pageIndex, offsets);
+  }
+
+  private markUnavailableSearched(pageIndex: number): void {
+    this.searched.add(pageIndex);
+    this.replacePageResults(pageIndex, []);
+  }
+
+  private replacePageResults(pageIndex: number, offsets: readonly number[]): void {
+    const previous = this.resultPages.get(pageIndex);
+    if (previous) this.resultCount = Math.max(0, this.resultCount - previous.length);
+    this.resultPages.delete(pageIndex);
     if (offsets.length > 0) {
       this.resultPages.set(pageIndex, offsets);
       this.resultCount += offsets.length;

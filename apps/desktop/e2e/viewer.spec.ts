@@ -176,11 +176,23 @@ test('virtualizes a 1000-page mixed-size document and searches before full index
   await page.keyboard.press('Control+f');
   const search = page.getByPlaceholder('Find in document');
   await search.fill('Page 2 unique-text-2');
-  await expect(page.getByRole('status').filter({ hasText: 'still searching' })).toBeVisible();
-  await expect(page.getByText(/1 of 1/)).toBeVisible();
-  await page.getByRole('button', { name: 'Next search result' }).click();
-  await expect(page.locator('.pdf-page-surface.search-result-page').first()).toBeVisible();
-  await expect(page.locator('.textLayer span').first()).toBeAttached();
+  const searchStatus = page.locator('.search-bar [role="status"]');
+  const nextResult = page.getByRole('button', { name: 'Next search result' });
+  await expect(searchStatus).toContainText('still searching');
+  try {
+    await expect(searchStatus).toHaveText(/^1 of 1(?: · still searching)?$/, { timeout: 15_000 });
+  } catch (error) {
+    const diagnostic = {
+      searchStatus: await searchStatus.textContent(),
+      nextResultEnabled: await nextResult.isEnabled().catch(() => false),
+      highlightedResultPages: await page.locator('.pdf-page-surface.search-result-page').count(),
+    };
+    throw new Error(`Incremental search readiness failed: ${JSON.stringify(diagnostic)}\n${error instanceof Error ? error.message : 'Search assertion failed.'}`);
+  }
+  await nextResult.click();
+  const resultPage = page.locator('.pdf-page-surface.search-result-page[data-page-index="1"]');
+  await expect(resultPage).toBeVisible();
+  await expect(resultPage.locator('.textLayer')).toContainText('Page 2 unique-text-2');
   await page.getByRole('button', { name: 'Last page' }).click();
   await expect(page.locator('[data-page-index="999"]')).toBeAttached();
   await expect(page.locator('.virtual-page-stack [data-page-index="0"]')).toHaveCount(0);
