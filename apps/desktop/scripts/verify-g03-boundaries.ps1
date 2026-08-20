@@ -66,6 +66,19 @@ $ipc = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\ipc.rs')
 if ($ipc -notmatch 'Result<Response, OperationError>' -or $ipc -notmatch '\.map\(Response::new\)') {
   throw 'viewer_read_range must return raw tauri::ipc::Response bytes.'
 }
+$runtimeSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\lib.rs')
+if ($runtimeSource -match 'WEBVIEW2_USER_DATA_FOLDER|DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR' -or
+    $runtimeSource -notmatch '#\[cfg\(not\(feature = "test-runtime"\)\)\]\s+fn remove_remote_debugging_arguments') {
+  throw 'Production runtime source changed the reviewed WebView2 profile or debug-argument boundary.'
+}
+$webViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\test-webview2-smoke.ps1')
+if ($webViewSmoke -notmatch '\[System\.Net\.Sockets\.TcpListener\]::new\(\[System\.Net\.IPAddress\]::Loopback, 0\)' -or
+    $webViewSmoke -notmatch "'WEBVIEW2_USER_DATA_FOLDER'" -or
+    $webViewSmoke -notmatch '--remote-allow-origins=http://127\.0\.0\.1:\$cdpPort' -or
+    ([regex]::Matches($webViewSmoke, '--user-data-dir').Count -ne 2) -or
+    $webViewSmoke -match '--remote-allow-origins=\*|\b9333\b') {
+  throw 'The WebView2 smoke must use dynamic loopback CDP and a harness-only isolated profile.'
+}
 $viewerSource = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src\viewer') -File -Recurse |
   Where-Object { $_.Extension -in @('.ts', '.tsx') } |
   ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }
@@ -77,8 +90,34 @@ $distAssets = Join-Path $desktopRoot 'dist\assets'
 if (Test-Path -LiteralPath $distAssets) {
   $productionJavaScript = Get-ChildItem -LiteralPath $distAssets -Filter '*.js' -File |
     ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }
-  if (($productionJavaScript -join "`n") -match 'viewer_open_test_fixture') {
-    throw 'The test-only native fixture command leaked into the production frontend bundle.'
+  $productionJavaScriptText = $productionJavaScript -join "`n"
+  if ($productionJavaScriptText -match 'viewer_open_test_fixture|DOCUMENT_STUDIO_TEST_|WEBVIEW2_USER_DATA_FOLDER|remote-debugging-port|remote-allow-origins|browserTestTransport') {
+    throw 'A WebView2 smoke hook leaked into the production frontend bundle.'
+  }
+}
+$releaseBinary = Join-Path $repositoryRoot 'target\release\document-studio.exe'
+if (Test-Path -LiteralPath $releaseBinary) {
+  $releaseText = [System.Text.Encoding]::ASCII.GetString(
+    [System.IO.File]::ReadAllBytes($releaseBinary)
+  )
+  foreach ($forbidden in @(
+    'DOCUMENT_STUDIO_TEST_CDP_PORT',
+    'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
+    'WEBVIEW2_USER_DATA_FOLDER',
+    'VITE_NOT_READY',
+    'WEBVIEW2_CDP_NOT_READY',
+    'g03-webview2-',
+    'viewer_open_test_fixture',
+    'browserTestTransport',
+    'playwright'
+  )) {
+    if ($releaseText.Contains($forbidden)) {
+      throw "The production executable contains test-only WebView2 token $forbidden."
+    }
+  }
+  if (-not $releaseText.Contains('--remote-debugging-port') -or
+      -not $releaseText.Contains('--remote-allow-origins')) {
+    throw 'The production executable no longer contains the required remote-debug argument deny-list.'
   }
 }
 $browserTransportSource = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\browserTestTransport.ts')
@@ -86,4 +125,4 @@ if ($browserTransportSource -notmatch "import\.meta\.env\.MODE === 'test-browser
   throw 'The browser test transport is not compile-time gated to test-browser mode.'
 }
 
-Write-Output 'G03 dependency pins, worker parity, CSP, capability, raw IPC and production/test boundaries verified.'
+Write-Output 'G03 dependency pins, worker parity, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug tokens are deny-list only.'

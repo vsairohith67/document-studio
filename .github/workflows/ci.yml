@@ -100,4 +100,6 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
         run: npm run test:webview2 --workspace @document-studio/desktop
       - name: Compile Tauri without a bundle
-        run: npm --workspace @document-studio/desktop run tauri -- build --no-bundle
+        run: |
+          npm --workspace @document-studio/desktop run tauri -- build --no-bundle
+          npm run verify:g03 --workspace @document-studio/desktop

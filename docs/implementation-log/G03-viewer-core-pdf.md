@@ -1,6 +1,6 @@
 # G03 Viewer and Core PDF Implementation Log
 
-Status: G03 READY TO STAGE; implementation and final pre-commit verification complete
+Status: Draft PR #6; WebView2 CI smoke remediation locally verified
 Accepted base: `6e96b394eba7fafe787920e9d6bdd0c4b99f2670`
 Implementation branch: `feat/g03-viewer-core-pdf`
 Target: Windows x64, Tauri 2, WebView2, PDF.js 6.2.108 and qpdf 12.3.2
@@ -111,6 +111,15 @@ The reference machine was Windows 11 Home build 26200, Intel Core i7-11800H (8 c
 - Physical Explorer-to-app drag/drop is a manual pre-PR check: the available GUI driver cannot drag across window boundaries. The compiled Rust Tauri drag/drop handler and validation/session tests are present; failure in real manual testing triggers the approved native-drop gate and does not authorize COM.
 - Forced colors, 200% application zoom and host reduced-motion settings remain manual pre-PR accessibility evidence.
 - The approximately 1 GiB image-heavy viewer corpus, 128-output split and 128-input preflight benchmarks remain clean-reference/release evidence. No performance claim is made for them now.
+
+## WebView2 clean-runner remediation
+
+- Push run `32352347074`, desktop job `96374039392`, reached the real WebView2 step after every earlier check passed, then Playwright received `ECONNREFUSED` from fixed port 9333. The committed harness had let its best-effort CDP polling loop expire and still invoked Playwright, so the immediate failure cause is proven; the historical log did not contain enough process evidence to claim why that runner never opened CDP.
+- Controlled local diagnosis showed that the old harness reused the default `studio.document.app\EBWebView` profile on every invocation and fixed port 9333. The replacement uses a fresh evidence-owned `WEBVIEW2_USER_DATA_FOLDER`, verifies the resulting `EBWebView` browser command line, and reserves a dynamic `127.0.0.1:0` TCP port until immediately before launch. It makes no Rust, Tauri configuration, capability, CSP or production-window change.
+- Vite now serves and probes the exact configured `http://localhost:1420` URL. Deadline gates fail closed with `VITE_NOT_READY`, `DESKTOP_NOT_READY` or `WEBVIEW2_CDP_NOT_READY`; Playwright starts only after valid `/json/version` data and an owned loopback WebView2 listener are proven.
+- Failure diagnostics are sanitized and bounded to the last 200 lines or 64 KiB from each Vite/desktop stream. Cleanup targets only the owned desktop/Vite trees and WebView2 processes using the unique test profile, restores test environment variables, removes that invocation's evidence and confirms the dynamic port has closed.
+- Five normal reliability runs passed: three consecutive, one immediately after the single-instance smoke, and one while prior port 51661 was occupied. Vite-disabled and CDP-disabled injections produced the expected bounded failure codes, never invoked Playwright and left zero smoke evidence, desktop processes or owned WebView2 children.
+- Full post-remediation acceptance passed: 39 frontend/shared tests, 9 real Chromium/PDF.js tests, 116 default Rust tests, 19 focused database tests, 2 page-plan tests, 6 feature-gated operation tests, 17 recovery tests, 3 AppContainer/Job Object tests, the real hardened WebView2 raw-IPC smoke, qpdf verification, boundary scan and Tauri no-bundle release build.
 
 ## Scope and repository safety
 
