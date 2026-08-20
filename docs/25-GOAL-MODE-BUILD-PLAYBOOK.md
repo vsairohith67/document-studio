@@ -41,7 +41,7 @@ Acceptance gate passes?
 | G00 Readiness audit | `DS-G00 — Readiness` | `main`, read-only | Local |
 | G01 Foundation | `DS-G01 — Foundation` | `feat/g01-foundation` | Worktree after Git setup |
 | G02 Merge PDF | `DS-G02 — PDF Merge` | `feat/g02-pdf-merge` | Worktree |
-| G03 Core PDF and viewer | `DS-G03 — Core PDF` | `feat/g03-core-pdf` | Worktree |
+| G03 Viewer and Core PDF | `DS-G03 — Viewer and Core PDF` | `feat/g03-viewer-core-pdf` | Worktree |
 | G04 Optimize and convert | `DS-G04 — Optimize Convert` | `feat/g04-optimize-convert` | Worktree |
 | G05 OCR and safety | `DS-G05 — OCR Safety` | `feat/g05-ocr-safety` | Worktree |
 | G06 Workbench, forms and signing | `DS-G06 — Workbench` | `feat/g06-workbench` | Worktree |
@@ -171,9 +171,9 @@ Implement the first production document operation from file selection through ve
 
 Use `codex/goals/G02-pdf-merge.md` as the `/goal` text.
 
-## G03 — Core PDF and viewer
+## G03 — Viewer and Core PDF
 
-Implement PDF.js progressive rendering and virtualization, then reuse the verified qpdf pattern for split, extract, remove, reorder, rotate, linearize and PDF-to-images. Do not duplicate job architecture. Pass memory, scrolling, page-order, cancellation and golden-output gates.
+Implement the local PDF.js viewer with opaque retained-handle sessions, raw bounded range IPC, progressive rendering, virtualized pages and thumbnails, bounded text search, and deterministic cleanup. Reuse the verified qpdf pattern for extract, remove, reorder, rotate and split. Preserve the accepted job architecture and prove memory, scrolling, page-order, cancellation, recovery and verified-output gates. Linearization and PDF-to-images belong to later goals.
 
 ## G04 — Optimize and convert
 

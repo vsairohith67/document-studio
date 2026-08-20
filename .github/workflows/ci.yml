@@ -63,21 +63,41 @@ jobs:
           }
       - name: Install locked npm dependencies
         run: npm ci --ignore-scripts
+      - name: Stage and verify local G03 renderer boundary
+        run: |
+          npm run stage:pdfjs --workspace @document-studio/desktop
+          npm run verify:g03 --workspace @document-studio/desktop
       - name: Typecheck and test frontend contracts
         run: |
           npm run typecheck
           npm test
           npm run build
+          npm run verify:g03 --workspace @document-studio/desktop
+      - name: Install locked project-local Chromium
+        shell: pwsh
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
+        run: npm exec --workspace @document-studio/desktop -- playwright install chromium
+      - name: Test real PDF.js worker, canvas, text and range behavior
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
+        run: npm run test:browser --workspace @document-studio/desktop
       - name: Check Rust workspace
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --all-targets --locked
+      - name: Prove G03 core operations and multi-output recovery
+        run: cargo test -p document-studio --locked --features test-runtime --test pdf_operations --test recovery -- --test-threads=1
       - name: Prove qpdf AppContainer and owned Job Object boundary
         run: cargo test -p document-studio --locked --features test-runtime --test process_sandbox -- --test-threads=1
       - name: Prove Windows single-instance startup boundary
         run: |
           cargo build -p document-studio --locked --features test-runtime
           powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_single_instance.ps1 -Executable .\target\debug\document-studio.exe
+      - name: Prove real WebView2 raw viewer IPC
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
+        run: npm run test:webview2 --workspace @document-studio/desktop
       - name: Compile Tauri without a bundle
         run: npm --workspace @document-studio/desktop run tauri -- build --no-bundle

@@ -1,13 +1,13 @@
 {
   "product": "Document Studio",
-  "version": "0.2.0-g02-pdf-merge",
+  "version": "0.3.0-g03-viewer-core-pdf",
   "audit_date": "17 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
-  "current_goal": "G02 — Production PDF Merge",
-  "current_goal_prompt": "codex/prompts/02-pdf-merge.md",
+  "current_goal": "G03 — Viewer and Core PDF",
+  "current_goal_prompt": "codex/prompts/03-core-pdf.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
   "report_generator": "scripts/generate_master_report.py",
@@ -19,6 +19,7 @@
     "npm ci --ignore-scripts",
     "npm run typecheck",
     "npm test",
+    "npm run test:browser --workspace @document-studio/desktop",
     "npm run build",
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
@@ -26,12 +27,12 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G02 is in review on draft PR #5. Production PDF Merge and the bounded independent-review remediation are committed on feat/g02-pdf-merge; G02 is not complete or merged, independent acceptance re-review remains pending, and G03 remains blocked. The draft PR and canonical trackers record the exact remediation head and terminal CI evidence after those values exist.",
+  "publication_status": "G01 and G02 are accepted on main. G03 Viewer and Core PDF is implemented on feat/g03-viewer-core-pdf and is undergoing its complete pre-stage acceptance audit; no G03 changes are staged or published.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
     "version": "1.0.0",
-    "status": "review-remediation",
+    "status": "accepted",
     "engine": "qpdf 12.3.2",
     "input_count": "2-128",
     "ordering": "One UI row, database ordinal, physical workspace snapshot and qpdf --file argument per input ordinal.",
@@ -41,9 +42,22 @@
       "No Tauri capability expansion",
       "No runtime download",
       "No unsandboxed fallback",
-      "No G03 or later feature"
+      "No viewer behavior mixed into the accepted G02 merge flow"
     ]
   },
+  "viewer": {
+    "renderer": "pdfjs-dist 6.2.108 legacy ESM API and worker",
+    "transport": "Opaque retained-handle session with raw bounded Tauri range IPC",
+    "persistence": "Ephemeral; no thumbnails or extracted text in SQLite",
+    "network": "No CDN or runtime fetch"
+  },
+  "core_pdf_operations": [
+    "pdf.extract-pages@1.0.0",
+    "pdf.remove-pages@1.0.0",
+    "pdf.reorder-pages@1.0.0",
+    "pdf.rotate-pages@1.0.0",
+    "pdf.split@1.0.0"
+  ],
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [
     "CONTRIBUTING.md",

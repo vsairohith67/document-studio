@@ -2,6 +2,16 @@
 
 All notable planning-package and software releases are recorded here.
 
+## 0.3.0-g03-viewer-core-pdf - unreleased
+
+- Added opaque retained-handle PDF viewer sessions, backend open/drop handling, raw bounded range IPC and explicit close/source-change behavior without exposing source paths.
+- Pinned `pdfjs-dist` 6.2.108 and `@tanstack/react-virtual` 3.14.9; packaged the matching local worker/CMaps/fonts/ICC/WASM and added the restricted viewer CSP/navigation policy.
+- Added the progressive Precision Paper viewer: virtual pages/thumbnails, navigation, zoom/fit, temporary view rotation, text selection, bounded incremental Unicode search and truthful password/image-only/error states.
+- Added migration 4 for canonical hashed 64 KiB page-plan envelopes and generalized expected-output/publication/recovery records without storing document content, text or thumbnails.
+- Added `pdf.extract-pages`, `pdf.remove-pages`, `pdf.reorder-pages`, `pdf.rotate-pages` and `pdf.split` 1.0.0 through bundled qpdf 12.3.2 with strict independent verification and truthful partial publication.
+- Added Vitest, deterministic qpdf integration, real Chromium PDF.js, real WebView2 raw IPC, security/leakage, recovery and measured 100/1,000-page evidence.
+- Redacted every G03 durable-job source, destination, staging, partial and final path at IPC serialization while retaining trusted recovery metadata and unchanged G01/G02 behavior.
+
 ## 0.2.0-g02-pdf-merge - unreleased
 
 - Added the `pdf.merge` 1.0.0 contract foundation for 2–128 ordered local PDFs without a database migration or Tauri capability expansion.

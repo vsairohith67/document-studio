@@ -96,6 +96,21 @@ describe('typed Tauri API', () => {
     );
   });
 
+  it('normalizes Tauri raw range responses without accepting base64 or objects', async () => {
+    native.invoke.mockResolvedValueOnce([0x25, 0x50, 0x44, 0x46]);
+    await expect(api.viewer.readRange({
+      sessionId: 'opaque-session', generation: 4, begin: 0, end: 4,
+    })).resolves.toEqual(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    expect(native.invoke).toHaveBeenLastCalledWith('viewer_read_range', {
+      request: { sessionId: 'opaque-session', generation: 4, begin: 0, end: 4 },
+    });
+
+    native.invoke.mockResolvedValueOnce('JVBERg==');
+    await expect(api.viewer.readRange({
+      sessionId: 'opaque-session', generation: 4, begin: 0, end: 4,
+    })).rejects.toThrow('not raw byte data');
+  });
+
   it('reconciles a sequence gap and ignores stale events', async () => {
     const fetchJob = vi.fn().mockResolvedValue(job);
     const onSnapshot = vi.fn();

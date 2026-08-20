@@ -2,9 +2,9 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository contains the Document Studio product specifications, the accepted Windows Phase 0 foundation, and the implemented G02 PDF Merge vertical slice. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, the `diagnostic.copy` reference operation, and production `pdf.merge` 1.0.0.
+This repository contains the Document Studio product specifications, the accepted Windows foundation/PDF Merge slices, and the implemented G03 local PDF workspace. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and six production PDF operations.
 
-## G02 PDF Merge status
+## G03 Viewer and Core PDF status
 
 G01 proved the safety architecture before a production document engine was adopted. G02 now applies that architecture to a real local PDF operation:
 
@@ -16,7 +16,12 @@ G01 proved the safety architecture before a production document engine was adopt
 - The webview has typed commands and progress events, a native open-dialog permission, and no shell or general filesystem capability.
 - qpdf 12.3.2 is bundled from its signed official Windows archive with exact hashes, retained licenses, a zero-capability AppContainer, and owned Job Object limits.
 - PDF Merge accepts 2–128 local PDFs, preserves the displayed order including intentional duplicates, creates one private snapshot per ordinal, verifies the output independently, and never overwrites by default.
-- PDF.js, OCR, Office, cloud, account and AI dependencies remain deferred.
+- An opaque retained-handle viewer session streams 256 KiB ranges through raw bounded Tauri IPC without giving PDF.js or React a source path.
+- Locally bundled PDF.js 6.2.108 renders virtualized pages/thumbnails and an ephemeral text layer/search index; PDF code, forms, attachments and external navigation are disabled.
+- The shared Precision Paper organizer prepares selection, reorder, removal, output rotation and split ranges without creating history until Apply/Export.
+- `pdf.extract-pages`, `pdf.remove-pages`, `pdf.reorder-pages`, `pdf.rotate-pages` and `pdf.split` 1.0.0 persist typed plans and reuse the accepted qpdf/publication/recovery boundary.
+- Every split output is planned before processing. Completion requires every verified publication; partial publication is a truthful failed state that preserves already published user files.
+- OCR, repair, compression, conversion, freeform editing, annotations, forms, signatures, redaction, printing, cloud, accounts and AI remain later goals.
 
 ## Start here
 
@@ -25,6 +30,7 @@ G01 proved the safety architecture before a production document engine was adopt
 3. Read `docs/23-DEVELOPMENT-SETUP.md` for locked installation, test and launch commands.
 4. Read `docs/implementation-log/G01-foundation.md` for the accepted Phase 0 evidence.
 5. Read `docs/implementation-log/G02-pdf-merge.md` for implementation, test, security, and performance evidence.
+6. Read `docs/implementation-log/G03-viewer-core-pdf.md` for the viewer, page operations and real-browser evidence.
 
 ## Validate and run on Windows
 
@@ -35,11 +41,12 @@ npm ci --ignore-scripts
 .\.venv\Scripts\python.exe -B scripts\check_links.py
 npm run typecheck
 npm test
+npm run test:browser --workspace @document-studio/desktop
 cargo test --workspace --all-targets --locked
 npm --workspace @document-studio/desktop run tauri -- dev
 ```
 
-The development window provides the production PDF Merge workspace. `diagnostic.copy` remains covered as a foundation regression operation but is not the main user workflow.
+The development window provides PDF Merge and Viewer workspaces. `diagnostic.copy` remains covered as a foundation regression operation but is not a main user workflow.
 
 ## Build philosophy
 
@@ -68,8 +75,8 @@ The development window provides the production PDF Merge workspace. `diagnostic.
 - `.github/`, `CONTRIBUTING.md`, `SECURITY.md` - repository workflow, issue/PR templates and security reporting.
 - `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md` - release history and dependency/model adoption gate.
 
-Foundation version: `0.1.0-g01`
-Implementation date: `16 August 2026`
+Current implementation version: `0.3.0-g03-viewer-core-pdf`
+Implementation date: `17 August 2026`
 
 ## Goal Mode build workflow
 

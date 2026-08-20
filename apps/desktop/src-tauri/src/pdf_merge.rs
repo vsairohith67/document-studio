@@ -1410,7 +1410,7 @@ fn verify_output(
     Ok((size, hash))
 }
 
-fn qpdf_page_count(
+pub(crate) fn qpdf_page_count(
     runtime: &VerifiedQpdfRuntime,
     workspace: &JobWorkspace,
     relative: &Path,
@@ -1443,7 +1443,7 @@ fn qpdf_page_count(
     trimmed.parse().map_err(|_| process_error(stage))
 }
 
-fn verify_qpdf_version(
+pub(crate) fn verify_qpdf_version(
     runtime: &VerifiedQpdfRuntime,
     workspace: &JobWorkspace,
     token: &CancellationToken,
@@ -1462,7 +1462,7 @@ fn verify_qpdf_version(
     Ok(())
 }
 
-fn run_qpdf(
+pub(crate) fn run_qpdf(
     runtime: &VerifiedQpdfRuntime,
     workspace: &JobWorkspace,
     arguments: &[OsString],

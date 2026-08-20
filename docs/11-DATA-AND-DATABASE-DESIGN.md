@@ -50,3 +50,18 @@ PostgreSQL stores account, job and policy metadata. Object storage holds encrypt
 G02 adds no migration and no BLOB column. Existing `job_inputs.ordinal` stores exact merge order; each row stores only the already-authorized path/identity/size/time/MIME/hash metadata required for durable execution and recovery. Duplicate or hard-linked inputs retain separate ordinals and separate physical workspace snapshots.
 
 Source PDFs remain in their original locations and are never rewritten. Temporary PDF bytes exist only in the marker-owned per-job workspace until verified publication. SQLite stores staging/final hash and size evidence, dependency version, safe lifecycle codes, and sanitized errors—never PDF bytes, page text, raw qpdf output, passwords, thumbnails, or document metadata.
+
+## G03 migration 4 and multi-output records
+
+`0004_job_operation_plans.sql` adds one `job_operation_plans` row per G03 output job:
+
+- `job_id` primary/foreign key with cascade delete;
+- `schema_version = 1`, exact `operation_id`, and positive `source_page_count`;
+- canonical `plan_json` with `json_valid(plan_json)` and `length(CAST(plan_json AS BLOB)) BETWEEN 2 AND 65536`;
+- 64-character lowercase SHA-256 and UTC creation time.
+
+Rust independently validates the exact UTF-8 byte length, operation/payload match, page bounds, output names, index uniqueness/permutation/ranges and canonical hash before insertion and again before execution. Migration 4 adds no BLOB column and no document body, thumbnail, extracted text, search index or password.
+
+All expected `job_outputs` rows, with stable ordinals and requested names, are inserted in the same job-creation transaction before processing. Completion is legal only when every expected output is `published` with final path/hash/size evidence. A later publication failure leaves earlier published rows intact, records `PARTIAL_PUBLICATION`, and terminates the job as failed. Recovery preserves published user files and never infers all-or-nothing publication.
+
+Older `diagnostic.copy` and `pdf.merge` jobs have no plan row and remain valid. Migration checksums are append-only; an older binary must not open schema 4. Rollback uses a pre-migration backup rather than an in-place table drop.

@@ -100,13 +100,13 @@ pub fn cancel_without_worker(state: &AppState, job_id: &str) -> Result<JobRecord
         return Err(cleanup_error());
     }
     let mut database = state.database();
-    if job
+    for output in job
         .outputs
-        .first()
-        .is_some_and(|output| output.status != crate::contracts::OutputStatus::Published)
+        .iter()
+        .filter(|output| output.status != crate::contracts::OutputStatus::Published)
     {
         database
-            .clear_unpublished_intent(job_id)
+            .clear_unpublished_intent_at(job_id, output.ordinal)
             .map_err(|_| recovery_metadata_error())?;
     }
     let current = database
@@ -160,9 +160,8 @@ fn reconcile_legacy_job(
     );
     let has_recorded_partial = job
         .outputs
-        .first()
-        .and_then(|output| output.partial_path.as_ref())
-        .is_some();
+        .iter()
+        .any(|output| output.partial_path.is_some());
 
     if before_destination_publication && !has_recorded_partial {
         if cleanup_workspace(state, &job)? {
@@ -216,7 +215,7 @@ fn reconcile_current_job(
     }
 
     if matches!(job.state, JobState::Publishing | JobState::Interrupted)
-        && publication_proof_matches(state, &job.id)?
+        && publication_proof_matches_all(state, &job)?
     {
         if !cleanup_partial(state, &job)? || !cleanup_workspace(state, &job)? {
             interrupt_with_cleanup_error(state, &job)?;
@@ -224,19 +223,21 @@ fn reconcile_current_job(
             report.interrupted += 1;
             return Ok(());
         }
-        let evidence = state
-            .database()
-            .publication_evidence(&job.id)?
-            .ok_or(DatabaseError::TerminalEvidenceMissing)?;
         let mut database = state.database();
-        database.set_output_published(
-            &job.id,
-            &evidence.resolved_name,
-            &evidence.final_path,
-            evidence.size_bytes,
-            &evidence.sha256,
-            None,
-        )?;
+        for output in &job.outputs {
+            let evidence = database
+                .publication_evidence_at(&job.id, output.ordinal)?
+                .ok_or(DatabaseError::TerminalEvidenceMissing)?;
+            database.set_output_published_at(
+                &job.id,
+                output.ordinal,
+                &evidence.resolved_name,
+                &evidence.final_path,
+                evidence.size_bytes,
+                &evidence.sha256,
+                None,
+            )?;
+        }
         let current = database
             .get_job(&job.id)?
             .ok_or(DatabaseError::JobConflict)?;
@@ -253,13 +254,23 @@ fn reconcile_current_job(
 
     if cleanup_partial(state, &job)? && cleanup_workspace(state, &job)? {
         let mut database = state.database();
-        if job.state != JobState::Publishing
-            && job
-                .outputs
-                .first()
-                .is_some_and(|output| output.status != crate::contracts::OutputStatus::Published)
+        let published = job
+            .outputs
+            .iter()
+            .filter(|output| output.status == crate::contracts::OutputStatus::Published)
+            .count();
+        for output in job
+            .outputs
+            .iter()
+            .filter(|output| output.status != crate::contracts::OutputStatus::Published)
         {
-            database.clear_unpublished_intent(&job.id)?;
+            database.clear_unpublished_intent_at(&job.id, output.ordinal)?;
+        }
+        if published > 0 {
+            database.record_error_once(
+                &job.id,
+                &partial_publication_error(published, job.outputs.len()),
+            )?;
         }
         database.record_error_once(&job.id, &worker_stopped_error(job.state))?;
         transition_to_failed(&mut database, &job)?;
@@ -296,42 +307,41 @@ fn interrupt_with_cleanup_error(state: &AppState, job: &JobRecord) -> Result<(),
 }
 
 fn cleanup_partial(state: &AppState, job: &JobRecord) -> Result<bool, DatabaseError> {
-    let Some(partial) = job
-        .outputs
-        .first()
-        .and_then(|output| output.partial_path.as_deref())
-    else {
-        return Ok(true);
-    };
-    let partial = Path::new(partial);
     let destination = Path::new(&job.destination_directory);
-    if !is_exact_owned_partial_path(destination, &job.id, partial) {
-        return Ok(false);
-    }
-    match open_for_identity_and_delete(partial) {
-        Ok(file) => {
-            let identity = match identity_from_file(&file) {
-                Ok(identity) => identity,
-                Err(_) => return Ok(false),
-            };
-            let ownership_result_code =
-                partial_ownership_result_code(destination, &job.id, partial, identity)
-                    .ok_or(DatabaseError::TerminalEvidenceMissing)?;
-            let activated = state.database().owned_partial_is_activated(
-                &job.id,
-                &partial.to_string_lossy(),
-                &ownership_result_code,
-            )?;
-            if activated && delete_open_file(file).is_err() {
-                return Ok(false);
-            }
+    for output in &job.outputs {
+        let Some(partial_path) = output.partial_path.as_deref() else {
+            continue;
+        };
+        let partial = Path::new(partial_path);
+        if !is_exact_owned_partial_path(destination, &job.id, partial) {
+            return Ok(false);
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Ok(false),
+        match open_for_identity_and_delete(partial) {
+            Ok(file) => {
+                let identity = match identity_from_file(&file) {
+                    Ok(identity) => identity,
+                    Err(_) => return Ok(false),
+                };
+                let ownership_result_code =
+                    partial_ownership_result_code(destination, &job.id, partial, identity)
+                        .ok_or(DatabaseError::TerminalEvidenceMissing)?;
+                let activated = state.database().owned_partial_is_activated_at(
+                    &job.id,
+                    output.ordinal,
+                    partial_path,
+                    &ownership_result_code,
+                )?;
+                if activated && delete_open_file(file).is_err() {
+                    return Ok(false);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Ok(false),
+        }
+        state
+            .database()
+            .clear_owned_partial_at(&job.id, output.ordinal, partial_path)?;
     }
-    state
-        .database()
-        .clear_owned_partial(&job.id, &partial.to_string_lossy())?;
     Ok(true)
 }
 
@@ -339,18 +349,17 @@ fn cleanup_workspace(state: &AppState, job: &JobRecord) -> Result<bool, Database
     if state.workspaces.cleanup_job(&job.id).is_err() {
         return Ok(false);
     }
-    let staging = job
-        .outputs
-        .first()
-        .and_then(|output| output.staging_path.as_deref());
-    state.database().clear_staging_path(&job.id, staging)?;
+    let mut database = state.database();
+    for output in &job.outputs {
+        database.clear_staging_path_at(&job.id, output.ordinal, output.staging_path.as_deref())?;
+    }
     Ok(true)
 }
 
 fn has_temporary_metadata(job: &JobRecord) -> bool {
     job.outputs
-        .first()
-        .is_some_and(|output| output.staging_path.is_some() || output.partial_path.is_some())
+        .iter()
+        .any(|output| output.staging_path.is_some() || output.partial_path.is_some())
 }
 
 fn is_legacy(job: &JobRecord) -> bool {
@@ -358,21 +367,44 @@ fn is_legacy(job: &JobRecord) -> bool {
         && job.operation_version == LEGACY_DIAGNOSTIC_COPY_VERSION
 }
 
-fn publication_proof_matches(state: &AppState, job_id: &str) -> Result<bool, DatabaseError> {
-    let Some(evidence) = state.database().publication_evidence(job_id)? else {
-        return Ok(false);
-    };
-    if evidence.status != crate::contracts::OutputStatus::Published {
+fn publication_proof_matches_all(state: &AppState, job: &JobRecord) -> Result<bool, DatabaseError> {
+    if job.outputs.is_empty() {
         return Ok(false);
     }
-    let final_path = Path::new(&evidence.final_path);
-    if !final_path.is_file() {
-        return Ok(false);
+    for output in &job.outputs {
+        let Some(evidence) = state
+            .database()
+            .publication_evidence_at(&job.id, output.ordinal)?
+        else {
+            return Ok(false);
+        };
+        if evidence.status != crate::contracts::OutputStatus::Published {
+            return Ok(false);
+        }
+        let final_path = Path::new(&evidence.final_path);
+        if !final_path.is_file() {
+            return Ok(false);
+        }
+        let Ok((size, hash)) = hash_file(final_path) else {
+            return Ok(false);
+        };
+        if size != evidence.size_bytes || hash != evidence.sha256 {
+            return Ok(false);
+        }
     }
-    let Ok((size, hash)) = hash_file(final_path) else {
-        return Ok(false);
-    };
-    Ok(size == evidence.size_bytes && hash == evidence.sha256)
+    Ok(true)
+}
+
+fn partial_publication_error(published: usize, expected: usize) -> OperationError {
+    OperationError::safe(
+        "PARTIAL_PUBLICATION",
+        "Only part of the split was published",
+        format!(
+            "{published} of {expected} verified outputs were published before processing stopped; published user files were preserved."
+        ),
+        OperationStage::Recovery,
+        false,
+    )
 }
 
 fn worker_stopped_error(state: JobState) -> OperationError {

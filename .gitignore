@@ -12,6 +12,11 @@ dist/
 coverage/
 playwright-report/
 test-results/
+.cache/ms-playwright/
+.cache/g03-browser-preview/
+.cache/g03-native-ui/
+.cache/g03-webview2-*/
+apps/desktop/public/pdfjs/
 models/cache/
 workspace/jobs/
 .venv/

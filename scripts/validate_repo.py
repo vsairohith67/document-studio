@@ -28,6 +28,7 @@ required = [
     'codex/goals/G00-readiness-audit.md',
     'codex/goals/G01-foundation.md',
     'codex/goals/G02-pdf-merge.md',
+    'codex/goals/G03-core-pdf-viewer.md',
     'diagrams/goal-mode-execution.svg',
     'notion-import/pages/25-GOAL-MODE-BUILD-PLAYBOOK.md',
     'docs/feature-catalog.csv',
@@ -47,10 +48,15 @@ required = [
     'apps/desktop/src-tauri/migrations/0001_metadata.sql',
     'apps/desktop/src-tauri/migrations/0002_jobs.sql',
     'apps/desktop/src-tauri/migrations/0003_workflows.sql',
+    'apps/desktop/src-tauri/migrations/0004_job_operation_plans.sql',
     'docs/adr/ADR-005-storage-ownership-and-provider-persistence.md',
     'docs/adr/ADR-006-foundation-dependencies-and-sqlite.md',
     'docs/adr/ADR-007-durable-publication-and-recovery.md',
+    'docs/adr/ADR-010-pdfjs-local-rendering-security.md',
+    'docs/adr/ADR-011-opaque-viewer-document-sessions.md',
+    'docs/adr/ADR-012-versioned-page-plans-and-multi-output-publication.md',
     'docs/implementation-log/G01-foundation.md',
+    'docs/implementation-log/G03-viewer-core-pdf.md',
     'docs/implementation-log/assets/g01-tauri-dev-launch.png',
     'Cargo.toml',
     'Cargo.lock',
@@ -164,13 +170,28 @@ manifest_text = '\n'.join([
     (ROOT / 'apps/desktop/package.json').read_text(encoding='utf-8'),
     (ROOT / 'apps/desktop/src-tauri/Cargo.toml').read_text(encoding='utf-8'),
 ])
-for prohibited in ['pdfjs-dist', 'qpdf', 'libvips', 'ocrmypdf', 'tesseract', 'libreoffice']:
+for prohibited in ['qpdf', 'libvips', 'ocrmypdf', 'tesseract', 'libreoffice']:
     if re.search(rf'(^|["\s]){re.escape(prohibited)}(["\s=:]|$)', manifest_text, re.IGNORECASE | re.MULTILINE):
-        raise SystemExit(f'Out-of-scope G01 dependency found: {prohibited}')
+        raise SystemExit(f'Out-of-scope G03 dependency found: {prohibited}')
+
+approved_g03_dependencies = {
+    'pdfjs-dist': '6.2.108',
+    '@tanstack/react-virtual': '3.14.9',
+}
+for dependency, version in approved_g03_dependencies.items():
+    if package.get('dependencies', {}).get(dependency) != version:
+        raise SystemExit(f'G03 dependency {dependency} must be pinned exactly to {version}')
+if package.get('devDependencies', {}).get('@playwright/test') != '1.62.1':
+    raise SystemExit('G03 browser tests must pin @playwright/test exactly to 1.62.1')
 
 for migration in (ROOT / 'apps/desktop/src-tauri/migrations').glob('*.sql'):
-    if re.search(r'\bBLOB\b', migration.read_text(encoding='utf-8'), re.IGNORECASE):
+    migration_text = migration.read_text(encoding='utf-8')
+    if re.search(r'^\s*[A-Za-z_][A-Za-z0-9_]*\s+BLOB\b', migration_text, re.IGNORECASE | re.MULTILINE):
         raise SystemExit(f'Metadata-only migration contains a BLOB column: {migration.relative_to(ROOT)}')
+
+plan_migration = (ROOT / 'apps/desktop/src-tauri/migrations/0004_job_operation_plans.sql').read_text(encoding='utf-8')
+if 'length(CAST(plan_json AS BLOB)) BETWEEN 2 AND 65536' not in plan_migration:
+    raise SystemExit('G03 plan migration is missing the approved exact UTF-8 byte-length constraint')
 
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):
@@ -181,5 +202,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01 foundations and G02 dependency/document consistency verified.'
+    f'{len(rows)} feature entries found; G01/G02 compatibility and G03 dependency, migration and document consistency verified.'
 )

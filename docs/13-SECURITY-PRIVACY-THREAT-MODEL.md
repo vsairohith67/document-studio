@@ -56,6 +56,23 @@ Tests place document and password sentinels in inputs and confirm they do not ap
 - Continuously drain stdout/stderr but retain only bounded 64 KiB in-memory tails. Raw engine output is never persisted or shown to the user.
 - Reopen the published result and require its size and SHA-256 to equal the verified staging evidence. Restart recovery never resumes qpdf and deletes only marker/identity-proven owned artifacts.
 
+## G03 hostile-viewer boundary
+
+Assets at risk are local PDF contents, paths, passwords, published outputs and application authority. The attacker may supply a malformed/encrypted PDF, PDF actions/links/attachments/forms, huge images/text layers, range floods, a replaced path, stale session/grant, reparse/hard-link alias, or attempt navigation/data exfiltration from the webview.
+
+Controls are defense in depth:
+
+- Rust validates an existing regular non-reparse local PDF and retains a read-only Windows handle that denies write/delete sharing. Positioned reads revalidate opaque session/generation, bounds and source identity; there are at most two sessions, four reads per session and 1 MiB per request.
+- Backend open and Rust-side Tauri drop keep the path out of React, PDF.js, custom events, logs and errors. Destination grants are opaque and revocable. No `file://`, custom protocol, HTTP server or broad filesystem capability exists.
+- PDF.js is exact-version/local-only with a same-origin worker/assets and no network fallback. `isEvalSupported: false`, `enableXfa: false`, `stopAtErrors: true`; Document Studio creates no scripting manager, annotation/form/attachment UI or external navigation.
+- CSP allows only self, required data/blob images/fonts, inline styles, same-origin workers and WebAssembly compilation through `wasm-unsafe-eval`; it denies `unsafe-eval`, external connects, objects, bases, frames and forms. Rust blocks outside-origin navigation/new windows.
+- Page/full-resolution canvas counts, image pixels, DPR, text items/chars/results and indexing/range concurrency are bounded. Obsolete RenderTasks/searches are cancelled and close destroys PDF.js/worker/session resources.
+- Viewing passwords remain only in component memory and are never logged/persisted. Encrypted structural operations fail before qpdf processing; there is no qpdf password transport or process command-line password.
+- Durable operations snapshot only from the retained handle, use ASCII private paths/direct qpdf argv, verify every result and preserve the accepted sandbox/publication/recovery controls.
+- G03 durable records retain paths only inside the trusted Rust/database boundary. Every G03 create/get/history/recovery response strips source, canonical, destination, staging, partial and final paths before serialization; a regression proves G01/G02 job responses are unchanged.
+
+Residual risk: PDF.js and WebView2 are complex native/browser parsers, `style-src 'unsafe-inline'` is required by PDF.js text layout, and `wasm-unsafe-eval` permits WebAssembly compilation. Exact pinning, offline packaging, CSP/navigation tests, monthly advisory review and update gates reduce but do not eliminate parser risk. Unsupported document features are not described as preserved or sanitized.
+
 ## Redaction safety
 
 Visual cover-up is not redaction. The operation must remove underlying text/objects or rasterize/sanitize the affected area, then test extraction and visual output. The UI requires a final irreversible confirmation.

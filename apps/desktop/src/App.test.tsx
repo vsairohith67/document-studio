@@ -81,7 +81,7 @@ describe('G02 PDF Merge screen', () => {
     expect(screen.getByRole('heading', { name: 'Merge PDFs in the order you choose' })).toBeTruthy();
     expect(screen.getByText(/Existing digital signatures will not remain valid/)).toBeTruthy();
     expect(screen.getByText('qpdf 12.3.2 verified')).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Viewer unavailable' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Open Viewer' }) as HTMLButtonElement).disabled).toBe(false);
     const accessibility = await axe.run(container, { rules: { 'color-contrast': { enabled: false } } });
     expect(accessibility.violations).toEqual([]);
   });

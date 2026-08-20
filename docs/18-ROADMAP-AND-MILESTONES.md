@@ -12,7 +12,7 @@ Merge, split, extract, remove, reorder, rotate, linearize, PDF-to-images, images
 
 **Exit:** golden and failure tests pass; performance budgets are measured.
 
-G02 delivers only the first Phase 1 item: production page-only PDF Merge. Split, extract, page removal/reorder/rotate, linearization, image conversion, page ranges, viewer/thumbnails, and bookmark/outline policies remain later goals.
+G02 delivered production page-only PDF Merge. G03 delivers the local viewer plus split, extract, page removal/reorder/rotate and explicit/fixed/every-page split planning. Linearization, image conversion, compression, repair, bookmarks/outlines as a product feature, attachments, forms, annotations and all later capabilities remain deferred to G04 or later according to their approved goal.
 
 ## Phase 2 - Optimize, convert and protect
 

@@ -197,6 +197,99 @@ export interface PdfMergeCreateRequest {
 
 export type JobsCreateRequest = DiagnosticCopyCreateRequest | PdfMergeCreateRequest;
 
+export const CORE_PDF_OPERATION_IDS = [
+  'pdf.extract-pages',
+  'pdf.remove-pages',
+  'pdf.reorder-pages',
+  'pdf.rotate-pages',
+  'pdf.split',
+] as const;
+
+export type CorePdfOperationId = (typeof CORE_PDF_OPERATION_IDS)[number];
+export type OutputRotation = 90 | 180 | 270;
+
+export interface ExtractPagesPlan {
+  selectedPageIndexes: number[];
+  outputName: string;
+}
+
+export interface RemovePagesPlan {
+  removedPageIndexes: number[];
+  outputName: string;
+}
+
+export interface ReorderPagesPlan {
+  orderedPageIndexes: number[];
+  outputName: string;
+}
+
+export interface RotatePagesPlan {
+  rotations: Array<{ pageIndex: number; clockwiseDegrees: OutputRotation }>;
+  outputName: string;
+}
+
+export interface SplitOutputRange {
+  startPageIndex: number;
+  endPageIndex: number;
+  outputName: string;
+}
+
+export interface SplitPlan {
+  ranges: SplitOutputRange[];
+}
+
+export type CorePdfPlanPayload =
+  | ExtractPagesPlan
+  | RemovePagesPlan
+  | ReorderPagesPlan
+  | RotatePagesPlan
+  | SplitPlan;
+
+export interface OperationPlanEnvelope<TPayload extends CorePdfPlanPayload = CorePdfPlanPayload> {
+  schemaVersion: 1;
+  operationId: CorePdfOperationId;
+  sourcePageCount: number;
+  payload: TPayload;
+}
+
+export interface ViewerDocumentMetadata {
+  sessionId: string;
+  generation: number;
+  displayName: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  mimeType: 'application/pdf';
+  fileIdentity: string;
+}
+
+export interface ViewerRangeRequest {
+  sessionId: string;
+  generation: number;
+  begin: number;
+  end: number;
+}
+
+export interface ViewerSessionRequest {
+  sessionId: string;
+  generation: number;
+}
+
+export interface DestinationGrant {
+  grantId: string;
+  displayName: string;
+}
+
+export interface DestinationGrantRequest {
+  grantId: string;
+}
+
+export interface CorePdfJobCreateRequest {
+  viewerSessionId: string;
+  viewerGeneration: number;
+  destinationGrantId: string;
+  plan: OperationPlanEnvelope;
+}
+
 export interface JobIdRequest {
   jobId: string;
 }
@@ -225,3 +318,4 @@ export type CommandResult<T> =
   | { ok: false; error: OperationError };
 
 export const JOB_PROGRESS_EVENT_NAME = 'document-studio-job-progress-v1';
+export const VIEWER_DOCUMENT_OPENED_EVENT_NAME = 'document-studio-viewer-opened-v1';

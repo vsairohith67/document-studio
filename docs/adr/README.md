@@ -11,5 +11,8 @@
 | [ADR-007](ADR-007-durable-publication-and-recovery.md) | Require journaled no-overwrite publication and evidence-based recovery | Accepted |
 | [ADR-008](ADR-008-single-instance-cancellation.md) | Enforce one Windows application process for cancellation ownership | Accepted |
 | [ADR-009](ADR-009-qpdf-and-production-pdf-merge.md) | Bundle qpdf for sandboxed, verified, page-only PDF Merge | Accepted; implemented in G02 |
+| [ADR-010](ADR-010-pdfjs-local-rendering-security.md) | Pin and locally package PDF.js with a reduced viewer surface | Accepted; implemented in G03 |
+| [ADR-011](ADR-011-opaque-viewer-document-sessions.md) | Stream local PDFs through opaque retained-handle sessions | Accepted; implemented in G03 |
+| [ADR-012](ADR-012-versioned-page-plans-and-multi-output-publication.md) | Persist typed page plans and represent partial publication truthfully | Accepted; implemented in G03 |
 
 Create a new ADR for decisions that are expensive to reverse, affect security/privacy, change the operation contract, add a production dependency/model or alter the platform sequence. Never rewrite an accepted ADR to hide history; supersede it with a new record.

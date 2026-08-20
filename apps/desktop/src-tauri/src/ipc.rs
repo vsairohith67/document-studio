@@ -2,19 +2,25 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{ipc::Response, AppHandle, Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::app_state::{AppState, CancelOutcome};
 use crate::contracts::{
-    CancelResponse, FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest,
-    JobIdRequest, JobRecord, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
-    SettingGetRequest, SettingRecord, SettingSetRequest, SystemStatus, JOB_PROGRESS_EVENT_NAME,
+    CancelResponse, CorePdfJobCreateRequest, DestinationGrant, DestinationGrantRequest,
+    FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest, JobIdRequest,
+    JobRecord, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
+    SettingGetRequest, SettingRecord, SettingSetRequest, SystemStatus, ViewerDocumentMetadata,
+    ViewerRangeRequest, ViewerSessionRequest, JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID,
+    PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
+    PDF_SPLIT_OPERATION_ID,
 };
 use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
 use crate::operation_registry::{all_manifests, validate_create_request, OperationKind};
 use crate::path_policy::canonical_regular_file;
 use crate::pdf_merge::PdfMergeService;
+use crate::pdf_operations::PdfPageOperationService;
 use crate::recovery::{cancel_without_worker, resolve_interrupted, resolve_worker_spawn_failure};
 
 #[tauri::command]
@@ -28,7 +34,7 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
         .unwrap_or(0);
     Ok(SystemStatus {
         product: "Document Studio".to_owned(),
-        phase: "foundation".to_owned(),
+        phase: "g03-viewer-core-pdf".to_owned(),
         offline_by_default: true,
         database_schema_version: u32::try_from(version).unwrap_or(0),
     })
@@ -37,6 +43,84 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
 #[tauri::command]
 pub fn operations_list() -> Vec<OperationManifest> {
     all_manifests()
+}
+
+#[tauri::command]
+pub async fn viewer_open_dialog(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ViewerDocumentMetadata>, OperationError> {
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("PDF documents", &["pdf"])
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected.into_path().map_err(|_| path_error())?;
+    state.viewer_sessions.open_pdf(&path).map(Some)
+}
+
+#[cfg(feature = "test-runtime")]
+#[tauri::command]
+pub fn viewer_open_test_fixture(
+    state: State<'_, AppState>,
+) -> Result<ViewerDocumentMetadata, OperationError> {
+    let path = std::env::var_os("DOCUMENT_STUDIO_TEST_VIEWER_PATH")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            OperationError::safe(
+                "TEST_FIXTURE_UNAVAILABLE",
+                "The test PDF fixture is unavailable",
+                "Set the isolated test-runtime fixture path before launching the smoke test.",
+                OperationStage::Inspect,
+                false,
+            )
+        })?;
+    state.viewer_sessions.open_pdf(&path)
+}
+
+#[tauri::command]
+pub fn viewer_read_range(
+    request: ViewerRangeRequest,
+    state: State<'_, AppState>,
+) -> Result<Response, OperationError> {
+    state
+        .viewer_sessions
+        .read_range(&request)
+        .map(Response::new)
+}
+
+#[tauri::command]
+pub fn viewer_close(
+    request: ViewerSessionRequest,
+    state: State<'_, AppState>,
+) -> Result<(), OperationError> {
+    state.viewer_sessions.close(&request)
+}
+
+#[tauri::command]
+pub fn viewer_set_drop_enabled(enabled: bool, state: State<'_, AppState>) {
+    state.viewer_sessions.set_drop_enabled(enabled);
+}
+
+#[tauri::command]
+pub async fn viewer_choose_destination(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<DestinationGrant>, OperationError> {
+    let selected = app.dialog().file().blocking_pick_folder();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected.into_path().map_err(|_| path_error())?;
+    state.viewer_sessions.grant_destination(&path).map(Some)
+}
+
+#[tauri::command]
+pub fn viewer_revoke_destination(request: DestinationGrantRequest, state: State<'_, AppState>) {
+    state.viewer_sessions.revoke_destination(&request.grant_id);
 }
 
 #[tauri::command]
@@ -113,6 +197,36 @@ pub fn jobs_create(
     Ok(job)
 }
 
+#[tauri::command]
+pub fn jobs_create_core_pdf(
+    request: CorePdfJobCreateRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<JobRecord, OperationError> {
+    let service = PdfPageOperationService::new(state.inner().clone());
+    let (job, source) = service.create_job(request)?;
+    let job_id = job.id.clone();
+    let worker_job_id = job_id.clone();
+    let worker_state = state.inner().clone();
+    spawn_registered_worker(
+        state.inner(),
+        &job_id,
+        move |token| {
+            let service = PdfPageOperationService::new(worker_state);
+            let _ = service.execute_with_registered_token(&worker_job_id, source, token, |event| {
+                let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+            });
+        },
+        |name, worker| {
+            std::thread::Builder::new()
+                .name(name)
+                .spawn(worker)
+                .map(|_| ())
+        },
+    )?;
+    Ok(redact_viewer_job_paths(job))
+}
+
 fn spawn_registered_worker<W, S>(
     state: &AppState,
     job_id: &str,
@@ -170,7 +284,7 @@ pub fn jobs_resolve_interrupted(
     request: JobIdRequest,
     state: State<'_, AppState>,
 ) -> Result<JobRecord, OperationError> {
-    resolve_interrupted(state.inner(), &request.job_id)
+    resolve_interrupted(state.inner(), &request.job_id).map(redact_viewer_job_paths)
 }
 
 #[tauri::command]
@@ -183,6 +297,7 @@ pub fn jobs_get(
         .get_job(&request.job_id)
         .map_err(|_| metadata_error())?
         .ok_or_else(job_not_found)
+        .map(redact_viewer_job_paths)
 }
 
 #[tauri::command]
@@ -197,7 +312,32 @@ pub fn history_list(
     state
         .database()
         .list_jobs(request.limit)
+        .map(|jobs| jobs.into_iter().map(redact_viewer_job_paths).collect())
         .map_err(|_| metadata_error())
+}
+
+fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
+    if !matches!(
+        job.operation_id.as_str(),
+        PDF_EXTRACT_OPERATION_ID
+            | PDF_REMOVE_OPERATION_ID
+            | PDF_REORDER_OPERATION_ID
+            | PDF_ROTATE_OPERATION_ID
+            | PDF_SPLIT_OPERATION_ID
+    ) {
+        return job;
+    }
+    job.destination_directory.clear();
+    for input in &mut job.inputs {
+        input.source_path.clear();
+        input.canonical_path.clear();
+    }
+    for output in &mut job.outputs {
+        output.staging_path = None;
+        output.partial_path = None;
+        output.final_path = None;
+    }
+    job
 }
 
 #[tauri::command]
@@ -328,9 +468,12 @@ fn job_not_found() -> OperationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_copy_manifest, spawn_registered_worker};
+    use super::{diagnostic_copy_manifest, redact_viewer_job_paths, spawn_registered_worker};
     use crate::app_state::{AppState, CancelOutcome};
-    use crate::contracts::{JobState, JobsCreateRequest, OperationStage};
+    use crate::contracts::{
+        JobInput, JobOutput, JobProgress, JobRecord, JobState, JobsCreateRequest, OperationStage,
+        OutputStatus, ProgressUnit, PDF_EXTRACT_OPERATION_ID, PDF_MERGE_OPERATION_ID,
+    };
     use crate::database::Database;
     use crate::diagnostic_copy::DiagnosticCopyService;
     use crate::workspace::WorkspaceManager;
@@ -346,6 +489,78 @@ mod tests {
         assert_eq!(manifest.stages.first(), Some(&OperationStage::Inspect));
         assert_eq!(manifest.stages.last(), Some(&OperationStage::Cleanup));
         assert!(manifest.dependencies.iter().all(|id| !id.contains("qpdf")));
+    }
+
+    fn path_bearing_job(operation_id: &str) -> JobRecord {
+        JobRecord {
+            id: "job-id".to_owned(),
+            operation_id: operation_id.to_owned(),
+            operation_version: "1.0.0".to_owned(),
+            state: JobState::Completed,
+            stage: Some(OperationStage::Cleanup),
+            sequence: 1,
+            progress: JobProgress {
+                completed_units: 1,
+                total_units: 1,
+                unit: ProgressUnit::Steps,
+            },
+            destination_directory: r"C:\Secret\Output".to_owned(),
+            requested_output_name: "result.pdf".to_owned(),
+            resolved_output_name: Some("result.pdf".to_owned()),
+            cancellation_requested_at: None,
+            created_at: "2026-08-17T00:00:00Z".to_owned(),
+            updated_at: "2026-08-17T00:00:01Z".to_owned(),
+            finished_at: Some("2026-08-17T00:00:01Z".to_owned()),
+            version: 1,
+            inputs: vec![JobInput {
+                ordinal: 0,
+                display_name: "private.pdf".to_owned(),
+                source_path: r"C:\Secret\private.pdf".to_owned(),
+                canonical_path: r"C:\Secret\private.pdf".to_owned(),
+                file_identity: "opaque-identity".to_owned(),
+                size_bytes: 42,
+                modified_at: "2026-08-17T00:00:00Z".to_owned(),
+                mime_type: "application/pdf".to_owned(),
+                sha256: None,
+                password_reference: None,
+            }],
+            outputs: vec![JobOutput {
+                ordinal: 0,
+                requested_name: "result.pdf".to_owned(),
+                resolved_name: Some("result.pdf".to_owned()),
+                staging_path: Some(r"C:\PrivateWorkspace\result.pdf".to_owned()),
+                partial_path: Some(r"C:\Secret\Output\result.partial".to_owned()),
+                final_path: Some(r"C:\Secret\Output\result.pdf".to_owned()),
+                size_bytes: Some(42),
+                mime_type: "application/pdf".to_owned(),
+                sha256: Some("0".repeat(64)),
+                status: OutputStatus::Published,
+                verified_at: Some("2026-08-17T00:00:01Z".to_owned()),
+                published_at: Some("2026-08-17T00:00:01Z".to_owned()),
+            }],
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn g03_job_responses_redact_paths_without_changing_accepted_merge_records() {
+        let redacted = redact_viewer_job_paths(path_bearing_job(PDF_EXTRACT_OPERATION_ID));
+        assert!(redacted.destination_directory.is_empty());
+        assert!(redacted.inputs[0].source_path.is_empty());
+        assert!(redacted.inputs[0].canonical_path.is_empty());
+        assert!(redacted.outputs[0].staging_path.is_none());
+        assert!(redacted.outputs[0].partial_path.is_none());
+        assert!(redacted.outputs[0].final_path.is_none());
+        assert!(!serde_json::to_string(&redacted)
+            .unwrap()
+            .contains(r"C:\Secret"));
+
+        let accepted_merge = redact_viewer_job_paths(path_bearing_job(PDF_MERGE_OPERATION_ID));
+        assert_eq!(accepted_merge.destination_directory, r"C:\Secret\Output");
+        assert_eq!(
+            accepted_merge.inputs[0].source_path,
+            r"C:\Secret\private.pdf"
+        );
     }
 
     #[test]
