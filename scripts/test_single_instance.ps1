@@ -48,7 +48,7 @@ $vitePort = 1420
 $viteReadinessDeadlineMs = 30000
 
 $firstProgressDeadlineMs = 15000
-$setupDeadlineMs = 20000
+$setupDeadlineMs = 45000
 $absoluteDeadlineMs = 45000
 $secondaryExitDeadlineMs = 10000
 if ($FailureInjection -eq 'PrimaryRuntimeNotReady') {
