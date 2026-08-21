@@ -3,6 +3,7 @@ mod support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use document_studio_lib::app_state::{AppState, CancelOutcome};
@@ -203,7 +204,9 @@ fn malformed_encrypted_and_changed_sources_fail_closed() {
         let job = service
             .create_job(request(input, destination.path(), "rejected.pdf"))
             .unwrap();
-        assert_eq!(service.execute(&job.id, |_| {}).unwrap_err().code, expected);
+        let error = service.execute(&job.id, |_| {}).unwrap_err();
+        assert_eq!(error.code, expected);
+        assert!(!error.detail.contains("PDF Merge"));
         assert!(!destination.path().join("rejected.pdf").exists());
     }
 
@@ -332,10 +335,17 @@ fn cancellation_collision_larger_output_and_recovery_are_truthful_and_safe() {
         .unwrap();
     let worker_service = service.clone();
     let worker_id = cancel_job.id.clone();
+    let cancellation_events = Arc::new(Mutex::new(Vec::new()));
+    let worker_events = Arc::clone(&cancellation_events);
     let worker = std::thread::spawn(move || {
         worker_service.execute_with_hooks(
             &worker_id,
-            |_| {},
+            |event| {
+                worker_events
+                    .lock()
+                    .unwrap()
+                    .push((event.message_code, event.message));
+            },
             PdfMergeHooks {
                 pause_before_merge: Some(Duration::from_secs(2)),
                 ..Default::default()
@@ -363,6 +373,14 @@ fn cancellation_collision_larger_output_and_recovery_are_truthful_and_safe() {
         .request_cancellation(&cancel_job.id)
         .unwrap();
     assert_eq!(worker.join().unwrap().unwrap().state, JobState::Cancelled);
+    let cancellation_events = cancellation_events.lock().unwrap();
+    assert!(cancellation_events.iter().any(|(code, message)| {
+        code == "COMPRESSION_CANCELLED"
+            && message == "Lossless PDF Compression was cancelled and temporary data was removed"
+    }));
+    assert!(cancellation_events
+        .iter()
+        .all(|(_, message)| !message.contains("PDF Merge")));
     assert!(!destination.path().join("cancelled.pdf").exists());
 
     fs::write(destination.path().join("small.pdf"), b"existing user file").unwrap();

@@ -214,6 +214,58 @@ impl PdfLifecycleMode {
             Self::CompressLossless => COMPRESSED_STAGING_RELATIVE_PATH,
         }
     }
+
+    const fn cancelled_event(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Merge => (
+                "MERGE_CANCELLED",
+                "PDF Merge was cancelled and temporary data was removed",
+            ),
+            Self::CompressLossless => (
+                "COMPRESSION_CANCELLED",
+                "Lossless PDF Compression was cancelled and temporary data was removed",
+            ),
+        }
+    }
+
+    const fn interrupted_cleanup_event(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Merge => (
+                "MERGE_INTERRUPTED",
+                "PDF Merge stopped with owned cleanup still pending",
+            ),
+            Self::CompressLossless => (
+                "COMPRESSION_INTERRUPTED",
+                "Lossless PDF Compression stopped with owned cleanup still pending",
+            ),
+        }
+    }
+
+    const fn interrupted_publication_event(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Merge => (
+                "MERGE_INTERRUPTED",
+                "PDF Merge publication needs evidence-based recovery",
+            ),
+            Self::CompressLossless => (
+                "COMPRESSION_INTERRUPTED",
+                "Lossless PDF Compression publication needs evidence-based recovery",
+            ),
+        }
+    }
+
+    const fn failed_event(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Merge => (
+                "MERGE_FAILED",
+                "PDF Merge failed and temporary data was removed",
+            ),
+            Self::CompressLossless => (
+                "COMPRESSION_FAILED",
+                "Lossless PDF Compression failed and temporary data was removed",
+            ),
+        }
+    }
 }
 
 impl PdfMergeService {
@@ -1253,11 +1305,13 @@ impl PdfMergeService {
             .get_job(job_id)
             .map_err(|_| metadata_error())?
             .ok_or_else(metadata_error)?;
+        let mode = PdfLifecycleMode::from_job(&cancelled)?;
+        let (message_code, message) = mode.cancelled_event();
         emit(
             &cancelled,
             OperationStage::Cleanup,
-            "MERGE_CANCELLED",
-            "PDF Merge was cancelled and temporary data was removed",
+            message_code,
+            message,
             false,
             on_event,
         );
@@ -1276,6 +1330,7 @@ impl PdfMergeService {
         F: FnMut(ProgressEvent),
     {
         let current = self.current_job(job_id)?;
+        let mode = PdfLifecycleMode::from_job(&current)?;
         let cleanup = self.reconcile_temporary_artifacts(job_id, workspace, hooks);
         let mut database = self.state.database();
         database
@@ -1292,11 +1347,12 @@ impl PdfMergeService {
                 .get_job(job_id)
                 .map_err(|_| metadata_error())?
                 .ok_or_else(metadata_error)?;
+            let (message_code, message) = mode.interrupted_cleanup_event();
             emit(
                 &interrupted,
                 OperationStage::Recovery,
-                "MERGE_INTERRUPTED",
-                "PDF Merge stopped with owned cleanup still pending",
+                message_code,
+                message,
                 false,
                 on_event,
             );
@@ -1310,11 +1366,12 @@ impl PdfMergeService {
                 .get_job(job_id)
                 .map_err(|_| metadata_error())?
                 .ok_or_else(metadata_error)?;
+            let (message_code, message) = mode.interrupted_publication_event();
             emit(
                 &interrupted,
                 OperationStage::Recovery,
-                "MERGE_INTERRUPTED",
-                "PDF Merge publication needs evidence-based recovery",
+                message_code,
+                message,
                 false,
                 on_event,
             );
@@ -1340,11 +1397,12 @@ impl PdfMergeService {
             .get_job(job_id)
             .map_err(|_| metadata_error())?
             .ok_or_else(metadata_error)?;
+        let (message_code, message) = mode.failed_event();
         emit(
             &failed,
             OperationStage::Cleanup,
-            "MERGE_FAILED",
-            "PDF Merge failed and temporary data was removed",
+            message_code,
+            message,
             false,
             on_event,
         );
@@ -1474,7 +1532,7 @@ fn preflight_unique_source(
             return Err(input_error(
                 "PDF_ENCRYPTED",
                 "The PDF is encrypted",
-                "PDF Merge does not accept password-protected or restriction-encrypted files.",
+                "This local PDF operation does not accept password-protected or restriction-encrypted files.",
                 OperationStage::Preflight,
                 false,
                 input_index,
@@ -2285,7 +2343,7 @@ fn check_cancelled(token: &CancellationToken, stage: OperationStage) -> Result<(
 fn cancelled_error(stage: OperationStage) -> OperationError {
     OperationError::safe(
         "CANCELLED",
-        "PDF Merge was cancelled",
+        "The PDF operation was cancelled",
         "Temporary snapshots and unpublished output will be removed safely.",
         stage,
         false,
@@ -2470,7 +2528,7 @@ fn size_error(stage: OperationStage) -> OperationError {
 fn preflight_error() -> OperationError {
     OperationError::safe(
         "PREFLIGHT_FAILED",
-        "PDF Merge preflight could not finish",
+        "The PDF operation preflight could not finish",
         "Check local access and available disk space, then try again.",
         OperationStage::Preflight,
         true,
