@@ -347,8 +347,33 @@ function Test-VitePortListening {
     ).Count -gt 0
 }
 
+function Resolve-ActiveNpmCommand {
+    $nodeCommands = @(
+        Get-Command node.exe `
+            -CommandType Application `
+            -All `
+            -ErrorAction Stop
+    )
+
+    if ($nodeCommands.Count -lt 1) {
+        throw 'NODE_COMMAND_NOT_FOUND'
+    }
+
+    $nodePath = [System.IO.Path]::GetFullPath(
+        [string]$nodeCommands[0].Source
+    )
+    $nodeDirectory = [System.IO.Path]::GetDirectoryName($nodePath)
+    $npmPath = Join-Path $nodeDirectory 'npm.cmd'
+
+    if (-not (Test-Path -LiteralPath $npmPath -PathType Leaf)) {
+        throw 'NPM_COMMAND_NOT_FOUND_NEXT_TO_ACTIVE_NODE'
+    }
+
+    return [System.IO.Path]::GetFullPath($npmPath)
+}
+
 function Start-OwnedVite {
-    $npmCommand = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
+    $npmCommand = Resolve-ActiveNpmCommand
     $arguments = @(
         'run', 'dev',
         '--workspace', '@document-studio/desktop',
