@@ -1,6 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { DependencyDiagnostic, FileInspection, JobRecord, ProgressEvent, SystemStatus } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
+
+const ViewerWorkspace = lazy(async () => {
+  const module = await import('./viewer/ViewerWorkspace');
+  return { default: module.ViewerWorkspace };
+});
 
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const maximumInputs = 128;
@@ -30,6 +35,7 @@ function validPdfOutputName(name: string): boolean {
 }
 
 export default function App() {
+  const [workspaceMode, setWorkspaceMode] = useState<'merge' | 'viewer'>('merge');
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [inputs, setInputs] = useState<SelectedPdf[]>([]);
   const [destination, setDestination] = useState<string | null>(null);
@@ -84,7 +90,6 @@ export default function App() {
   useEffect(() => {
     let active = true;
     let unlistenProgress: (() => void) | undefined;
-    let unlistenDrop: (() => void) | undefined;
     const reconciler = createProgressReconciler(
       (jobId) => api.jobs.get({ jobId }),
       (snapshot) => active && setJob(snapshot),
@@ -111,11 +116,18 @@ export default function App() {
     void api.jobs.onProgress((event) => {
       void reconciler(event).catch((reason: unknown) => active && setError(operationErrorMessage(reason)));
     }).then((stop) => { if (active) unlistenProgress = stop; else stop(); });
+    return () => { active = false; unlistenProgress?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (workspaceMode !== 'merge') return;
+    let active = true;
+    let unlistenDrop: (() => void) | undefined;
     void api.files.onPdfDrop((paths) => {
       if (active && !busyRef.current) void addPaths(paths);
     }).then((stop) => { if (active) unlistenDrop = stop; else stop(); });
-    return () => { active = false; unlistenProgress?.(); unlistenDrop?.(); };
-  }, []);
+    return () => { active = false; unlistenDrop?.(); };
+  }, [workspaceMode]);
 
   useLayoutEffect(() => {
     const target = pendingFocus.current;
@@ -206,12 +218,27 @@ export default function App() {
   const progressPercent = progressTotal > 0 ? Math.min(100, Math.round((progressValue / progressTotal) * 100)) : job?.state === 'completed' ? 100 : 0;
   const activeError = job?.errors.at(-1);
 
+  if (workspaceMode === 'viewer') {
+    return (
+      <div className="app-shell viewer-shell">
+        <aside className="rail" aria-label="Primary navigation">
+          <div className="brand" aria-label="Document Studio">DS</div>
+          <button className="rail-button" onClick={() => setWorkspaceMode('merge')}>Merge</button>
+          <button className="rail-button active" aria-current="page">Viewer</button>
+          <button className="rail-button" disabled>Tools</button>
+          <button className="rail-button" disabled>Settings</button>
+        </aside>
+        <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing the local PDF workspace…</div></main>}><ViewerWorkspace /></Suspense>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       <aside className="rail" aria-label="Primary navigation">
         <div className="brand" aria-label="Document Studio">DS</div>
         <button className="rail-button active" aria-current="page">Merge</button>
-        <button className="rail-button" disabled>Viewer</button><button className="rail-button" disabled>Tools</button><button className="rail-button" disabled>Settings</button>
+        <button className="rail-button" onClick={() => setWorkspaceMode('viewer')}>Viewer</button><button className="rail-button" disabled>Tools</button><button className="rail-button" disabled>Settings</button>
       </aside>
       <main className="workspace">
         <header className="page-header">
@@ -264,7 +291,7 @@ export default function App() {
               {job?.state === 'completed' && <div className="success-result"><strong>Verified merged PDF</strong><span>{job.outputs[0]?.finalPath}</span><small>{job.outputs[0]?.sizeBytes == null ? '' : formatBytes(job.outputs[0].sizeBytes)}</small><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy path</button></div>}
               {(job?.state === 'failed' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? 'The merge did not finish'}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span></div>}
             </article>
-            <article className="card placeholder-card" aria-labelledby="viewer-heading"><p className="eyebrow">G03 PLACEHOLDER</p><h2 id="viewer-heading">PDF viewer</h2><p>Viewing, thumbnails and page-level tools are not part of PDF Merge.</p><button type="button" className="secondary" disabled>Viewer unavailable</button></article>
+            <article className="card placeholder-card" aria-labelledby="viewer-heading"><p className="eyebrow">LOCAL PDF WORKSPACE</p><h2 id="viewer-heading">View and organize pages</h2><p>Open one PDF for progressive viewing, search, selection and verified page operations.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('viewer')}>Open Viewer</button></article>
           </aside>
         </section>
         <section className="history-section" aria-labelledby="history-heading">

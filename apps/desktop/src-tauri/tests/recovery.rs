@@ -475,6 +475,122 @@ fn publishing_mismatch_fails_after_cleanup_and_never_deletes_unknown_final_file(
 }
 
 #[test]
+fn multi_output_recovery_preserves_published_files_and_fails_partial_publication_truthfully() {
+    let (_app_data, state, service) = setup();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let input = support::write_fixture(source.path(), "input.bin", b"multi output recovery");
+    let job = create_job(&service, &input, destination.path());
+    state
+        .database()
+        .connection()
+        .execute(
+            "INSERT INTO job_outputs (
+            job_id, ordinal, requested_name, mime_type, status
+         ) VALUES (?1, 1, 'part-002.pdf', 'application/pdf', 'planned')",
+            [&job.id],
+        )
+        .unwrap();
+    let workspace = state.workspaces.create_job(&job.id).unwrap();
+    let first_staging = workspace.staging.join("part-001.pdf");
+    let second_staging = workspace.staging.join("part-002.pdf");
+    fs::write(&first_staging, b"first verified output").unwrap();
+    fs::write(&second_staging, b"second verified output").unwrap();
+    let (first_size, first_hash) = hash_file(&first_staging).unwrap();
+    let (second_size, second_hash) = hash_file(&second_staging).unwrap();
+    advance_to_running(&state, &job.id);
+    advance(
+        &state,
+        &job.id,
+        JobState::Running,
+        JobState::Verifying,
+        OperationStage::Verify,
+    )
+    .unwrap();
+    state
+        .database()
+        .set_output_staging_at(
+            &job.id,
+            0,
+            &first_staging.to_string_lossy(),
+            first_size,
+            &first_hash,
+            "2026-08-17T12:00:00Z",
+        )
+        .unwrap();
+    state
+        .database()
+        .set_output_staging_at(
+            &job.id,
+            1,
+            &second_staging.to_string_lossy(),
+            second_size,
+            &second_hash,
+            "2026-08-17T12:00:00Z",
+        )
+        .unwrap();
+    let first_final = destination.path().join("part-001.pdf");
+    let first_partial = destination.path().join(format!(
+        ".document-studio-{}-33333333-3333-4333-8333-333333333333.partial",
+        job.id
+    ));
+    state
+        .database()
+        .reserve_publication_attempt_at(
+            &job.id,
+            0,
+            "part-001.pdf",
+            &first_final.to_string_lossy(),
+            &first_partial.to_string_lossy(),
+            first_size,
+            &first_hash,
+        )
+        .unwrap();
+    state
+        .database()
+        .begin_publication_at(
+            &job.id,
+            0,
+            "part-001.pdf",
+            &first_final.to_string_lossy(),
+            first_size,
+            &first_hash,
+        )
+        .unwrap();
+    fs::write(&first_final, b"first verified output").unwrap();
+    state
+        .database()
+        .set_output_published_at(
+            &job.id,
+            0,
+            "part-001.pdf",
+            &first_final.to_string_lossy(),
+            first_size,
+            &first_hash,
+            Some(&first_partial.to_string_lossy()),
+        )
+        .unwrap();
+
+    let report = reconcile_startup(&state).unwrap();
+    assert_eq!(report.failed, 1);
+    assert_eq!(fs::read(&first_final).unwrap(), b"first verified output");
+    assert!(!workspace.root.exists());
+    let recovered = state.database().get_job(&job.id).unwrap().unwrap();
+    assert_eq!(recovered.state, JobState::Failed);
+    assert_eq!(recovered.outputs.len(), 2);
+    assert_eq!(recovered.outputs[0].status.as_str(), "published");
+    assert_ne!(recovered.outputs[1].status.as_str(), "published");
+    assert!(recovered
+        .outputs
+        .iter()
+        .all(|output| output.staging_path.is_none() && output.partial_path.is_none()));
+    assert!(recovered
+        .errors
+        .iter()
+        .any(|error| error.code == "PARTIAL_PUBLICATION"));
+}
+
+#[test]
 fn queued_job_fails_deterministically_without_rescheduling() {
     let (_app_data, state, service) = setup();
     let source = tempdir().unwrap();

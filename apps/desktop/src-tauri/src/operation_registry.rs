@@ -2,8 +2,10 @@ use serde_json::json;
 
 use crate::contracts::{
     JobsCreateRequest, OperationError, OperationInputs, OperationManifest, OperationOutputs,
-    OperationStage, DIAGNOSTIC_COPY_OPERATION_ID, DIAGNOSTIC_COPY_VERSION, PDF_MERGE_MAX_INPUTS,
-    PDF_MERGE_MIN_INPUTS, PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION, QPDF_DEPENDENCY_ID,
+    OperationStage, CORE_PDF_OPERATION_VERSION, DIAGNOSTIC_COPY_OPERATION_ID,
+    DIAGNOSTIC_COPY_VERSION, PDF_EXTRACT_OPERATION_ID, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS,
+    PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION, PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID,
+    PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID, QPDF_DEPENDENCY_ID,
 };
 use crate::path_policy::validate_output_name;
 
@@ -14,7 +16,15 @@ pub enum OperationKind {
 }
 
 pub fn all_manifests() -> Vec<OperationManifest> {
-    vec![diagnostic_copy_manifest(), pdf_merge_manifest()]
+    vec![
+        diagnostic_copy_manifest(),
+        pdf_merge_manifest(),
+        extract_pages_manifest(),
+        remove_pages_manifest(),
+        reorder_pages_manifest(),
+        rotate_pages_manifest(),
+        split_manifest(),
+    ]
 }
 
 pub fn validate_create_request(
@@ -102,6 +112,134 @@ pub fn pdf_merge_manifest() -> OperationManifest {
             "publication-hash",
         ],
     )
+}
+
+pub fn extract_pages_manifest() -> OperationManifest {
+    core_pdf_manifest(
+        PDF_EXTRACT_OPERATION_ID,
+        "Extract pages",
+        "Exports selected pages once, in the selected order, to one verified PDF.",
+        "single",
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["selectedPageIndexes", "outputName"],
+            "properties": {
+                "selectedPageIndexes": { "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 4095 } },
+                "outputName": { "type": "string", "minLength": 5, "maxLength": 255, "pattern": "\\.[pP][dD][fF]$" }
+            }
+        }),
+    )
+}
+
+pub fn remove_pages_manifest() -> OperationManifest {
+    core_pdf_manifest(
+        PDF_REMOVE_OPERATION_ID,
+        "Remove pages",
+        "Exports the complement of the selected pages while keeping at least one page.",
+        "single",
+        json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["removedPageIndexes", "outputName"],
+            "properties": {
+                "removedPageIndexes": { "type": "array", "minItems": 1, "maxItems": 4095, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 4095 } },
+                "outputName": { "type": "string", "minLength": 5, "maxLength": 255, "pattern": "\\.[pP][dD][fF]$" }
+            }
+        }),
+    )
+}
+
+pub fn reorder_pages_manifest() -> OperationManifest {
+    core_pdf_manifest(
+        PDF_REORDER_OPERATION_ID,
+        "Reorder pages",
+        "Exports one exact permutation containing every source page once.",
+        "single",
+        json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["orderedPageIndexes", "outputName"],
+            "properties": {
+                "orderedPageIndexes": { "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 4095 } },
+                "outputName": { "type": "string", "minLength": 5, "maxLength": 255, "pattern": "\\.[pP][dD][fF]$" }
+            }
+        }),
+    )
+}
+
+pub fn rotate_pages_manifest() -> OperationManifest {
+    core_pdf_manifest(
+        PDF_ROTATE_OPERATION_ID,
+        "Rotate pages",
+        "Applies clockwise 90, 180, or 270 degree output rotations to selected pages.",
+        "single",
+        json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["rotations", "outputName"],
+            "properties": {
+                "rotations": { "type": "array", "minItems": 1, "maxItems": 4096, "items": {
+                    "type": "object", "additionalProperties": false, "required": ["pageIndex", "clockwiseDegrees"],
+                    "properties": { "pageIndex": { "type": "integer", "minimum": 0, "maximum": 4095 }, "clockwiseDegrees": { "enum": [90, 180, 270] } }
+                } },
+                "outputName": { "type": "string", "minLength": 5, "maxLength": 255, "pattern": "\\.[pP][dD][fF]$" }
+            }
+        }),
+    )
+}
+
+pub fn split_manifest() -> OperationManifest {
+    core_pdf_manifest(
+        PDF_SPLIT_OPERATION_ID,
+        "Split PDF",
+        "Exports 1–128 explicit, ordered, non-overlapping page ranges as independently verified PDFs.",
+        "multiple",
+        json!({
+            "type": "object", "additionalProperties": false,
+            "required": ["ranges"],
+            "properties": { "ranges": { "type": "array", "minItems": 1, "maxItems": 128, "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["startPageIndex", "endPageIndex", "outputName"],
+                "properties": {
+                    "startPageIndex": { "type": "integer", "minimum": 0, "maximum": 4095 },
+                    "endPageIndex": { "type": "integer", "minimum": 0, "maximum": 4095 },
+                    "outputName": { "type": "string", "minLength": 5, "maxLength": 255, "pattern": "\\.[pP][dD][fF]$" }
+                }
+            } } }
+        }),
+    )
+}
+
+fn core_pdf_manifest(
+    id: &str,
+    name: &str,
+    description: &str,
+    multiplicity: &str,
+    settings_schema: serde_json::Value,
+) -> OperationManifest {
+    let mut manifest = manifest(
+        id,
+        CORE_PDF_OPERATION_VERSION,
+        name,
+        "pdf",
+        description,
+        vec!["application/pdf"],
+        1,
+        1,
+        "application/pdf",
+        vec![QPDF_DEPENDENCY_ID],
+        vec![
+            "regular-file",
+            "pdf-magic",
+            "sha256",
+            "qpdf-strict-check",
+            "unencrypted",
+            "page-count",
+            "plan-invariants",
+            "publication-hash",
+        ],
+    );
+    manifest.settings_schema = settings_schema;
+    manifest.outputs.multiplicity = multiplicity.to_owned();
+    manifest
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,14 +332,30 @@ mod tests {
     }
 
     #[test]
-    fn registry_exposes_foundation_and_pdf_merge_manifests() {
+    fn registry_exposes_accepted_and_g03_manifests() {
         let manifests = all_manifests();
-        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests.len(), 7);
         assert_eq!(manifests[0].id, "diagnostic.copy");
         assert_eq!(manifests[1].id, "pdf.merge");
         assert_eq!(manifests[1].inputs.minimum, 2);
         assert_eq!(manifests[1].inputs.maximum, 128);
         assert_eq!(manifests[1].dependencies, ["qpdf"]);
+        assert_eq!(
+            manifests[2..]
+                .iter()
+                .map(|manifest| manifest.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "pdf.extract-pages",
+                "pdf.remove-pages",
+                "pdf.reorder-pages",
+                "pdf.rotate-pages",
+                "pdf.split",
+            ]
+        );
+        assert!(manifests[2..]
+            .iter()
+            .all(|manifest| { manifest.version == "1.0.0" && manifest.dependencies == ["qpdf"] }));
     }
 
     #[test]

@@ -7,7 +7,7 @@ The dependency register distinguishes **adopt**, **evaluate**, **optional servic
 | Tauri 2.11.x | Desktop shell and secure IPC | Adopt | MIT/Apache-2.0; CLI 2.11.4 and JS API 2.11.1 were current at the 22 July 2026 recheck |
 | React 19.2.7+ | UI | Adopt | MIT; pin a patched 19.2.x or later |
 | Vite 8.1.5+ | Front-end build | Adopt | MIT; Vite 8 uses Rolldown; pair with `@vitejs/plugin-react` 6.x |
-| PDF.js 5.7.284+ | Viewer, text layer, annotations | Adopt | Apache-2.0 |
+| PDF.js 6.2.108 | Viewer rendering and text layer beneath Document Studio UI | Adopt for G03 | Apache-2.0; exact npm pin, local worker/assets, no generic viewer UI |
 | qpdf 12.3.2 | Structural PDF merge and verification | Adopt for G02 | Apache-2.0; signed checksum, exact archive/runtime hashes and bundled license materials verified |
 | libvips 8.18.2+ | Image conversion/compression | Adopt | LGPL-2.1-or-later; dynamic-linking/distribution review |
 | OCRmyPDF 17.8.x | OCR orchestration | Evaluate as managed optional worker | MPL-2.0; native Windows needs Python, Tesseract and Ghostscript; packaging and sandboxing gate required |
@@ -65,7 +65,7 @@ The versions above are recheck baselines, not permanent pins. Before each releas
 | `PyYAML` | Parse the existing model registry validator input | Exact `6.0.3` with hashes | MIT | PyPI | Existing validator requirement; a custom limited YAML parser is lighter but unnecessary | Validation |
 | `pip-tools` | Generate the hash-pinned validation lock | Exact `7.6.0` when invoked | BSD-3-Clause | PyPI | Reproducible hashes; hand-maintained hash lists are error-prone | Implementation tooling |
 
-G01 deferred production document engines. G02 adopts only qpdf 12.3.2; PDF.js, libvips, OCRmyPDF, Tesseract, LibreOffice, Ghostscript, Go services, model runtimes, cloud/provider SDKs, SQLCipher, and general Tauri filesystem/shell plugins remain deferred. Dependency diagnostics never install or download an engine. The single-instance plugin is Rust-side only and requires no capability-file change.
+G01 deferred production document engines. G02 adopted only qpdf 12.3.2. G03 adopts only the PDF.js/virtualization/browser-test packages listed below; libvips, OCRmyPDF, Tesseract, LibreOffice, Ghostscript, Go services, model runtimes, cloud/provider SDKs, SQLCipher, and general Tauri filesystem/shell plugins remain deferred. Dependency diagnostics never install or download an engine. The single-instance plugin is Rust-side only and requires no capability-file change.
 
 ## G02 qpdf adoption
 
@@ -74,3 +74,20 @@ G01 deferred production document engines. G02 adopts only qpdf 12.3.2; PDF.js, l
 The reviewed resource contains `qpdf.exe`, `qpdf30.dll`, the required Microsoft Visual C++ 14.44.35211 runtime DLLs, full Apache-2.0 text, upstream qpdf license pages and signed provenance. Fifteen controlled files have hard-coded relative paths, sizes and SHA-256 hashes; the resource manifest makes sixteen files and 8,574,799 bytes total. No PATH lookup, installer, registry change, runtime download, updater or alternate engine is allowed.
 
 Cosign 3.0.6 is acquisition/CI verification tooling, not a shipped application runtime. `windows-sys` remains the existing Rust dependency; G02 only enables its AppContainer, token, process and Job Object feature modules, so no Cargo package version or lockfile entry changes.
+
+## G03 viewer and browser-test adoption
+
+All installs used exact versions plus `--ignore-scripts`, so no lifecycle script executed. The lockfile may still record optional platform-package install-script metadata such as `fsevents`; that metadata is not claimed absent. The lockfile contains registry URLs and Subresource Integrity; no runtime package fetch occurs.
+
+| Package | Exact/locked version | Licence | Official registry integrity | Role and boundary |
+|---|---:|---|---|---|
+| `pdfjs-dist` | 6.2.108 | Apache-2.0 | `sha512-YxFb+SQcodN2rnX9Tn3dHYlqfb7NjlzzfONPpJd+AKoKtUjEdevTfbC07d5TcczzOK6261auRkP/M8OBHs9vFQ==` | Production display API/worker from Mozilla PDF.js; 550 files/34,497,725 bytes unpacked; published 2026-07-28; no wrapper/generic UI |
+| `@tanstack/react-virtual` | 3.14.9 | MIT | `sha512-qZyr0FZDP8rDC4WBhsryIZmAd9bveJvFGUJJtskWaew6/0dTRS6wZxnR6VQ5bY2KwL3LjerrHqQLk3a0GKcPXQ==` | Production page/thumbnail virtualization; 9 files/56,532 bytes unpacked; published 2026-07-28 |
+| `@tanstack/virtual-core` | resolved 3.17.7 | MIT | `sha512-bp+v10y65sp2H7WpWfIMyxTNfl8ZVfxFTLRjPIFRryi6FV/J33z4IS53WO4pTk36KlvJ4iLiQz+oaydDC1xbcA==` | Transitive virtualizer core; do not force a predicted version |
+| `@playwright/test` | 1.62.1 | Apache-2.0 | `sha512-DTcUc8qii+cpHvtOwggMtBRMjKZHXYWdw8syRYu2vtzuq4Wxphqq4NfCs5Zt44L6mA8rfDfj+PHnxFc/FeK6mQ==` | Development/test only; published 2026-07-30 |
+| `playwright` / `playwright-core` | resolved 1.62.1 | Apache-2.0 | Lockfile-controlled | Transitive test runner/browser automation |
+| `@napi-rs/canvas` platform set | resolved optional 1.0.6 | MIT | Lockfile-controlled | Optional `pdfjs-dist` Node canvas dependency; not imported by the WebView viewer |
+
+The project-local Playwright acquisition contains Chrome for Testing and Headless Shell 151.0.7922.34 at revision 1234, ffmpeg revision 1011 and winldd revision 1007 under `.cache/ms-playwright/`; it is ignored, not system-wide, and not shipped. CI downloads only this locked test browser. Production remote debugging is absent.
+
+The PDF.js staging script checks package/API/worker version parity and copies only the 191 files in `apps/desktop/scripts/pdfjs-assets-6.2.108.json`. It verifies every source and staged path, byte size and SHA-256 in a fresh sibling, proves exact membership, then atomically replaces the old directory with rollback. QuickJS, no-WASM fallbacks, maps, debug/test/example content and generic viewer UI are excluded. The application makes no CDN or network request. Security review is monthly, version review quarterly, and every update requires explicit dependency approval, lock/integrity/licence review, worker hash/parity proof and the complete browser/WebView/security suite.

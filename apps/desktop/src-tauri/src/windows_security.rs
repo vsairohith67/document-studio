@@ -11,8 +11,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileDispositionInfoEx, GetDiskFreeSpaceExW, GetFileInformationByHandle, MoveFileExW,
     SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FLAG_RANDOM_ACCESS, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, MOVEFILE_WRITE_THROUGH,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,14 @@ pub fn open_for_identity(path: &Path) -> io::Result<File> {
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+pub fn open_viewer_readonly(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .custom_flags(FILE_FLAG_RANDOM_ACCESS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
 }
 

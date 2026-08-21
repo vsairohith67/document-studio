@@ -1,4 +1,4 @@
-# Primary implementation references (checked July 2026)
+# Primary implementation references (checked August 2026)
 
 - Tauri project and security/capability documentation: https://tauri.app/
 - React 19.2 release: https://react.dev/blog/2025/10/01/react-19-2
@@ -6,7 +6,13 @@
 - qpdf 12.3.2 release: https://github.com/qpdf/qpdf/releases/tag/v12.3.2
 - qpdf 12.3.2 CLI: https://qpdf.readthedocs.io/en/12.3/cli.html
 - Sigstore Cosign: https://docs.sigstore.dev/cosign/system_config/installation/
-- PDF.js: https://github.com/mozilla/pdf.js
+- PDF.js 6.2.108 release: https://github.com/mozilla/pdf.js/releases/tag/v6.2.108
+- Official `pdfjs-dist` npm package: https://www.npmjs.com/package/pdfjs-dist/v/6.2.108
+- PDF.js getting started/build layers: https://github.com/mozilla/pdf.js/blob/master/docs/contents/getting_started/index.md
+- Mozilla PDF.js advisory GHSA-wgrm-67xf-hhpq / CVE-2024-4367: https://github.com/mozilla/pdf.js/security/advisories/GHSA-wgrm-67xf-hhpq
+- TanStack Virtual React: https://tanstack.com/virtual/latest/docs/framework/react/react-virtual
+- Playwright browsers: https://playwright.dev/docs/browsers
+- Tauri IPC response: https://docs.rs/tauri/latest/tauri/ipc/struct.Response.html
 - pdf-lib: https://github.com/Hopding/pdf-lib
 - pdfcpu: https://github.com/pdfcpu/pdfcpu
 - libvips: https://github.com/libvips/libvips

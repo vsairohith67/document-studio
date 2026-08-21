@@ -62,3 +62,28 @@ Every tool must implement the same lifecycle.
 - Strict preflight: PDF extension and magic, regular local file, stable identity/size/modified time while copied, unencrypted, strict no-recovery structural check, and at least one page.
 - Verification: owned regular staging file, plausible PDF header/size, SHA-256, strict reopen, unencrypted result, page count equal to the ordinal-aware input sum, and final publication size/hash equality.
 - Lifecycle: the shared `inspect → preflight → estimate → plan → execute → verify → publish → audit → cleanup` stages. qpdf execution reports an indeterminate stage instead of inventing a percentage.
+
+## G03 core page operations `1.0.0`
+
+Every request persists `{ schemaVersion, operationId, sourcePageCount, payload }` as canonical UTF-8 JSON plus SHA-256. `schemaVersion` is 1. UI page labels are 1-based; payload indexes are 0-based. A fresh qpdf page count must equal `sourcePageCount` before execution.
+
+| Operation | Exact payload semantics | Outputs |
+|---|---|---:|
+| `pdf.extract-pages` | Nonempty unique `selectedPageIndexes` in the exact selected order; duplicates rejected | 1; page count equals selection length |
+| `pdf.remove-pages` | Nonempty unique `removedPageIndexes`; ordered complement is exported; at least one page remains | 1; source count minus removed count |
+| `pdf.reorder-pages` | `orderedPageIndexes` is an exact source-page permutation; no missing/duplicate index | 1; source page count |
+| `pdf.rotate-pages` | Unique page/clockwise-degree pairs; degree is 90, 180 or 270; existing rotation is flattened before applying output rotation; temporary view rotation is unrelated | 1; source page count |
+| `pdf.split` | 1–128 unique output names and inclusive ranges that are ordered, contiguous, non-overlapping and partition the complete source | 1–128; each count is end minus start plus one |
+
+The production qpdf vector for each output is direct argv with no shell:
+
+```text
+qpdf.exe
+--empty --suppress-recovery --stream-data=preserve --object-streams=preserve
+--remove-info --remove-metadata --remove-page-labels
+[--rotate=+90:PAGE ...]
+--pages --file=inputs\source-0000.pdf --range=ONE_BASED_PAGE_LIST --
+staging\output-NNNN.pdf
+```
+
+Rotate first creates `temp\rotation-normalized.pdf` with `--flatten-rotation` and uses that private relative path as the input. qpdf sees no original source or destination path. Each staging result requires an owned regular file, PDF magic, nonzero size, SHA-256, strict no-recovery qpdf check, unencrypted state and exact page count. Rotation verification batches selected output pages, asks qpdf for their actual object references, and checks those exact page dictionaries; it never assumes object numbering. Semantic order is proven with deterministic adversarial fixtures, not claimed from arbitrary visual-page identity at runtime. Final size/hash must equal staging evidence.

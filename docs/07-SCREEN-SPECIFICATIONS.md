@@ -49,3 +49,15 @@
 - Progress uses real lifecycle stages and byte/item counts. The qpdf merge phase is indeterminate because qpdf does not provide a trustworthy percentage.
 - Cancel remains available until safe publication commit begins. Success shows the actual collision-resolved path; failures show sanitized actions.
 - A standing notice says document metadata, bookmarks, attachments, interactive forms, and signatures are unsupported/not preserved as supported features, and existing digital signatures will not remain valid.
+
+## G03 Viewer and page organizer
+
+- The persistent workbench has a virtualized thumbnail/selection rail, virtualized vertical page canvas, navigation/zoom/search toolbar, operation inspector and a bottom tray reserved for durable jobs.
+- Empty, opening, first-page-ready, thumbnail-loading, search-indexing, password-required, damaged/unsupported, source-changed and close states use direct language. Viewer loading never appears as durable-job success.
+- The first visible page and thumbnail have priority. Only visible ranges plus small overscan are mounted; off-screen renders are cancelled and evicted canvases/text layers are released.
+- Toolbar controls cover Open, first/previous/page number/next/last, zoom, actual size, fit page, fit width, temporary view rotation, search and close. Every icon button has an accessible name.
+- Search starts returning results before every page is indexed, reports a count plus “still searching”, supports next/previous, and explains that image-only pages need later OCR.
+- Thumbnail/canvas selection supports Shift range and Ctrl toggle. Reorder controls are keyboard accessible and preserve focus. UI labels are 1-based; persisted page indexes are 0-based.
+- The inspector covers Extract, Remove, Reorder, Rotate and Split. Apply/Export is disabled until a valid plan and opaque destination grant exist. Navigation, selection and search do not create history.
+- `Ctrl+O`, `Ctrl+F`, Page Up/Down, Home/End and zoom shortcuts work without a keyboard trap. Visible focus, live announcements, screen-reader page labels, forced colors, reduced motion and 200% zoom are supported.
+- A password can unlock viewing only in memory. Structural operations remain unavailable for encrypted PDFs; the password is never logged, persisted or passed to qpdf.

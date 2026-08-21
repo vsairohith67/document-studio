@@ -79,7 +79,19 @@ Use a reviewed Windows binary or a reproducible build. Prefer dynamic linking an
 
 ### PDF.js
 
-PDF.js is not installed in G01. Adopt and review it in G03 when the viewer is implemented. Keep rendering in the UI process, but move expensive inspection and document operations to workers or Rust commands.
+G03 pins `pdfjs-dist` 6.2.108. `npm ci --ignore-scripts` obtains it only from the exact lock. `npm run stage:pdfjs --workspace @document-studio/desktop` checks API/worker parity and stages the matching legacy worker, CMaps, standard fonts, ICC profiles and WASM under the desktop public assets. Do not edit staged files, use a CDN or add a runtime fallback.
+
+Browser tests use Playwright 1.62.1 and a project-local Chromium cache only:
+
+```powershell
+$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path (Get-Location) '.cache\ms-playwright'
+npm exec --workspace @document-studio/desktop -- playwright install chromium
+npm run test:browser --workspace @document-studio/desktop
+npm run test:webview2 --workspace @document-studio/desktop
+npm run verify:g03 --workspace @document-studio/desktop
+```
+
+The WebView2 smoke enables CDP only for the feature-gated test process. Never add remote-debugging flags to production startup.
 
 ## 4. Optional capability dependencies
 

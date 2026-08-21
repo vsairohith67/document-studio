@@ -10,10 +10,11 @@ use thiserror::Error;
 
 use crate::contracts::{
     DependencyDiagnostic, JobInput, JobOutput, JobProgress, JobRecord, JobState, OperationError,
-    OperationStage, OutputStatus, ProgressUnit, SettingRecord, DEFAULT_HISTORY_RETENTION_DAYS,
-    DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY, HISTORY_RETENTION_SCOPE,
-    LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN, LEGACY_DIAGNOSTIC_COPY_VERSION,
-    MAX_HISTORY_PURGE,
+    OperationStage, OutputStatus, ProgressUnit, SettingRecord, StoredOperationPlan,
+    DEFAULT_HISTORY_RETENTION_DAYS, DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY,
+    HISTORY_RETENTION_SCOPE, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
+    LEGACY_DIAGNOSTIC_COPY_VERSION, MAX_HISTORY_PURGE, OPERATION_PLAN_MAX_BYTES,
+    OPERATION_PLAN_SCHEMA_VERSION,
 };
 use crate::job_engine::can_transition;
 
@@ -49,6 +50,11 @@ pub const FOUNDATION_MIGRATIONS: &[Migration] = &[
         name: "workflows",
         sql: include_str!("../migrations/0003_workflows.sql"),
     },
+    Migration {
+        version: 4,
+        name: "job_operation_plans",
+        sql: include_str!("../migrations/0004_job_operation_plans.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -75,6 +81,10 @@ pub enum DatabaseError {
     LegacyCleanupUnproven,
     #[error("JSON value is not valid for metadata storage")]
     Json(#[from] serde_json::Error),
+    #[error("operation plan is not canonical, bounded, or consistent with the job")]
+    OperationPlanInvalid,
+    #[error("operation plan does not match the owning job operation")]
+    OperationPlanMismatch,
 }
 
 pub struct Database {
@@ -125,6 +135,22 @@ impl Database {
     }
 
     pub fn create_job(&mut self, job: &JobRecord) -> Result<(), DatabaseError> {
+        self.create_job_internal(job, None)
+    }
+
+    pub fn create_job_with_plan(
+        &mut self,
+        job: &JobRecord,
+        plan: &StoredOperationPlan,
+    ) -> Result<(), DatabaseError> {
+        self.create_job_internal(job, Some(plan))
+    }
+
+    fn create_job_internal(
+        &mut self,
+        job: &JobRecord,
+        plan: Option<&StoredOperationPlan>,
+    ) -> Result<(), DatabaseError> {
         let sequence = metadata_i64(job.sequence, "job sequence")?;
         let completed_units = metadata_i64(job.progress.completed_units, "completed units")?;
         let total_units = metadata_i64(job.progress.total_units, "total units")?;
@@ -211,8 +237,103 @@ impl Database {
             )?;
         }
 
+        if let Some(plan) = plan {
+            let plan_bytes = plan.canonical_json.as_bytes();
+            let canonical = serde_json::to_string(&plan.envelope)?;
+            if plan.envelope.schema_version != OPERATION_PLAN_SCHEMA_VERSION
+                || plan.envelope.operation_id != job.operation_id
+                || plan_bytes.len() < 2
+                || plan_bytes.len() > OPERATION_PLAN_MAX_BYTES
+                || canonical != plan.canonical_json
+                || sha256_hex(plan_bytes) != plan.sha256
+            {
+                return Err(DatabaseError::OperationPlanInvalid);
+            }
+            transaction.execute(
+                "INSERT INTO job_operation_plans (
+                    job_id, schema_version, operation_id, source_page_count,
+                    plan_json, plan_sha256, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    job.id,
+                    plan.envelope.schema_version,
+                    plan.envelope.operation_id,
+                    plan.envelope.source_page_count,
+                    plan.canonical_json,
+                    plan.sha256,
+                    plan.created_at,
+                ],
+            )?;
+        }
+
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn get_operation_plan(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<StoredOperationPlan>, DatabaseError> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT plans.schema_version, plans.operation_id, plans.source_page_count,
+                        plans.plan_json, plans.plan_sha256, plans.created_at,
+                        jobs.operation_id
+                 FROM job_operation_plans AS plans
+                 INNER JOIN jobs ON jobs.id = plans.job_id
+                 WHERE plans.job_id = ?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, u8>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            schema_version,
+            operation_id,
+            source_page_count,
+            canonical_json,
+            sha256,
+            created_at,
+            job_operation_id,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        if canonical_json.len() < 2
+            || canonical_json.len() > OPERATION_PLAN_MAX_BYTES
+            || sha256_hex(canonical_json.as_bytes()) != sha256
+        {
+            return Err(DatabaseError::OperationPlanInvalid);
+        }
+        if operation_id != job_operation_id {
+            return Err(DatabaseError::OperationPlanMismatch);
+        }
+        let envelope: crate::contracts::OperationPlanEnvelope =
+            serde_json::from_str(&canonical_json)?;
+        if schema_version != OPERATION_PLAN_SCHEMA_VERSION
+            || envelope.schema_version != schema_version
+            || envelope.operation_id != operation_id
+            || envelope.source_page_count != source_page_count
+            || serde_json::to_string(&envelope)? != canonical_json
+        {
+            return Err(DatabaseError::OperationPlanInvalid);
+        }
+        Ok(Some(StoredOperationPlan {
+            envelope,
+            canonical_json,
+            sha256,
+            created_at,
+        }))
     }
 
     pub fn get_job(&self, id: &str) -> Result<Option<JobRecord>, DatabaseError> {
@@ -440,13 +561,25 @@ impl Database {
         sha256: &str,
         verified_at: &str,
     ) -> Result<(), DatabaseError> {
+        self.set_output_staging_at(id, 0, staging_path, size_bytes, sha256, verified_at)
+    }
+
+    pub fn set_output_staging_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        staging_path: &str,
+        size_bytes: u64,
+        sha256: &str,
+        verified_at: &str,
+    ) -> Result<(), DatabaseError> {
         let size_bytes = metadata_i64(size_bytes, "output size")?;
         let changed = self.connection.execute(
             "UPDATE job_outputs
              SET staging_path = ?1, size_bytes = ?2, sha256 = ?3,
                  status = 'verified', verified_at = ?4
-             WHERE job_id = ?5 AND ordinal = 0",
-            params![staging_path, size_bytes, sha256, verified_at, id],
+             WHERE job_id = ?5 AND ordinal = ?6",
+            params![staging_path, size_bytes, sha256, verified_at, id, ordinal],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
@@ -463,6 +596,28 @@ impl Database {
         size_bytes: u64,
         sha256: &str,
     ) -> Result<(), DatabaseError> {
+        self.reserve_publication_attempt_at(
+            id,
+            0,
+            resolved_name,
+            final_path,
+            partial_path,
+            size_bytes,
+            sha256,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_publication_attempt_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        resolved_name: &str,
+        final_path: &str,
+        partial_path: &str,
+        size_bytes: u64,
+        sha256: &str,
+    ) -> Result<(), DatabaseError> {
         let size_bytes = metadata_i64(size_bytes, "output size")?;
         let transaction = self
             .connection
@@ -471,7 +626,7 @@ impl Database {
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, partial_path = ?3,
                  size_bytes = ?4, sha256 = ?5
-             WHERE job_id = ?6 AND ordinal = 0 AND partial_path IS NULL
+             WHERE job_id = ?6 AND ordinal = ?7 AND partial_path IS NULL
                AND status IN ('verified', 'publishing')",
             params![
                 resolved_name,
@@ -479,7 +634,8 @@ impl Database {
                 partial_path,
                 size_bytes,
                 sha256,
-                id
+                id,
+                ordinal,
             ],
         )?;
         let job_changed = transaction.execute(
@@ -500,10 +656,19 @@ impl Database {
         id: &str,
         expected_partial_path: &str,
     ) -> Result<(), DatabaseError> {
+        self.clear_owned_partial_at(id, 0, expected_partial_path)
+    }
+
+    pub fn clear_owned_partial_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        expected_partial_path: &str,
+    ) -> Result<(), DatabaseError> {
         let changed = self.connection.execute(
             "UPDATE job_outputs SET partial_path = NULL
-             WHERE job_id = ?1 AND ordinal = 0 AND partial_path = ?2",
-            params![id, expected_partial_path],
+             WHERE job_id = ?1 AND ordinal = ?2 AND partial_path = ?3",
+            params![id, ordinal, expected_partial_path],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
@@ -517,17 +682,27 @@ impl Database {
         expected_partial_path: &str,
         ownership_result_code: &str,
     ) -> Result<(), DatabaseError> {
+        self.activate_owned_partial_at(id, 0, expected_partial_path, ownership_result_code)
+    }
+
+    pub fn activate_owned_partial_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        expected_partial_path: &str,
+        ownership_result_code: &str,
+    ) -> Result<(), DatabaseError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let reserved: bool = transaction.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM jobs
-                JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = 0
+                JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = ?3
                 WHERE jobs.id = ?1 AND jobs.state IN ('verifying', 'publishing')
                   AND job_outputs.partial_path = ?2
              )",
-            params![id, expected_partial_path],
+            params![id, expected_partial_path, ordinal],
             |row| row.get(0),
         )?;
         if !reserved {
@@ -566,17 +741,27 @@ impl Database {
         expected_partial_path: &str,
         ownership_result_code: &str,
     ) -> Result<bool, DatabaseError> {
+        self.owned_partial_is_activated_at(id, 0, expected_partial_path, ownership_result_code)
+    }
+
+    pub fn owned_partial_is_activated_at(
+        &self,
+        id: &str,
+        ordinal: u32,
+        expected_partial_path: &str,
+        ownership_result_code: &str,
+    ) -> Result<bool, DatabaseError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM jobs
-                    JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = 0
+                    JOIN job_outputs ON job_outputs.job_id = jobs.id AND job_outputs.ordinal = ?4
                     JOIN job_stage_runs ON job_stage_runs.job_id = jobs.id
                     WHERE jobs.id = ?1 AND job_outputs.partial_path = ?2
                       AND job_stage_runs.stage = 'publish'
                       AND job_stage_runs.safe_result_code = ?3
                  )",
-                params![id, expected_partial_path, ownership_result_code],
+                params![id, expected_partial_path, ownership_result_code, ordinal],
                 |row| row.get(0),
             )
             .map_err(Into::into)
@@ -587,11 +772,20 @@ impl Database {
         id: &str,
         expected_staging_path: Option<&str>,
     ) -> Result<(), DatabaseError> {
+        self.clear_staging_path_at(id, 0, expected_staging_path)
+    }
+
+    pub fn clear_staging_path_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        expected_staging_path: Option<&str>,
+    ) -> Result<(), DatabaseError> {
         let changed = self.connection.execute(
             "UPDATE job_outputs SET staging_path = NULL
-             WHERE job_id = ?1 AND ordinal = 0
-               AND ((?2 IS NULL AND staging_path IS NULL) OR staging_path = ?2)",
-            params![id, expected_staging_path],
+             WHERE job_id = ?1 AND ordinal = ?2
+               AND ((?3 IS NULL AND staging_path IS NULL) OR staging_path = ?3)",
+            params![id, ordinal, expected_staging_path],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
@@ -600,6 +794,14 @@ impl Database {
     }
 
     pub fn clear_unpublished_intent(&mut self, id: &str) -> Result<(), DatabaseError> {
+        self.clear_unpublished_intent_at(id, 0)
+    }
+
+    pub fn clear_unpublished_intent_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+    ) -> Result<(), DatabaseError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -607,14 +809,15 @@ impl Database {
             "UPDATE job_outputs
              SET resolved_name = NULL, final_path = NULL,
                  status = CASE WHEN status = 'publishing' THEN 'verified' ELSE status END
-             WHERE job_id = ?1 AND ordinal = 0 AND partial_path IS NULL
+             WHERE job_id = ?1 AND ordinal = ?2 AND partial_path IS NULL
                AND status IN ('planned', 'staged', 'verified', 'publishing')",
-            [id],
+            params![id, ordinal],
         )?;
         let job_changed = transaction.execute(
             "UPDATE jobs SET resolved_output_name = NULL, updated_at = ?1, version = version + 1
              WHERE id = ?2 AND state IN (
-                'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying', 'interrupted'
+                'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying',
+                'publishing', 'interrupted'
              )",
             params![now(), id],
         )?;
@@ -633,6 +836,19 @@ impl Database {
         size_bytes: u64,
         sha256: &str,
     ) -> Result<(), DatabaseError> {
+        self.set_publication_intent_at(id, 0, resolved_name, final_path, size_bytes, sha256)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_publication_intent_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        resolved_name: &str,
+        final_path: &str,
+        size_bytes: u64,
+        sha256: &str,
+    ) -> Result<(), DatabaseError> {
         let size_bytes = metadata_i64(size_bytes, "output size")?;
         let transaction = self
             .connection
@@ -641,9 +857,9 @@ impl Database {
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, size_bytes = ?3, sha256 = ?4,
                  status = 'publishing'
-             WHERE job_id = ?5 AND ordinal = 0 AND partial_path IS NOT NULL
+             WHERE job_id = ?5 AND ordinal = ?6 AND partial_path IS NOT NULL
                AND resolved_name = ?1 AND final_path = ?2",
-            params![resolved_name, final_path, size_bytes, sha256, id],
+            params![resolved_name, final_path, size_bytes, sha256, id, ordinal],
         )?;
         let state_changed = transaction.execute(
             "UPDATE jobs SET resolved_output_name = ?1, updated_at = ?2, version = version + 1
@@ -665,6 +881,19 @@ impl Database {
         size_bytes: u64,
         sha256: &str,
     ) -> Result<(), DatabaseError> {
+        self.begin_publication_at(id, 0, resolved_name, final_path, size_bytes, sha256)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_publication_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        resolved_name: &str,
+        final_path: &str,
+        size_bytes: u64,
+        sha256: &str,
+    ) -> Result<(), DatabaseError> {
         let size_bytes = metadata_i64(size_bytes, "output size")?;
         let transaction = self
             .connection
@@ -681,9 +910,9 @@ impl Database {
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, size_bytes = ?3, sha256 = ?4,
                  status = 'publishing'
-             WHERE job_id = ?5 AND ordinal = 0 AND status = 'verified'
+             WHERE job_id = ?5 AND ordinal = ?6 AND status = 'verified'
                AND partial_path IS NOT NULL AND resolved_name = ?1 AND final_path = ?2",
-            params![resolved_name, final_path, size_bytes, sha256, id],
+            params![resolved_name, final_path, size_bytes, sha256, id, ordinal],
         )?;
         let state_changed = transaction.execute(
             "UPDATE jobs
@@ -708,14 +937,36 @@ impl Database {
         sha256: &str,
         expected_partial_path: Option<&str>,
     ) -> Result<(), DatabaseError> {
+        self.set_output_published_at(
+            id,
+            0,
+            resolved_name,
+            final_path,
+            size_bytes,
+            sha256,
+            expected_partial_path,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_output_published_at(
+        &mut self,
+        id: &str,
+        ordinal: u32,
+        resolved_name: &str,
+        final_path: &str,
+        size_bytes: u64,
+        sha256: &str,
+        expected_partial_path: Option<&str>,
+    ) -> Result<(), DatabaseError> {
         let size_bytes = metadata_i64(size_bytes, "output size")?;
         let published_at = now();
         let changed = self.connection.execute(
             "UPDATE job_outputs
              SET resolved_name = ?1, final_path = ?2, size_bytes = ?3, sha256 = ?4,
                  status = 'published', published_at = ?5, partial_path = NULL
-             WHERE job_id = ?6 AND ordinal = 0
-               AND ((?7 IS NULL AND partial_path IS NULL) OR partial_path = ?7)",
+             WHERE job_id = ?6 AND ordinal = ?7
+               AND ((?8 IS NULL AND partial_path IS NULL) OR partial_path = ?8)",
             params![
                 resolved_name,
                 final_path,
@@ -723,6 +974,7 @@ impl Database {
                 sha256,
                 published_at,
                 id,
+                ordinal,
                 expected_partial_path,
             ],
         )?;
@@ -736,13 +988,21 @@ impl Database {
         &self,
         id: &str,
     ) -> Result<Option<PublicationEvidence>, DatabaseError> {
+        self.publication_evidence_at(id, 0)
+    }
+
+    pub fn publication_evidence_at(
+        &self,
+        id: &str,
+        ordinal: u32,
+    ) -> Result<Option<PublicationEvidence>, DatabaseError> {
         self.connection
             .query_row(
                 "SELECT final_path, resolved_name, size_bytes, sha256, status, partial_path
-                 FROM job_outputs WHERE job_id = ?1 AND ordinal = 0
+                 FROM job_outputs WHERE job_id = ?1 AND ordinal = ?2
                    AND final_path IS NOT NULL AND resolved_name IS NOT NULL
                    AND size_bytes IS NOT NULL AND sha256 IS NOT NULL",
-                [id],
+                params![id, ordinal],
                 |row| {
                     let status: String = row.get(4)?;
                     let status = OutputStatus::from_contract(&status).ok_or_else(|| {
@@ -1170,14 +1430,17 @@ impl Database {
         if next != JobState::Completed {
             return Ok(true);
         }
-        let published: i64 = self.connection.query_row(
-            "SELECT COUNT(*) FROM job_outputs
-             WHERE job_id = ?1 AND status = 'published' AND final_path IS NOT NULL
-               AND size_bytes IS NOT NULL AND sha256 IS NOT NULL AND published_at IS NOT NULL",
+        let (expected, published): (i64, i64) = self.connection.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN status = 'published' AND final_path IS NOT NULL
+                                      AND size_bytes IS NOT NULL AND sha256 IS NOT NULL
+                                      AND published_at IS NOT NULL
+                             THEN 1 ELSE 0 END)
+             FROM job_outputs WHERE job_id = ?1",
             [id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        Ok(published > 0)
+        Ok(expected > 0 && published == expected)
     }
 
     fn load_inputs(&self, id: &str) -> Result<Vec<JobInput>, DatabaseError> {

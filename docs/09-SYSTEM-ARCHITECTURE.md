@@ -34,3 +34,11 @@ The local desktop should not depend on the future Go service. Both implement the
 The verified bundled qpdf 12.3.2 executable runs through direct `CreateProcessW` arguments in the fixed zero-capability `DocumentStudio.PdfEngine.Qpdf.V1` AppContainer. A private Job Object enforces kill-on-close, one active process, a 2 GiB process-memory limit, and owned termination. There is no shell, network capability, PATH discovery, random profile, or unsandboxed fallback.
 
 Output stays in the owned workspace until Rust file checks, a new SHA-256/size read, strict qpdf reopen, encryption check, and exact page-count sum pass. G01 then performs destination-local no-overwrite publication and final hash/size equality. Restart recovery never resumes a merge.
+
+## G03 viewer and organizer path
+
+The Viewer is a second workbench mode; it does not replace PDF Merge or any IPC v1 command. A backend native dialog or Rust-side Tauri drop opens one validated PDF through a retained read-only Windows handle that denies write/delete sharing. An opaque session/generation maps to that handle and identity record. PDF.js receives only raw bounded range responses and same-origin packaged assets; neither PDF.js nor React receives the source path.
+
+React lazy-loads the viewer chunk, PDF.js legacy ESM API and matching worker. TanStack Virtual mounts viewport pages/thumbnails plus small overscan; measured scroll-container geometry marks actual visibility independently, so overscan cannot define the current page. Candidate loading retains separate ownership until page-one metadata validates, then swaps atomically. Render tasks, canvases, text layers and indexing are cancellable and bounded; Close disposes active and candidate PDF.js/Rust sessions.
+
+Apply/Export converts ephemeral organizer state into one durable operation-plan envelope. Rust pins the viewer handle, writes one ASCII snapshot, rechecks qpdf page count, runs one of five registered operations through the accepted AppContainer/Job Object, independently verifies staging outputs, and calls G01 publication. Split inserts every output record before execution and never claims cross-file atomicity.

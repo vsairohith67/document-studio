@@ -54,6 +54,7 @@ pub const QPDF_PROCESS_LIMIT: u32 = 1;
 pub const QPDF_PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const OWNED_PROCESS_TERMINATION_CODE: u32 = 0xD502_0001;
 pub const CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
+pub const WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT: usize = 32_767;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,6 +95,8 @@ pub enum SandboxError {
     },
     #[error("the process executable or argument contains an embedded NUL")]
     EmbeddedNul,
+    #[error("the process command line exceeds the Windows CreateProcess limit")]
+    CommandLineTooLong,
     #[error("the sandbox process token is not an AppContainer token")]
     NotAppContainer,
     #[error("the sandbox process AppContainer SID does not match the fixed profile")]
@@ -1063,7 +1066,17 @@ fn build_command_line(
         append_quoted_argument(&mut command_line, argument)?;
     }
     command_line.push(0);
+    if command_line.len() >= WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT {
+        return Err(SandboxError::CommandLineTooLong);
+    }
     Ok(command_line)
+}
+
+pub fn validate_command_line_budget(
+    executable: &OsStr,
+    arguments: &[OsString],
+) -> Result<usize, SandboxError> {
+    build_command_line(executable, arguments).map(|command_line| command_line.len())
 }
 
 fn append_quoted_argument(output: &mut Vec<u16>, argument: &OsStr) -> Result<(), SandboxError> {
@@ -1235,6 +1248,21 @@ mod tests {
             text,
             "\"C:\\Program Files\\probe.exe\" plain \"has space\" \"quote\\\"inside\""
         );
+    }
+
+    #[test]
+    fn command_line_budget_accepts_near_limit_and_rejects_limit_or_larger() {
+        let executable = OsStr::new("qpdf.exe");
+        let fixed = validate_command_line_budget(executable, &[]).unwrap();
+        let accepted =
+            OsString::from("a".repeat(WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT - fixed - 2));
+        assert!(validate_command_line_budget(executable, &[accepted]).is_ok());
+        let rejected =
+            OsString::from("a".repeat(WINDOWS_CREATEPROCESS_COMMAND_LINE_LIMIT - fixed - 1));
+        assert!(matches!(
+            validate_command_line_budget(executable, &[rejected]),
+            Err(SandboxError::CommandLineTooLong)
+        ));
     }
 
     #[test]

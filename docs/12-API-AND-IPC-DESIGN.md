@@ -55,3 +55,20 @@ SQLite-backed `jobs_get` and `history_list` are authoritative. The client ignore
 `jobs_create` is a discriminated request: `diagnostic.copy` requires one input and `pdf.merge` requires 2–128. `files_inspect` accepts up to 128 paths and reports `application/pdf` only when extension and header inspection agree. Rust validates every path and ordinal again.
 
 The frontend submits its displayed array unchanged. It freezes the list after creation, follows `document-studio-job-progress-v1`, and reconciles from `jobs_get` after reload or an event gap. Native drop paths pass through the same inspection command as the file chooser. No general filesystem, shell, HTTP, or expanded Tauri capability is exposed.
+
+## G03 viewer and core-operation IPC
+
+G03 adds commands alongside—never instead of—the accepted command set:
+
+- `viewer_open_dialog` opens one PDF in Rust and returns sanitized metadata or cancel.
+- `viewer_read_range` accepts only opaque session ID/generation and `begin/end`; it returns `tauri::ipc::Response` raw bytes. Normal chunks are 256 KiB, the hard maximum is 1 MiB and four requests may be in flight.
+- `viewer_close` invalidates the session/generation and retained handle.
+- `viewer_set_drop_enabled` lets Rust know when the viewer owns Tauri window drop events.
+- `viewer_choose_destination` and `viewer_revoke_destination` manage opaque directory grants.
+- `jobs_create_core_pdf` accepts the opaque session/generation, destination grant and typed page-plan envelope.
+
+Rust-side `WindowEvent::DragDrop` validates a single path and emits `document-studio-viewer-document-opened-v1` with sanitized metadata or `document-studio-viewer-open-failed-v1` with a safe error. Document Studio's custom events contain no dropped path. Existing G02 frontend drop behavior and `dialog:allow-open` remain intact.
+
+The viewer APIs expose no file URL, raw path, shell, HTTP, custom protocol or general filesystem handle. A test-only `viewer_open_test_fixture` command and WebView2 remote-debugging flags compile only under `test-runtime`; production command registration and startup strip them.
+
+Durable G03 jobs keep canonical source, workspace and destination paths inside Rust/SQLite because execution and recovery need them. Before a G03 job record crosses `jobs_create_core_pdf`, `jobs_get`, `jobs_resolve_interrupted` or `history_list`, Rust clears the destination/source/canonical path strings and removes staging/partial/final path fields. Operation names, safe display filenames, state, progress, hashes and output status remain available. The accepted G01/G02 command behavior is unchanged.

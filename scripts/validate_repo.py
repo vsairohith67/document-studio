@@ -28,6 +28,7 @@ required = [
     'codex/goals/G00-readiness-audit.md',
     'codex/goals/G01-foundation.md',
     'codex/goals/G02-pdf-merge.md',
+    'codex/goals/G03-core-pdf-viewer.md',
     'diagrams/goal-mode-execution.svg',
     'notion-import/pages/25-GOAL-MODE-BUILD-PLAYBOOK.md',
     'docs/feature-catalog.csv',
@@ -47,10 +48,15 @@ required = [
     'apps/desktop/src-tauri/migrations/0001_metadata.sql',
     'apps/desktop/src-tauri/migrations/0002_jobs.sql',
     'apps/desktop/src-tauri/migrations/0003_workflows.sql',
+    'apps/desktop/src-tauri/migrations/0004_job_operation_plans.sql',
     'docs/adr/ADR-005-storage-ownership-and-provider-persistence.md',
     'docs/adr/ADR-006-foundation-dependencies-and-sqlite.md',
     'docs/adr/ADR-007-durable-publication-and-recovery.md',
+    'docs/adr/ADR-010-pdfjs-local-rendering-security.md',
+    'docs/adr/ADR-011-opaque-viewer-document-sessions.md',
+    'docs/adr/ADR-012-versioned-page-plans-and-multi-output-publication.md',
     'docs/implementation-log/G01-foundation.md',
+    'docs/implementation-log/G03-viewer-core-pdf.md',
     'docs/implementation-log/assets/g01-tauri-dev-launch.png',
     'Cargo.toml',
     'Cargo.lock',
@@ -164,13 +170,117 @@ manifest_text = '\n'.join([
     (ROOT / 'apps/desktop/package.json').read_text(encoding='utf-8'),
     (ROOT / 'apps/desktop/src-tauri/Cargo.toml').read_text(encoding='utf-8'),
 ])
-for prohibited in ['pdfjs-dist', 'qpdf', 'libvips', 'ocrmypdf', 'tesseract', 'libreoffice']:
+for prohibited in ['qpdf', 'libvips', 'ocrmypdf', 'tesseract', 'libreoffice']:
     if re.search(rf'(^|["\s]){re.escape(prohibited)}(["\s=:]|$)', manifest_text, re.IGNORECASE | re.MULTILINE):
-        raise SystemExit(f'Out-of-scope G01 dependency found: {prohibited}')
+        raise SystemExit(f'Out-of-scope G03 dependency found: {prohibited}')
+
+approved_g03_dependencies = {
+    'pdfjs-dist': '6.2.108',
+    '@tanstack/react-virtual': '3.14.9',
+}
+for dependency, version in approved_g03_dependencies.items():
+    if package.get('dependencies', {}).get(dependency) != version:
+        raise SystemExit(f'G03 dependency {dependency} must be pinned exactly to {version}')
+if package.get('devDependencies', {}).get('@playwright/test') != '1.62.1':
+    raise SystemExit('G03 browser tests must pin @playwright/test exactly to 1.62.1')
 
 for migration in (ROOT / 'apps/desktop/src-tauri/migrations').glob('*.sql'):
-    if re.search(r'\bBLOB\b', migration.read_text(encoding='utf-8'), re.IGNORECASE):
+    migration_text = migration.read_text(encoding='utf-8')
+    if re.search(r'^\s*[A-Za-z_][A-Za-z0-9_]*\s+BLOB\b', migration_text, re.IGNORECASE | re.MULTILINE):
         raise SystemExit(f'Metadata-only migration contains a BLOB column: {migration.relative_to(ROOT)}')
+
+plan_migration = (ROOT / 'apps/desktop/src-tauri/migrations/0004_job_operation_plans.sql').read_text(encoding='utf-8')
+if 'length(CAST(plan_json AS BLOB)) BETWEEN 2 AND 65536' not in plan_migration:
+    raise SystemExit('G03 plan migration is missing the approved exact UTF-8 byte-length constraint')
+
+
+def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
+    state = str(inputs['state']).lower()
+    for stale in [
+        'g03 ready to stage',
+        'pre-stage acceptance audit',
+        'no g03 changes are staged or published',
+        'no staging, commit, push, pull request',
+        'no commit, push or pr',
+    ]:
+        if stale in state:
+            raise SystemExit(f'Stale G03 repository-state claim remains: {stale}')
+    for false_status in ['g03 is complete', 'g03 is merged', 'g03: complete', 'g04 has started', 'g04 is started']:
+        if false_status in state:
+            raise SystemExit(f'False G03/G04 status claim remains: {false_status}')
+    for required in ['draft pr #6', 'changes required', 'g04 remains blocked']:
+        if required not in state:
+            raise SystemExit(f'G03 review status is missing required truth: {required}')
+
+    manifest = inputs['asset_manifest']
+    if not isinstance(manifest, dict) or manifest.get('version') != '6.2.108':
+        raise SystemExit('G03 exact PDF.js asset manifest is missing or has the wrong version')
+    files = manifest.get('files')
+    if not isinstance(files, list) or len(files) != 191:
+        raise SystemExit('G03 exact PDF.js manifest must contain the reviewed 191-file allow-list')
+    paths = [entry.get('path') for entry in files if isinstance(entry, dict)]
+    if len(paths) != len(set(paths)) or 'pdf.worker.mjs' not in paths:
+        raise SystemExit('G03 PDF.js manifest paths must be unique and include the worker')
+    staging = str(inputs['staging'])
+    verifier = str(inputs['verifier'])
+    for required in ['verifyStagedDirectory', 'faultAfterBackup', 'rename(temporary, outputRoot)']:
+        if required not in staging:
+            raise SystemExit(f'G03 atomic exact staging is missing {required}')
+    for required in [
+        'Compare-Object $expectedPdfPaths $actualPdfPaths',
+        'Get-Sha256File',
+        '[System.Security.Cryptography.SHA256]::Create()',
+        'pdfjs-assets-6.2.108.json',
+    ]:
+        if required not in verifier:
+            raise SystemExit(f'G03 independent PDF.js verifier is missing {required}')
+
+    viewer = str(inputs['viewer'])
+    surface = str(inputs['surface'])
+    viewer_tests = str(inputs['viewer_tests'])
+    if 'all virtualizer items are visible' in state or 'all virtual items are visible pages' in state:
+        raise SystemExit('G03 documentation conflates mounted overscan with visible pages')
+    for required in ['visiblePageMetrics', 'intersectionArea', 'data-visible', 'actualVisiblePages']:
+        if required not in viewer:
+            raise SystemExit(f'G03 true viewport visibility implementation is missing {required}')
+    for required in ['MAX_CANVAS_PIXELS', 'MAX_CANVAS_WIDTH', 'MAX_CANVAS_HEIGHT', 'safeCanvasAllocation']:
+        if required not in surface and required not in str(inputs['session']):
+            raise SystemExit(f'G03 fail-closed canvas boundary is missing {required}')
+    if '16_777_216' not in str(inputs['session']) or '8_192' not in str(inputs['session']):
+        raise SystemExit('G03 canonical canvas limits changed or are absent')
+    for required in ['event.altKey', 'onReorder', 'reorderSelectedPages']:
+        if required not in viewer + surface:
+            raise SystemExit(f'G03 Alt+Arrow organizer implementation is missing {required}')
+    if 'Alt+Arrow block reorder' not in viewer_tests:
+        raise SystemExit('G03 Alt+Arrow browser regression is missing')
+    for required in ['candidateDocumentRef', 'disposeOwnedDocument', 'previousActive']:
+        if required not in viewer:
+            raise SystemExit(f'G03 transactional candidate replacement is missing {required}')
+    runtime = str(inputs['runtime'])
+    for required in ['to_ascii_lowercase', 'contains("--remote-debugging-")', 'contains("--remote-allow-origins")']:
+        if required not in runtime:
+            raise SystemExit(f'G03 production remote-debug family sanitizer is missing {required}')
+    if 'renderForms: false' not in str(inputs['session']) or 'AnnotationMode.DISABLE' not in str(inputs['session']):
+        raise SystemExit('G03 form/annotation rendering boundary is not explicit')
+
+
+g03_state_paths = [
+    ROOT / 'MANIFEST.json',
+    ROOT / 'codex/prompts/03-core-pdf.md',
+    ROOT / 'docs/implementation-log/G03-viewer-core-pdf.md',
+]
+G03_VALIDATION_INPUTS = {
+    'state': '\n'.join(path.read_text(encoding='utf-8') for path in g03_state_paths),
+    'asset_manifest': json.loads((ROOT / 'apps/desktop/scripts/pdfjs-assets-6.2.108.json').read_text(encoding='utf-8')),
+    'staging': (ROOT / 'apps/desktop/scripts/stage-pdfjs-assets.mjs').read_text(encoding='utf-8'),
+    'verifier': (ROOT / 'apps/desktop/scripts/verify-g03-boundaries.ps1').read_text(encoding='utf-8'),
+    'viewer': (ROOT / 'apps/desktop/src/viewer/ViewerWorkspace.tsx').read_text(encoding='utf-8'),
+    'surface': (ROOT / 'apps/desktop/src/viewer/PageSurface.tsx').read_text(encoding='utf-8'),
+    'session': (ROOT / 'apps/desktop/src/viewer/pdfSession.ts').read_text(encoding='utf-8'),
+    'viewer_tests': (ROOT / 'apps/desktop/e2e/viewer.spec.ts').read_text(encoding='utf-8'),
+    'runtime': (ROOT / 'apps/desktop/src-tauri/src/lib.rs').read_text(encoding='utf-8'),
+}
+validate_g03_acceptance_consistency(G03_VALIDATION_INPUTS)
 
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):
@@ -181,5 +291,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01 foundations and G02 dependency/document consistency verified.'
+    f'{len(rows)} feature entries found; G01/G02 compatibility and G03 dependency, migration and document consistency verified.'
 )

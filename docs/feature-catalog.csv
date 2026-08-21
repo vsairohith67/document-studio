@@ -1,13 +1,13 @@
 category,feature,description,phase,engine,platforms,priority
 Organize,Merge PDF,"G02 combines 2–128 PDFs in exact order as a verified page-only result; page ranges, images, bookmarks and outline preservation remain later work",1,qpdf,"Desktop, Web",Must
-Organize,Split by ranges,Create files from explicit page ranges,1,qpdf,"Desktop, Web",Must
-Organize,Split every N pages,Split at a fixed page interval,1,qpdf,"Desktop, Web",Must
+Organize,Split by ranges,"G03 creates up to 128 verified PDFs from an ordered, non-overlapping full-document range partition",1,qpdf,"Desktop, Web",Must
+Organize,Split every N pages,"G03 splits by a fixed positive page count into up to 128 verified outputs",1,qpdf,"Desktop, Web",Must
 Organize,Split by bookmarks,Use document outline levels as boundaries,2,qpdf,"Desktop, Web",Should
 Organize,Split by target size,Estimate boundaries to produce size-bounded parts,3,qpdf + estimator,"Desktop, Web",Could
-Organize,Extract pages,"Export selected pages as one PDF, individual PDFs, or ZIP",1,qpdf,"Desktop, Web",Must
-Organize,Remove pages,Delete thumbnail/range selections with undo before export,1,qpdf,"Desktop, Web",Must
-Organize,Reorder pages,"Drag, reverse, odd/even regroup, duplicate, and move pages",1,qpdf,"Desktop, Web",Must
-Organize,Rotate pages,Rotate selected/odd/even/all pages 90/180/270 degrees,1,qpdf,"Desktop, Web",Must
+Organize,Extract pages,"G03 exports one verified PDF from a nonempty unique selection in selected order",1,qpdf,"Desktop, Web",Must
+Organize,Remove pages,"G03 exports the ordered complement of selected pages and requires at least one page to remain",1,qpdf,"Desktop, Web",Must
+Organize,Reorder pages,"G03 exports one exact page permutation with no missing or duplicate page",1,qpdf,"Desktop, Web",Must
+Organize,Rotate pages,"G03 normalizes existing rotation and rotates unique selected pages clockwise by 90/180/270 degrees",1,qpdf,"Desktop, Web",Must
 Organize,Insert blank pages,Insert configurable blank page sizes and orientation,2,pdf-lib/qpdf,"Desktop, Web",Should
 Organize,Interleave documents,Alternate pages from two or more files,2,qpdf,"Desktop, Web",Should
 Organize,N-up and booklet,"Impose pages for 2-up, 4-up, and booklet printing",5,pdfcpu/print engine,"Desktop, Web",Could

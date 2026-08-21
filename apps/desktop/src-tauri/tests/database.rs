@@ -1,12 +1,20 @@
 use std::fs;
 
 use chrono::{TimeZone, Utc};
-use document_studio_lib::contracts::{JobRecord, JobState, OperationStage};
+use document_studio_lib::contracts::{
+    CorePdfPlanPayload, JobRecord, JobState, OperationPlanEnvelope, OperationStage, OutputRotation,
+    OutputStatus, PageRotation, RotatePagesPlan, SplitOutputRange, SplitPlan, StoredOperationPlan,
+    CORE_PDF_OPERATION_VERSION, PDF_EXTRACT_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
+    PDF_SPLIT_OPERATION_ID,
+};
 use document_studio_lib::database::{
     apply_migrations, configure_connection, Database, DatabaseError, Migration,
+    FOUNDATION_MIGRATIONS,
 };
-use rusqlite::Connection;
+use document_studio_lib::page_plan::validate_plan;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 
 const GOLDEN: &str =
@@ -17,13 +25,145 @@ fn sample_job() -> JobRecord {
     serde_json::from_value(fixture["job"].clone()).unwrap()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn sample_split_job(id: &str) -> (JobRecord, StoredOperationPlan) {
+    let mut job = sample_job();
+    job.id = id.to_owned();
+    job.operation_id = PDF_SPLIT_OPERATION_ID.to_owned();
+    job.operation_version = CORE_PDF_OPERATION_VERSION.to_owned();
+    job.requested_output_name = "part-001.pdf".to_owned();
+    job.outputs[0].requested_name = "part-001.pdf".to_owned();
+    job.outputs[0].mime_type = "application/pdf".to_owned();
+    job.outputs[0].status = OutputStatus::Planned;
+    let mut second = job.outputs[0].clone();
+    second.ordinal = 1;
+    second.requested_name = "part-002.pdf".to_owned();
+    job.outputs.push(second);
+    let validated = validate_plan(OperationPlanEnvelope {
+        schema_version: 1,
+        operation_id: PDF_SPLIT_OPERATION_ID.to_owned(),
+        source_page_count: 2,
+        payload: CorePdfPlanPayload::Split(SplitPlan {
+            ranges: vec![
+                SplitOutputRange {
+                    start_page_index: 0,
+                    end_page_index: 0,
+                    output_name: "part-001.pdf".to_owned(),
+                },
+                SplitOutputRange {
+                    start_page_index: 1,
+                    end_page_index: 1,
+                    output_name: "part-002.pdf".to_owned(),
+                },
+            ],
+        }),
+    })
+    .unwrap();
+    (job, validated.stored)
+}
+
+fn insert_version_three_job(connection: &Connection, job: &JobRecord) {
+    connection
+        .execute(
+            "INSERT INTO jobs (
+                id, operation_id, operation_version, state, stage, sequence,
+                completed_units, total_units, unit, destination_directory,
+                requested_output_name, resolved_output_name, cancellation_requested_at,
+                created_at, updated_at, finished_at, version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                job.id,
+                job.operation_id,
+                job.operation_version,
+                job.state.as_str(),
+                job.stage.map(OperationStage::as_str),
+                i64::try_from(job.sequence).unwrap(),
+                i64::try_from(job.progress.completed_units).unwrap(),
+                i64::try_from(job.progress.total_units).unwrap(),
+                job.progress.unit.as_str(),
+                job.destination_directory,
+                job.requested_output_name,
+                job.resolved_output_name,
+                job.cancellation_requested_at,
+                job.created_at,
+                job.updated_at,
+                job.finished_at,
+                i64::try_from(job.version).unwrap(),
+            ],
+        )
+        .unwrap();
+    for input in &job.inputs {
+        connection
+            .execute(
+                "INSERT INTO job_inputs (
+                    job_id, ordinal, display_name, source_path, canonical_path, file_identity,
+                    size_bytes, modified_at, mime_type, sha256, password_reference
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    job.id,
+                    input.ordinal,
+                    input.display_name,
+                    input.source_path,
+                    input.canonical_path,
+                    input.file_identity,
+                    i64::try_from(input.size_bytes).unwrap(),
+                    input.modified_at,
+                    input.mime_type,
+                    input.sha256,
+                    input.password_reference,
+                ],
+            )
+            .unwrap();
+    }
+    for output in &job.outputs {
+        connection
+            .execute(
+                "INSERT INTO job_outputs (
+                    job_id, ordinal, requested_name, resolved_name, staging_path, partial_path,
+                    final_path, size_bytes, mime_type, sha256, status, verified_at, published_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    job.id,
+                    output.ordinal,
+                    output.requested_name,
+                    output.resolved_name,
+                    output.staging_path,
+                    output.partial_path,
+                    output.final_path,
+                    output.size_bytes.map(|size| i64::try_from(size).unwrap()),
+                    output.mime_type,
+                    output.sha256,
+                    output.status.as_str(),
+                    output.verified_at,
+                    output.published_at,
+                ],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "INSERT INTO job_stage_runs (
+                job_id, sequence, stage, started_at, finished_at,
+                completed_units, total_units, safe_result_code
+             ) VALUES (?1, 0, 'inspect', ?2, ?2, 1, 1, 'LEGACY_INSPECTED')",
+            params![job.id, job.created_at],
+        )
+        .unwrap();
+}
+
 #[test]
-fn fresh_database_migrates_to_version_three_and_reopens_idempotently() {
+fn fresh_database_migrates_to_version_four_and_reopens_idempotently() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("metadata.sqlite3");
     {
         let database = Database::open(&path).unwrap();
-        assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3]);
+        assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4]);
         let integrity: String = database
             .connection()
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -32,7 +172,150 @@ fn fresh_database_migrates_to_version_three_and_reopens_idempotently() {
     }
 
     let reopened = Database::open(&path).unwrap();
-    assert_eq!(reopened.migration_versions().unwrap(), vec![1, 2, 3]);
+    assert_eq!(reopened.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn migrations_one_through_three_upgrade_to_four_preserves_legacy_jobs_without_plan_backfill() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("version-three.sqlite3");
+    let mut connection = Connection::open(&path).unwrap();
+    configure_connection(&connection).unwrap();
+    apply_migrations(&mut connection, &FOUNDATION_MIGRATIONS[..3]).unwrap();
+
+    let checksums_before = connection
+        .prepare("SELECT version, sql_checksum FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(checksums_before.len(), 3);
+
+    let diagnostic = sample_job();
+    let mut merge = sample_job();
+    merge.id = "018f0f17-2f4a-7fb1-a247-303030303030".to_owned();
+    merge.operation_id = "pdf.merge".to_owned();
+    merge.operation_version = "1.0.0".to_owned();
+    merge.requested_output_name = "merged.pdf".to_owned();
+    merge.inputs[0].display_name = "first.pdf".to_owned();
+    merge.inputs[0].mime_type = "application/pdf".to_owned();
+    let mut second_input = merge.inputs[0].clone();
+    second_input.ordinal = 1;
+    second_input.display_name = "second.pdf".to_owned();
+    second_input.file_identity = "volume-1:file-84".to_owned();
+    merge.inputs.push(second_input);
+    merge.outputs[0].requested_name = "merged.pdf".to_owned();
+    merge.outputs[0].mime_type = "application/pdf".to_owned();
+    insert_version_three_job(&connection, &diagnostic);
+    insert_version_three_job(&connection, &merge);
+    connection
+        .execute(
+            "INSERT INTO settings(scope, key, value_json, version, updated_at)
+             VALUES ('application', 'history.retention_days', '30', 7, ?1)",
+            [&diagnostic.created_at],
+        )
+        .unwrap();
+    drop(connection);
+
+    let database = Database::open(&path).unwrap();
+    assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+    let checksums_after = database
+        .connection()
+        .prepare(
+            "SELECT version, sql_checksum FROM schema_migrations WHERE version <= 3 ORDER BY version",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(checksums_after, checksums_before);
+    let migration_four_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 4",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migration_four_count, 1);
+    assert_eq!(
+        database.get_job(&diagnostic.id).unwrap(),
+        Some(diagnostic.clone())
+    );
+    assert_eq!(database.get_job(&merge.id).unwrap(), Some(merge.clone()));
+    assert!(
+        database
+            .get_operation_plan(&diagnostic.id)
+            .unwrap()
+            .is_none(),
+        "migration 4 must not backfill diagnostic.copy with an invented plan"
+    );
+    assert!(
+        database.get_operation_plan(&merge.id).unwrap().is_none(),
+        "migration 4 must not backfill pdf.merge with an invented plan"
+    );
+    let plan_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM job_operation_plans", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        plan_count, 0,
+        "migration 4 must add no default or empty plans"
+    );
+    let preserved_stage_runs: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM job_stage_runs
+             WHERE safe_result_code = 'LEGACY_INSPECTED'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(preserved_stage_runs, 2);
+    let setting: (String, i64) = database
+        .connection()
+        .query_row(
+            "SELECT value_json, version FROM settings
+             WHERE scope = 'application' AND key = 'history.retention_days'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(setting, ("30".to_owned(), 7));
+    let foreign_key_failures = database
+        .connection()
+        .prepare("PRAGMA foreign_key_check")
+        .unwrap()
+        .query_map([], |_| Ok(()))
+        .unwrap()
+        .count();
+    assert_eq!(foreign_key_failures, 0);
+    for index in [
+        "jobs_state_updated_idx",
+        "jobs_operation_created_idx",
+        "job_errors_job_created_idx",
+        "workflow_runs_status_idx",
+        "job_operation_plans_operation_idx",
+    ] {
+        let present: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            present, 1,
+            "expected index {index} must survive the upgrade"
+        );
+    }
 }
 
 #[test]
@@ -96,9 +379,18 @@ fn schema_is_metadata_only_and_constraints_reject_invalid_state() {
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
-    assert!(schemas
-        .iter()
-        .all(|(_name, sql)| !sql.to_ascii_uppercase().contains(" BLOB")));
+    for (table, _sql) in &schemas {
+        let mut columns = database
+            .connection()
+            .prepare(&format!("PRAGMA table_info('{table}')"))
+            .unwrap();
+        let types = columns
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(types.iter().all(|column_type| column_type != "BLOB"));
+    }
 
     let invalid = database.connection().execute(
         "INSERT INTO jobs (
@@ -109,6 +401,236 @@ fn schema_is_metadata_only_and_constraints_reject_invalid_state() {
         ("018f0f17-2f4a-7fb1-a247-101010101010", "2026-08-16T12:00:00Z"),
     );
     assert!(invalid.is_err());
+}
+
+#[test]
+fn typed_operation_plan_is_canonical_hashed_bounded_and_multi_output() {
+    let mut database = Database::open_in_memory().unwrap();
+    let mut job = sample_job();
+    job.operation_id = PDF_SPLIT_OPERATION_ID.to_owned();
+    job.operation_version = CORE_PDF_OPERATION_VERSION.to_owned();
+    job.requested_output_name = "part-001.pdf".to_owned();
+    job.outputs[0].requested_name = "part-001.pdf".to_owned();
+    job.outputs[0].status = OutputStatus::Planned;
+    let mut second = job.outputs[0].clone();
+    second.ordinal = 1;
+    second.requested_name = "part-002.pdf".to_owned();
+    job.outputs.push(second);
+    let validated = validate_plan(OperationPlanEnvelope {
+        schema_version: 1,
+        operation_id: PDF_SPLIT_OPERATION_ID.to_owned(),
+        source_page_count: 2,
+        payload: CorePdfPlanPayload::Split(SplitPlan {
+            ranges: vec![
+                SplitOutputRange {
+                    start_page_index: 0,
+                    end_page_index: 0,
+                    output_name: "part-001.pdf".to_owned(),
+                },
+                SplitOutputRange {
+                    start_page_index: 1,
+                    end_page_index: 1,
+                    output_name: "part-002.pdf".to_owned(),
+                },
+            ],
+        }),
+    })
+    .unwrap();
+    database
+        .create_job_with_plan(&job, &validated.stored)
+        .unwrap();
+
+    let stored = database.get_operation_plan(&job.id).unwrap().unwrap();
+    assert_eq!(stored, validated.stored);
+    assert_eq!(database.get_job(&job.id).unwrap().unwrap().outputs.len(), 2);
+
+    let oversized = "x".repeat(65_537);
+    assert!(database
+        .connection()
+        .execute(
+            "UPDATE job_operation_plans SET plan_json = ?1 WHERE job_id = ?2",
+            (&oversized, &job.id),
+        )
+        .is_err());
+    let schema: String = database
+        .connection()
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name = 'job_operation_plans'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(schema.contains("length(CAST(plan_json AS BLOB)) BETWEEN 2 AND 65536"));
+
+    let mut tampered = validated.stored;
+    tampered.sha256 = "0".repeat(64);
+    let mut rejected = job;
+    rejected.id = "018f0f17-2f4a-7fb1-a247-202020202020".to_owned();
+    assert!(matches!(
+        database.create_job_with_plan(&rejected, &tampered),
+        Err(DatabaseError::OperationPlanInvalid)
+    ));
+    assert!(database.get_job(&rejected.id).unwrap().is_none());
+}
+
+#[test]
+fn invalid_plan_json_is_rejected_by_sql_and_typed_repository_loading() {
+    let mut database = Database::open_in_memory().unwrap();
+    let (job, _plan) = sample_split_job("018f0f17-2f4a-7fb1-a247-404040404040");
+    database.create_job(&job).unwrap();
+    let before = database.get_job(&job.id).unwrap().unwrap();
+    let before_job_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+        .unwrap();
+    let invalid = database.connection().execute(
+        "INSERT INTO job_operation_plans (
+            job_id, schema_version, operation_id, source_page_count,
+            plan_json, plan_sha256, created_at
+         ) VALUES (?1, 1, ?2, 2, '{', ?3, ?4)",
+        params![
+            job.id,
+            PDF_SPLIT_OPERATION_ID,
+            "0".repeat(64),
+            job.created_at
+        ],
+    );
+    assert!(
+        invalid.is_err(),
+        "json_valid must reject malformed plan JSON"
+    );
+    let plan_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM job_operation_plans WHERE job_id = ?1",
+            [&job.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(plan_count, 0);
+    assert_eq!(database.get_job(&job.id).unwrap(), Some(before));
+    let after_job_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(after_job_count, before_job_count);
+
+    let structurally_invalid = "{}";
+    database
+        .connection()
+        .execute(
+            "INSERT INTO job_operation_plans (
+                job_id, schema_version, operation_id, source_page_count,
+                plan_json, plan_sha256, created_at
+             ) VALUES (?1, 1, ?2, 2, ?3, ?4, ?5)",
+            params![
+                job.id,
+                PDF_SPLIT_OPERATION_ID,
+                structurally_invalid,
+                sha256_hex(structurally_invalid.as_bytes()),
+                job.created_at,
+            ],
+        )
+        .unwrap();
+    assert!(matches!(
+        database.get_operation_plan(&job.id),
+        Err(DatabaseError::Json(_))
+    ));
+}
+
+#[test]
+fn job_and_plan_operation_mismatch_rolls_back_without_leaking_plan_details() {
+    let mut database = Database::open_in_memory().unwrap();
+    let mut job = sample_job();
+    job.id = "018f0f17-2f4a-7fb1-a247-505050505050".to_owned();
+    job.operation_id = PDF_EXTRACT_OPERATION_ID.to_owned();
+    job.operation_version = CORE_PDF_OPERATION_VERSION.to_owned();
+    job.requested_output_name = "extract.pdf".to_owned();
+    job.outputs[0].requested_name = "extract.pdf".to_owned();
+    job.outputs[0].mime_type = "application/pdf".to_owned();
+    let rotate = validate_plan(OperationPlanEnvelope {
+        schema_version: 1,
+        operation_id: PDF_ROTATE_OPERATION_ID.to_owned(),
+        source_page_count: 1,
+        payload: CorePdfPlanPayload::Rotate(RotatePagesPlan {
+            rotations: vec![PageRotation {
+                page_index: 0,
+                clockwise_degrees: OutputRotation::Clockwise90,
+            }],
+            output_name: "rotate.pdf".to_owned(),
+        }),
+    })
+    .unwrap();
+    let error = database
+        .create_job_with_plan(&job, &rotate.stored)
+        .unwrap_err();
+    assert!(matches!(error, DatabaseError::OperationPlanInvalid));
+    assert_eq!(
+        error.to_string(),
+        "operation plan is not canonical, bounded, or consistent with the job"
+    );
+    assert!(!error.to_string().contains(&job.destination_directory));
+    assert!(!error.to_string().contains(PDF_EXTRACT_OPERATION_ID));
+    assert!(!error.to_string().contains(PDF_ROTATE_OPERATION_ID));
+    for table in ["jobs", "job_inputs", "job_outputs", "job_operation_plans"] {
+        let count: i64 = database
+            .connection()
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE job_id = ?1"),
+                [&job.id],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| {
+                database
+                    .connection()
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"),
+                        [&job.id],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            });
+        assert_eq!(count, 0, "{table} must roll back with the rejected plan");
+    }
+
+    let (stored_job, stored_plan) = sample_split_job("018f0f17-2f4a-7fb1-a247-606060606060");
+    database
+        .create_job_with_plan(&stored_job, &stored_plan)
+        .unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE job_operation_plans SET operation_id = ?1 WHERE job_id = ?2",
+            params![PDF_ROTATE_OPERATION_ID, stored_job.id],
+        )
+        .unwrap();
+    let tampered_plan_result = database.get_operation_plan(&stored_job.id);
+    assert!(
+        matches!(
+            tampered_plan_result,
+            Err(DatabaseError::OperationPlanMismatch)
+        ),
+        "unexpected tampered-plan result: {tampered_plan_result:?}"
+    );
+
+    database
+        .connection()
+        .execute(
+            "UPDATE job_operation_plans SET operation_id = ?1 WHERE job_id = ?2",
+            params![stored_plan.envelope.operation_id, stored_job.id],
+        )
+        .unwrap();
+    database
+        .connection()
+        .execute(
+            "UPDATE jobs SET operation_id = ?1 WHERE id = ?2",
+            params![PDF_ROTATE_OPERATION_ID, stored_job.id],
+        )
+        .unwrap();
+    assert!(matches!(
+        database.get_operation_plan(&stored_job.id),
+        Err(DatabaseError::OperationPlanMismatch)
+    ));
 }
 
 #[test]

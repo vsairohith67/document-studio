@@ -7,6 +7,16 @@ pub const PDF_MERGE_OPERATION_ID: &str = "pdf.merge";
 pub const PDF_MERGE_VERSION: &str = "1.0.0";
 pub const PDF_MERGE_MIN_INPUTS: usize = 2;
 pub const PDF_MERGE_MAX_INPUTS: usize = 128;
+pub const PDF_EXTRACT_OPERATION_ID: &str = "pdf.extract-pages";
+pub const PDF_REMOVE_OPERATION_ID: &str = "pdf.remove-pages";
+pub const PDF_REORDER_OPERATION_ID: &str = "pdf.reorder-pages";
+pub const PDF_ROTATE_OPERATION_ID: &str = "pdf.rotate-pages";
+pub const PDF_SPLIT_OPERATION_ID: &str = "pdf.split";
+pub const CORE_PDF_OPERATION_VERSION: &str = "1.0.0";
+pub const CORE_PDF_MAX_PAGES: u32 = 4096;
+pub const PDF_SPLIT_MAX_OUTPUTS: usize = 128;
+pub const OPERATION_PLAN_SCHEMA_VERSION: u8 = 1;
+pub const OPERATION_PLAN_MAX_BYTES: usize = 65_536;
 pub const QPDF_DEPENDENCY_ID: &str = "qpdf";
 pub const QPDF_VERSION: &str = "12.3.2";
 pub const LEGACY_DIAGNOSTIC_COPY_VERSION: &str = "1.0.0";
@@ -378,6 +388,169 @@ pub struct JobsCreateRequest {
     pub requested_output_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u16", into = "u16")]
+pub enum OutputRotation {
+    Clockwise90,
+    Clockwise180,
+    Clockwise270,
+}
+
+impl OutputRotation {
+    pub const fn degrees(self) -> u16 {
+        match self {
+            Self::Clockwise90 => 90,
+            Self::Clockwise180 => 180,
+            Self::Clockwise270 => 270,
+        }
+    }
+}
+
+impl TryFrom<u16> for OutputRotation {
+    type Error = &'static str;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            90 => Ok(Self::Clockwise90),
+            180 => Ok(Self::Clockwise180),
+            270 => Ok(Self::Clockwise270),
+            _ => Err("rotation must be 90, 180, or 270 degrees"),
+        }
+    }
+}
+
+impl From<OutputRotation> for u16 {
+    fn from(value: OutputRotation) -> Self {
+        value.degrees()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtractPagesPlan {
+    pub selected_page_indexes: Vec<u32>,
+    pub output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemovePagesPlan {
+    pub removed_page_indexes: Vec<u32>,
+    pub output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReorderPagesPlan {
+    pub ordered_page_indexes: Vec<u32>,
+    pub output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageRotation {
+    pub page_index: u32,
+    pub clockwise_degrees: OutputRotation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RotatePagesPlan {
+    pub rotations: Vec<PageRotation>,
+    pub output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitOutputRange {
+    pub start_page_index: u32,
+    pub end_page_index: u32,
+    pub output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SplitPlan {
+    pub ranges: Vec<SplitOutputRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CorePdfPlanPayload {
+    Extract(ExtractPagesPlan),
+    Remove(RemovePagesPlan),
+    Reorder(ReorderPagesPlan),
+    Rotate(RotatePagesPlan),
+    Split(SplitPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationPlanEnvelope {
+    pub schema_version: u8,
+    pub operation_id: String,
+    pub source_page_count: u32,
+    pub payload: CorePdfPlanPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredOperationPlan {
+    pub envelope: OperationPlanEnvelope,
+    pub canonical_json: String,
+    pub sha256: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ViewerDocumentMetadata {
+    pub session_id: String,
+    pub generation: u64,
+    pub display_name: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub mime_type: String,
+    pub file_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ViewerRangeRequest {
+    pub session_id: String,
+    pub generation: u64,
+    pub begin: u64,
+    pub end: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ViewerSessionRequest {
+    pub session_id: String,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationGrant {
+    pub grant_id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DestinationGrantRequest {
+    pub grant_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorePdfJobCreateRequest {
+    pub viewer_session_id: String,
+    pub viewer_generation: u64,
+    pub destination_grant_id: String,
+    pub plan: OperationPlanEnvelope,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobIdRequest {
@@ -446,3 +619,4 @@ pub struct CancelResponse {
 }
 
 pub const JOB_PROGRESS_EVENT_NAME: &str = "document-studio-job-progress-v1";
+pub const VIEWER_DOCUMENT_OPENED_EVENT_NAME: &str = "document-studio-viewer-opened-v1";
