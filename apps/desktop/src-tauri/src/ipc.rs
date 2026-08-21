@@ -19,6 +19,7 @@ use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
 use crate::operation_registry::{all_manifests, validate_create_request, OperationKind};
 use crate::path_policy::canonical_regular_file;
+use crate::pdf_compression::PdfCompressionService;
 use crate::pdf_merge::PdfMergeService;
 use crate::pdf_operations::PdfPageOperationService;
 use crate::recovery::{cancel_without_worker, resolve_interrupted, resolve_worker_spawn_failure};
@@ -34,7 +35,7 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
         .unwrap_or(0);
     Ok(SystemStatus {
         product: "Document Studio".to_owned(),
-        phase: "g03-viewer-core-pdf".to_owned(),
+        phase: "g04a-lossless-pdf-compression".to_owned(),
         offline_by_default: true,
         database_schema_version: u32::try_from(version).unwrap_or(0),
     })
@@ -166,6 +167,9 @@ pub fn jobs_create(
         OperationKind::PdfMerge => {
             PdfMergeService::new(state.inner().clone()).create_job(request)?
         }
+        OperationKind::PdfCompressLossless => {
+            PdfCompressionService::new(state.inner().clone()).create_job(request)?
+        }
     };
     let job_id = job.id.clone();
     let worker_job_id = job_id.clone();
@@ -182,6 +186,12 @@ pub fn jobs_create(
             }
             OperationKind::PdfMerge => {
                 let service = PdfMergeService::new(worker_state);
+                let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
+                    let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                });
+            }
+            OperationKind::PdfCompressLossless => {
+                let service = PdfCompressionService::new(worker_state);
                 let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
                     let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
                 });

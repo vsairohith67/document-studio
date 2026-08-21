@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -18,25 +19,28 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_SEQUENTIAL_SCAN, FILE_SH
 use crate::app_state::{AppState, CancellationToken};
 use crate::contracts::{
     JobInput, JobOutput, JobProgress, JobRecord, JobState, JobsCreateRequest, OperationError,
-    OperationStage, OutputStatus, ProgressEvent, ProgressUnit, PDF_MERGE_MAX_INPUTS,
-    PDF_MERGE_MIN_INPUTS, PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION,
+    OperationStage, OutputStatus, ProgressEvent, ProgressUnit, PDF_COMPRESS_LOSSLESS_OPERATION_ID,
+    PDF_COMPRESS_LOSSLESS_VERSION, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS,
+    PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION,
 };
 use crate::path_policy::{
     canonical_directory, canonical_regular_file, ensure_different_files, validate_output_name,
     PathPolicyError,
 };
 use crate::process_sandbox::{
-    authorize_qpdf_paths, ensure_production_profile, spawn_sandboxed, SandboxError,
-    SandboxExecution, SandboxLaunchSpec, QPDF_PROCESS_TIMEOUT,
+    authorize_qpdf_paths, ensure_production_profile, spawn_sandboxed,
+    spawn_sandboxed_with_capture_limit, SandboxError, SandboxExecution, SandboxLaunchSpec,
+    CAPTURE_LIMIT_BYTES, QPDF_PROCESS_TIMEOUT,
 };
 use crate::publication::{
     hash_file, is_exact_owned_partial_path, partial_ownership_result_code,
     publish_verified_staging_with_observer, PublicationContext, PublicationError,
 };
 use crate::qpdf::{
-    build_production_merge_arguments, interpret_encryption_check_exit,
-    interpret_structural_check_exit, EncryptionCheckOutcome, OrdinalSnapshot,
-    StructuralCheckOutcome, VerifiedQpdfRuntime, MERGED_STAGING_RELATIVE_PATH,
+    build_lossless_compression_arguments, build_production_merge_arguments,
+    interpret_encryption_check_exit, interpret_structural_check_exit, EncryptionCheckOutcome,
+    OrdinalSnapshot, StructuralCheckOutcome, VerifiedQpdfRuntime, COMPRESSED_STAGING_RELATIVE_PATH,
+    MERGED_STAGING_RELATIVE_PATH,
 };
 use crate::windows_security::{
     available_bytes, delete_open_file, identity_from_file, open_for_identity_and_delete,
@@ -112,11 +116,38 @@ pub fn plan_inputs(inputs: &[JobInput]) -> Result<PdfMergeInputPlan, PdfMergePla
     })
 }
 
+fn plan_operation_inputs(
+    mode: PdfLifecycleMode,
+    inputs: &[JobInput],
+) -> Result<PdfMergeInputPlan, PdfMergePlanError> {
+    if mode == PdfLifecycleMode::Merge {
+        return plan_inputs(inputs);
+    }
+    let [input] = inputs else {
+        return Err(PdfMergePlanError::InputCount);
+    };
+    if input.ordinal != 0 {
+        return Err(PdfMergePlanError::OrdinalOrder);
+    }
+    if input.mime_type != "application/pdf" {
+        return Err(PdfMergePlanError::MimeType);
+    }
+    Ok(PdfMergeInputPlan {
+        unique_sources: vec![UniquePreflightSource {
+            file_identity: input.file_identity.clone(),
+            ordinals: vec![0],
+        }],
+        snapshots: vec![OrdinalSnapshot::for_ordinal(0)],
+        preflight_concurrency: 1,
+    })
+}
+
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const MIN_PDF_SIZE: u64 = 8;
 const SPACE_MARGIN_MINIMUM: u64 = 64 * 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const PREFLIGHT_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+const STRUCTURAL_CAPTURE_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct PdfMergeHooks {
@@ -130,6 +161,9 @@ pub struct PdfMergeHooks {
     pub pause_before_publication_commit: Option<Duration>,
     pub fail_cleanup: bool,
     pub available_space_override: Option<u64>,
+    pub qpdf_timeout_override: Option<Duration>,
+    pub force_qpdf_nonzero_exit: bool,
+    pub fail_before_publication_commit: bool,
 }
 
 #[derive(Clone)]
@@ -143,15 +177,73 @@ struct PreflightResult {
     page_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfLifecycleMode {
+    Merge,
+    CompressLossless,
+}
+
+impl PdfLifecycleMode {
+    fn from_job(job: &JobRecord) -> Result<Self, OperationError> {
+        match (job.operation_id.as_str(), job.operation_version.as_str()) {
+            (PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION) => Ok(Self::Merge),
+            (PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION) => {
+                Ok(Self::CompressLossless)
+            }
+            _ => Err(invalid_request()),
+        }
+    }
+
+    const fn operation_id(self) -> &'static str {
+        match self {
+            Self::Merge => PDF_MERGE_OPERATION_ID,
+            Self::CompressLossless => PDF_COMPRESS_LOSSLESS_OPERATION_ID,
+        }
+    }
+
+    const fn operation_version(self) -> &'static str {
+        match self {
+            Self::Merge => PDF_MERGE_VERSION,
+            Self::CompressLossless => PDF_COMPRESS_LOSSLESS_VERSION,
+        }
+    }
+
+    const fn staging_relative_path(self) -> &'static str {
+        match self {
+            Self::Merge => MERGED_STAGING_RELATIVE_PATH,
+            Self::CompressLossless => COMPRESSED_STAGING_RELATIVE_PATH,
+        }
+    }
+}
+
 impl PdfMergeService {
     pub fn new(state: AppState) -> Self {
         Self { state }
     }
 
     pub fn create_job(&self, request: JobsCreateRequest) -> Result<JobRecord, OperationError> {
-        if request.operation_id != PDF_MERGE_OPERATION_ID
-            || !(PDF_MERGE_MIN_INPUTS..=PDF_MERGE_MAX_INPUTS).contains(&request.input_paths.len())
-        {
+        self.create_job_for(PdfLifecycleMode::Merge, request)
+    }
+
+    pub(crate) fn create_lossless_compression_job(
+        &self,
+        request: JobsCreateRequest,
+    ) -> Result<JobRecord, OperationError> {
+        self.create_job_for(PdfLifecycleMode::CompressLossless, request)
+    }
+
+    fn create_job_for(
+        &self,
+        mode: PdfLifecycleMode,
+        request: JobsCreateRequest,
+    ) -> Result<JobRecord, OperationError> {
+        let valid_count = match mode {
+            PdfLifecycleMode::Merge => {
+                (PDF_MERGE_MIN_INPUTS..=PDF_MERGE_MAX_INPUTS).contains(&request.input_paths.len())
+            }
+            PdfLifecycleMode::CompressLossless => request.input_paths.len() == 1,
+        };
+        if request.operation_id != mode.operation_id() || !valid_count {
             return Err(invalid_request());
         }
         validate_output_name(&request.requested_output_name).map_err(|_| path_error())?;
@@ -223,8 +315,8 @@ impl PdfMergeService {
         let now = timestamp();
         let job = JobRecord {
             id: Uuid::new_v4().hyphenated().to_string(),
-            operation_id: PDF_MERGE_OPERATION_ID.to_owned(),
-            operation_version: PDF_MERGE_VERSION.to_owned(),
+            operation_id: mode.operation_id().to_owned(),
+            operation_version: mode.operation_version().to_owned(),
             state: JobState::Queued,
             stage: None,
             sequence: 0,
@@ -258,7 +350,7 @@ impl PdfMergeService {
             }],
             errors: Vec::new(),
         };
-        plan_inputs(&job.inputs).map_err(|_| invalid_request())?;
+        plan_operation_inputs(mode, &job.inputs).map_err(|_| invalid_request())?;
         self.state
             .database()
             .create_job(&job)
@@ -353,16 +445,22 @@ impl PdfMergeService {
             JobState::Inspecting,
             OperationStage::Inspect,
         )?;
+        let mode = PdfLifecycleMode::from_job(&inspecting)?;
         emit(
             &inspecting,
             OperationStage::Inspect,
             "INSPECTING_PDFS",
-            "Checking the ordered PDF list",
+            if mode == PdfLifecycleMode::Merge {
+                "Checking the ordered PDF list"
+            } else {
+                "Checking the PDF selected for lossless compression"
+            },
             true,
             on_event,
         );
         check_cancelled(token, OperationStage::Inspect)?;
-        let plan = plan_inputs(&inspecting.inputs).map_err(|_| invalid_request())?;
+        let plan =
+            plan_operation_inputs(mode, &inspecting.inputs).map_err(|_| invalid_request())?;
         let mut canonical_inputs = Vec::with_capacity(inspecting.inputs.len());
         for (index, input) in inspecting.inputs.iter().enumerate() {
             let path = PathBuf::from(&input.canonical_path);
@@ -388,7 +486,11 @@ impl PdfMergeService {
         emit(
             &preflight,
             OperationStage::Preflight,
-            "CHECKING_MERGE_SAFETY",
+            if mode == PdfLifecycleMode::Merge {
+                "CHECKING_MERGE_SAFETY"
+            } else {
+                "CHECKING_COMPRESSION_SAFETY"
+            },
             "Checking local space, destination safety and the bundled PDF engine",
             true,
             on_event,
@@ -440,7 +542,11 @@ impl PdfMergeService {
             0,
             ordered_bytes,
             ProgressUnit::Bytes,
-            "MERGE_ESTIMATE_READY",
+            if mode == PdfLifecycleMode::Merge {
+                "MERGE_ESTIMATE_READY"
+            } else {
+                "COMPRESSION_ESTIMATE_READY"
+            },
             "The private workspace and destination budget have been checked",
             true,
             on_event,
@@ -462,8 +568,16 @@ impl PdfMergeService {
             0,
             u64::try_from(preflight.inputs.len()).unwrap_or(0),
             ProgressUnit::Items,
-            "MERGE_PLAN_READY",
-            "The exact persisted input order is ready",
+            if mode == PdfLifecycleMode::Merge {
+                "MERGE_PLAN_READY"
+            } else {
+                "COMPRESSION_PLAN_READY"
+            },
+            if mode == PdfLifecycleMode::Merge {
+                "The exact persisted input order is ready"
+            } else {
+                "The persisted PDF input is ready"
+            },
             true,
             on_event,
         )?;
@@ -476,8 +590,16 @@ impl PdfMergeService {
         emit(
             &ready,
             OperationStage::Plan,
-            "READY_TO_MERGE",
-            "PDF Merge is ready to freeze the selected inputs",
+            if mode == PdfLifecycleMode::Merge {
+                "READY_TO_MERGE"
+            } else {
+                "READY_TO_COMPRESS"
+            },
+            if mode == PdfLifecycleMode::Merge {
+                "PDF Merge is ready to freeze the selected inputs"
+            } else {
+                "Lossless PDF Compression is ready to freeze the selected input"
+            },
             true,
             on_event,
         );
@@ -492,12 +614,17 @@ impl PdfMergeService {
             &running,
             OperationStage::Execute,
             "SNAPSHOTTING_PDFS",
-            "Freezing one private snapshot for each ordered input",
+            if mode == PdfLifecycleMode::Merge {
+                "Freezing one private snapshot for each ordered input"
+            } else {
+                "Freezing a private snapshot of the selected PDF"
+            },
             true,
             on_event,
         );
 
         let mut completed_bytes = 0_u64;
+        let mut snapshot_hashes = Vec::with_capacity(running.inputs.len());
         for (index, input) in running.inputs.iter().enumerate() {
             let snapshot = workspace.root.join(&plan.snapshots[index].relative_path);
             let (size, hash) = self.copy_ordinal_snapshot(
@@ -517,6 +644,7 @@ impl PdfMergeService {
                 .database()
                 .update_input_hash(job_id, input.ordinal, &hash)
                 .map_err(|_| metadata_error())?;
+            snapshot_hashes.push(hash);
         }
         check_cancelled(token, OperationStage::Preflight)?;
         self.progress(
@@ -551,16 +679,41 @@ impl PdfMergeService {
                     .and_then(|pages| sum.checked_add(*pages))
             })
             .ok_or_else(|| verify_error("PAGE_COUNT_INVALID"))?;
+        let source_inventory = if mode == PdfLifecycleMode::CompressLossless {
+            Some(qpdf_structural_inventory(
+                &runtime,
+                &workspace,
+                &plan.snapshots[0].relative_path,
+                expected_pages,
+                token,
+                OperationStage::Preflight,
+            )?)
+        } else {
+            None
+        };
 
         if let Some(pause) = hooks.pause_before_merge {
             cancellable_pause(token, pause, OperationStage::Execute)?;
         }
-        let arguments = build_production_merge_arguments(
-            &plan.snapshots,
-            Path::new(MERGED_STAGING_RELATIVE_PATH),
-        )
-        .map_err(|_| process_error(OperationStage::Execute))?;
-        verify_ordinal_arguments(&arguments, &plan.snapshots)?;
+        let mut arguments = match mode {
+            PdfLifecycleMode::Merge => {
+                let arguments = build_production_merge_arguments(
+                    &plan.snapshots,
+                    Path::new(MERGED_STAGING_RELATIVE_PATH),
+                )
+                .map_err(|_| process_error(OperationStage::Execute))?;
+                verify_ordinal_arguments(&arguments, &plan.snapshots)?;
+                arguments
+            }
+            PdfLifecycleMode::CompressLossless => build_lossless_compression_arguments(
+                &plan.snapshots[0].relative_path,
+                Path::new(COMPRESSED_STAGING_RELATIVE_PATH),
+            )
+            .map_err(|_| process_error(OperationStage::Execute))?,
+        };
+        if hooks.force_qpdf_nonzero_exit {
+            arguments = vec![OsString::from("--document-studio-test-invalid-option")];
+        }
         self.progress(
             job_id,
             JobState::Running,
@@ -568,8 +721,16 @@ impl PdfMergeService {
             0,
             u64::try_from(running.inputs.len()).unwrap_or(0),
             ProgressUnit::Items,
-            "MERGING_PDFS",
-            "Merging the ordered PDF snapshots",
+            if mode == PdfLifecycleMode::Merge {
+                "MERGING_PDFS"
+            } else {
+                "COMPRESSING_PDF_LOSSLESSLY"
+            },
+            if mode == PdfLifecycleMode::Merge {
+                "Merging the ordered PDF snapshots"
+            } else {
+                "Recompressing PDF streams without discarding document structure"
+            },
             true,
             on_event,
         )?;
@@ -578,11 +739,12 @@ impl PdfMergeService {
             &workspace,
             &arguments,
             token,
-            QPDF_PROCESS_TIMEOUT,
+            hooks.qpdf_timeout_override.unwrap_or(QPDF_PROCESS_TIMEOUT),
             OperationStage::Execute,
             QpdfStartObservation {
                 pause: hooks.pause_after_merge_process_start,
                 started: hooks.merge_process_started.as_ref(),
+                capture_limit: CAPTURE_LIMIT_BYTES,
             },
         )?;
         if let Some(observed) = &hooks.merge_process_peak_memory {
@@ -594,7 +756,7 @@ impl PdfMergeService {
         if execution.exit_code != 0 {
             return Err(process_error(OperationStage::Execute));
         }
-        let staging_path = workspace.root.join(MERGED_STAGING_RELATIVE_PATH);
+        let staging_path = workspace.root.join(mode.staging_relative_path());
         if hooks.corrupt_staging_before_verify {
             let file = OpenOptions::new()
                 .write(true)
@@ -613,14 +775,48 @@ impl PdfMergeService {
         emit(
             &verifying,
             OperationStage::Verify,
-            "VERIFYING_MERGED_PDF",
-            "Independently reopening and verifying the merged PDF",
+            if mode == PdfLifecycleMode::Merge {
+                "VERIFYING_MERGED_PDF"
+            } else {
+                "VERIFYING_COMPRESSED_PDF"
+            },
+            if mode == PdfLifecycleMode::Merge {
+                "Independently reopening and verifying the merged PDF"
+            } else {
+                "Independently reopening and verifying the compressed PDF"
+            },
             true,
             on_event,
         );
         check_cancelled(token, OperationStage::Verify)?;
-        let (verified_size, verified_hash) =
-            verify_output(&runtime, &workspace, &staging_path, expected_pages, token)?;
+        let (verified_size, verified_hash) = verify_output(
+            &runtime,
+            &workspace,
+            &staging_path,
+            Path::new(mode.staging_relative_path()),
+            expected_pages,
+            token,
+        )?;
+        if let Some(source_inventory) = source_inventory {
+            let output_inventory = qpdf_structural_inventory(
+                &runtime,
+                &workspace,
+                Path::new(mode.staging_relative_path()),
+                expected_pages,
+                token,
+                OperationStage::Verify,
+            )?;
+            if output_inventory != source_inventory {
+                return Err(verify_error("OUTPUT_STRUCTURE_CHANGED"));
+            }
+        }
+        if mode == PdfLifecycleMode::CompressLossless {
+            verify_source_unchanged(
+                &running.inputs[0],
+                &canonical_inputs[0],
+                &snapshot_hashes[0],
+            )?;
+        }
         self.state
             .database()
             .set_output_staging(
@@ -664,6 +860,7 @@ impl PdfMergeService {
         let token_for_progress = token.clone();
         let pause_before_commit = hooks.pause_before_publication_commit;
         let create_collision = hooks.create_collision_before_first_publication_commit;
+        let fail_before_commit = hooks.fail_before_publication_commit;
         let mut collision_created = false;
         let result = publish_verified_staging_with_observer(
             PublicationContext {
@@ -743,6 +940,11 @@ impl PdfMergeService {
                     })
             },
             move |candidate| {
+                if fail_before_commit {
+                    return Err(PublicationError::Io(std::io::Error::other(
+                        "injected publication failure",
+                    )));
+                }
                 if create_collision && !collision_created {
                     fs::write(candidate, b"competing output").map_err(PublicationError::Io)?;
                     collision_created = true;
@@ -814,7 +1016,11 @@ impl PdfMergeService {
             result.size_bytes,
             result.size_bytes,
             ProgressUnit::Bytes,
-            "MERGE_AUDIT_SAVED",
+            if mode == PdfLifecycleMode::Merge {
+                "MERGE_AUDIT_SAVED"
+            } else {
+                "COMPRESSION_AUDIT_SAVED"
+            },
             "Verified publication metadata has been saved",
             false,
             on_event,
@@ -851,8 +1057,16 @@ impl PdfMergeService {
         emit(
             &completed,
             OperationStage::Cleanup,
-            "MERGE_COMPLETED",
-            "The verified merged PDF is ready",
+            if mode == PdfLifecycleMode::Merge {
+                "MERGE_COMPLETED"
+            } else {
+                "COMPRESSION_COMPLETED"
+            },
+            if mode == PdfLifecycleMode::Merge {
+                "The verified merged PDF is ready"
+            } else {
+                "The verified losslessly compressed PDF is ready"
+            },
             false,
             on_event,
         );
@@ -1337,14 +1551,412 @@ fn preflight_unique_source(
     })
 }
 
+fn qpdf_structural_inventory(
+    runtime: &VerifiedQpdfRuntime,
+    workspace: &JobWorkspace,
+    relative: &Path,
+    expected_pages: u64,
+    token: &CancellationToken,
+    stage: OperationStage,
+) -> Result<JsonValue, OperationError> {
+    let execution = run_qpdf_with_capture_limit(
+        runtime,
+        workspace,
+        &[
+            relative.as_os_str().to_owned(),
+            OsString::from("--json=2"),
+            OsString::from("--json-key=acroform"),
+            OsString::from("--json-key=attachments"),
+            OsString::from("--json-key=outlines"),
+            OsString::from("--json-key=pagelabels"),
+        ],
+        token,
+        PREFLIGHT_PROCESS_TIMEOUT,
+        stage,
+        STRUCTURAL_CAPTURE_LIMIT_BYTES,
+    )?;
+    if execution.exit_code != 0 {
+        return Err(process_error(stage));
+    }
+    let parsed: JsonValue = serde_json::from_slice(&execution.stdout)
+        .map_err(|_| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+    let object = parsed
+        .as_object()
+        .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+    let mut selected = JsonMap::new();
+    for key in ["acroform", "attachments", "outlines", "pagelabels"] {
+        let value = object
+            .get(key)
+            .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+        selected.insert(key.to_owned(), normalize_inventory(value, None));
+    }
+    selected.insert(
+        "annotations".to_owned(),
+        qpdf_annotation_inventory(runtime, workspace, relative, expected_pages, token, stage)?,
+    );
+    Ok(JsonValue::Object(selected))
+}
+
+fn qpdf_annotation_inventory(
+    runtime: &VerifiedQpdfRuntime,
+    workspace: &JobWorkspace,
+    relative: &Path,
+    expected_pages: u64,
+    token: &CancellationToken,
+    stage: OperationStage,
+) -> Result<JsonValue, OperationError> {
+    let expected_pages = usize::try_from(expected_pages)
+        .map_err(|_| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+    let pages_result = run_qpdf_with_capture_limit(
+        runtime,
+        workspace,
+        &[
+            relative.as_os_str().to_owned(),
+            OsString::from("--suppress-recovery"),
+            OsString::from("--show-pages"),
+        ],
+        token,
+        PREFLIGHT_PROCESS_TIMEOUT,
+        stage,
+        STRUCTURAL_CAPTURE_LIMIT_BYTES,
+    )?;
+    if pages_result.exit_code != 0 {
+        return Err(process_error(stage));
+    }
+    let page_references = parse_page_object_references(&pages_result.stdout, expected_pages)?;
+    let page_objects =
+        qpdf_json_objects(runtime, workspace, relative, &page_references, token, stage)?;
+
+    let mut annotation_references = vec![Vec::<String>::new(); expected_pages];
+    let mut direct_annotations = vec![Vec::<JsonValue>::new(); expected_pages];
+    let mut containers = Vec::<(usize, String)>::new();
+    for (page_index, reference) in page_references.iter().enumerate() {
+        let page = page_objects
+            .get(reference)
+            .and_then(JsonValue::as_object)
+            .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+        let Some(annotations) = page.get("/Annots") else {
+            continue;
+        };
+        collect_annotation_entries(
+            annotations,
+            page_index,
+            &mut annotation_references,
+            &mut direct_annotations,
+            &mut containers,
+        )?;
+    }
+
+    if !containers.is_empty() {
+        let container_references = containers
+            .iter()
+            .map(|(_, reference)| reference.clone())
+            .collect::<Vec<_>>();
+        let container_objects = qpdf_json_objects(
+            runtime,
+            workspace,
+            relative,
+            &container_references,
+            token,
+            stage,
+        )?;
+        for (page_index, reference) in containers {
+            let value = container_objects
+                .get(&reference)
+                .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+            collect_annotation_entries(
+                value,
+                page_index,
+                &mut annotation_references,
+                &mut direct_annotations,
+                &mut Vec::new(),
+            )?;
+        }
+    }
+
+    let all_references = annotation_references
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let annotation_objects =
+        qpdf_json_objects(runtime, workspace, relative, &all_references, token, stage)?;
+    let mut pages = Vec::with_capacity(expected_pages);
+    for page_index in 0..expected_pages {
+        let mut annotations = direct_annotations[page_index]
+            .iter()
+            .map(select_annotation_inventory)
+            .collect::<Vec<_>>();
+        for reference in &annotation_references[page_index] {
+            let value = annotation_objects
+                .get(reference)
+                .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+            annotations.push(select_annotation_inventory(value));
+        }
+        pages.push(JsonValue::Array(annotations));
+    }
+    Ok(JsonValue::Array(pages))
+}
+
+fn parse_page_object_references(
+    output: &[u8],
+    expected_count: usize,
+) -> Result<Vec<String>, OperationError> {
+    let text =
+        std::str::from_utf8(output).map_err(|_| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+    let mut references = Vec::with_capacity(expected_count);
+    for line in text.lines() {
+        let Some((page, reference)) = line
+            .strip_prefix("page ")
+            .and_then(|line| line.split_once(": "))
+        else {
+            continue;
+        };
+        if page.parse::<usize>().ok() != Some(references.len() + 1)
+            || !is_object_reference(reference)
+        {
+            return Err(verify_error("STRUCTURAL_INVENTORY_INVALID"));
+        }
+        references.push(reference.to_owned());
+    }
+    if references.len() != expected_count {
+        return Err(verify_error("STRUCTURAL_INVENTORY_INVALID"));
+    }
+    Ok(references)
+}
+
+fn qpdf_json_objects(
+    runtime: &VerifiedQpdfRuntime,
+    workspace: &JobWorkspace,
+    relative: &Path,
+    references: &[String],
+    token: &CancellationToken,
+    stage: OperationStage,
+) -> Result<HashMap<String, JsonValue>, OperationError> {
+    let mut result = HashMap::new();
+    for batch in references.chunks(64) {
+        let mut arguments = ["--json=1", "--json-key=objects"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        for reference in batch {
+            let fields = reference.split_whitespace().collect::<Vec<_>>();
+            if fields.len() != 3 || fields[2] != "R" {
+                return Err(verify_error("STRUCTURAL_INVENTORY_INVALID"));
+            }
+            arguments.push(OsString::from(format!(
+                "--json-object={},{}",
+                fields[0], fields[1]
+            )));
+        }
+        arguments.push(relative.as_os_str().to_owned());
+        let execution = run_qpdf_with_capture_limit(
+            runtime,
+            workspace,
+            &arguments,
+            token,
+            PREFLIGHT_PROCESS_TIMEOUT,
+            stage,
+            STRUCTURAL_CAPTURE_LIMIT_BYTES,
+        )?;
+        if execution.exit_code != 0 {
+            return Err(process_error(stage));
+        }
+        let document: JsonValue = serde_json::from_slice(&execution.stdout)
+            .map_err(|_| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+        let objects = document
+            .get("objects")
+            .and_then(JsonValue::as_object)
+            .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+        for reference in batch {
+            let value = objects
+                .get(reference)
+                .ok_or_else(|| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+            result.insert(reference.clone(), value.clone());
+        }
+    }
+    Ok(result)
+}
+
+fn collect_annotation_entries(
+    value: &JsonValue,
+    page_index: usize,
+    references: &mut [Vec<String>],
+    direct: &mut [Vec<JsonValue>],
+    containers: &mut Vec<(usize, String)>,
+) -> Result<(), OperationError> {
+    match value {
+        JsonValue::Array(values) => {
+            for value in values {
+                match value {
+                    JsonValue::String(reference) if is_object_reference(reference) => {
+                        references[page_index].push(reference.clone());
+                    }
+                    JsonValue::Object(_) => direct[page_index].push(value.clone()),
+                    _ => return Err(verify_error("STRUCTURAL_INVENTORY_INVALID")),
+                }
+            }
+        }
+        JsonValue::String(reference) if is_object_reference(reference) => {
+            containers.push((page_index, reference.clone()));
+        }
+        _ => return Err(verify_error("STRUCTURAL_INVENTORY_INVALID")),
+    }
+    Ok(())
+}
+
+fn select_annotation_inventory(value: &JsonValue) -> JsonValue {
+    const KEYS: [&str; 22] = [
+        "/Subtype",
+        "/Rect",
+        "/Contents",
+        "/NM",
+        "/M",
+        "/F",
+        "/FT",
+        "/T",
+        "/TU",
+        "/V",
+        "/DV",
+        "/AS",
+        "/Name",
+        "/C",
+        "/CA",
+        "/QuadPoints",
+        "/InkList",
+        "/Open",
+        "/State",
+        "/StateModel",
+        "/Border",
+        "/BS",
+    ];
+    let Some(object) = value.as_object() else {
+        return JsonValue::Null;
+    };
+    JsonValue::Object(
+        KEYS.into_iter()
+            .filter_map(|key| {
+                object
+                    .get(key)
+                    .map(|value| (key.to_owned(), normalize_annotation_value(value)))
+            })
+            .collect(),
+    )
+}
+
+fn normalize_annotation_value(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::String(reference) if is_object_reference(reference) => {
+            JsonValue::String("<object-reference>".to_owned())
+        }
+        JsonValue::Array(values) => {
+            JsonValue::Array(values.iter().map(normalize_annotation_value).collect())
+        }
+        JsonValue::Object(values) => JsonValue::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), normalize_annotation_value(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn normalize_inventory(value: &JsonValue, parent_key: Option<&str>) -> JsonValue {
+    match value {
+        JsonValue::Object(values) => {
+            if parent_key == Some("streams") && values.keys().all(|key| is_object_reference(key)) {
+                let mut normalized = values
+                    .values()
+                    .map(|value| normalize_inventory(value, None))
+                    .collect::<Vec<_>>();
+                normalized.sort_by_key(JsonValue::to_string);
+                return JsonValue::Array(normalized);
+            }
+            JsonValue::Object(
+                values
+                    .iter()
+                    .filter(|(key, _)| {
+                        !matches!(
+                            key.as_str(),
+                            "object" | "parent" | "dest" | "filespec" | "preferredcontents"
+                        )
+                    })
+                    .map(|(key, value)| {
+                        (key.clone(), normalize_inventory(value, Some(key.as_str())))
+                    })
+                    .collect(),
+            )
+        }
+        JsonValue::Array(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|value| normalize_inventory(value, parent_key))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+fn is_object_reference(value: &str) -> bool {
+    let mut parts = value.split(' ');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(object), Some(generation), Some("R"), None)
+            if !object.is_empty()
+                && object.bytes().all(|byte| byte.is_ascii_digit())
+                && !generation.is_empty()
+                && generation.bytes().all(|byte| byte.is_ascii_digit())
+    )
+}
+
+fn verify_source_unchanged(
+    input: &JobInput,
+    canonical_path: &Path,
+    snapshot_hash: &str,
+) -> Result<(), OperationError> {
+    let source = open_source(
+        canonical_path,
+        OperationStage::Verify,
+        input.ordinal as usize,
+    )?;
+    let identity = identity_from_file(&source)
+        .map_err(|_| inspect_error(input.ordinal as usize))?
+        .to_string();
+    let metadata = source
+        .metadata()
+        .map_err(|_| inspect_error(input.ordinal as usize))?;
+    if identity != input.file_identity
+        || metadata.len() != input.size_bytes
+        || modified_timestamp(&metadata).map_err(|_| inspect_error(input.ordinal as usize))?
+            != input.modified_at
+    {
+        return Err(source_changed(
+            input.ordinal as usize,
+            OperationStage::Verify,
+        ));
+    }
+    drop(source);
+    let (size, hash) = hash_file(canonical_path)
+        .map_err(|_| source_changed(input.ordinal as usize, OperationStage::Verify))?;
+    if size != input.size_bytes || hash != snapshot_hash {
+        return Err(source_changed(
+            input.ordinal as usize,
+            OperationStage::Verify,
+        ));
+    }
+    Ok(())
+}
+
 fn verify_output(
     runtime: &VerifiedQpdfRuntime,
     workspace: &JobWorkspace,
     staging_path: &Path,
+    expected_relative_path: &Path,
     expected_pages: u64,
     token: &CancellationToken,
 ) -> Result<(u64, String), OperationError> {
-    if staging_path != workspace.root.join(MERGED_STAGING_RELATIVE_PATH) {
+    if staging_path != workspace.root.join(expected_relative_path) {
         return Err(verify_error("OUTPUT_PATH_INVALID"));
     }
     let (canonical, _) =
@@ -1352,7 +1964,7 @@ fn verify_output(
     let canonical_staging =
         canonical_directory(&workspace.staging).map_err(|_| verify_error("OUTPUT_PATH_INVALID"))?;
     if canonical.parent() != Some(canonical_staging.as_path())
-        || canonical.file_name().and_then(|name| name.to_str()) != Some("merged.pdf")
+        || canonical.file_name() != expected_relative_path.file_name()
     {
         return Err(verify_error("OUTPUT_PATH_INVALID"));
     }
@@ -1369,7 +1981,7 @@ fn verify_output(
     if size != metadata.len() {
         return Err(verify_error("OUTPUT_SIZE_INVALID"));
     }
-    let relative = Path::new(MERGED_STAGING_RELATIVE_PATH);
+    let relative = expected_relative_path;
     let structural = run_qpdf(
         runtime,
         workspace,
@@ -1481,10 +2093,43 @@ pub(crate) fn run_qpdf(
     )
 }
 
-#[derive(Default)]
+fn run_qpdf_with_capture_limit(
+    runtime: &VerifiedQpdfRuntime,
+    workspace: &JobWorkspace,
+    arguments: &[OsString],
+    token: &CancellationToken,
+    timeout: Duration,
+    stage: OperationStage,
+    capture_limit: usize,
+) -> Result<SandboxExecution, OperationError> {
+    run_qpdf_after_start_pause(
+        runtime,
+        workspace,
+        arguments,
+        token,
+        timeout,
+        stage,
+        QpdfStartObservation {
+            capture_limit,
+            ..Default::default()
+        },
+    )
+}
+
 struct QpdfStartObservation<'a> {
     pause: Option<Duration>,
     started: Option<&'a Arc<AtomicBool>>,
+    capture_limit: usize,
+}
+
+impl Default for QpdfStartObservation<'_> {
+    fn default() -> Self {
+        Self {
+            pause: None,
+            started: None,
+            capture_limit: CAPTURE_LIMIT_BYTES,
+        }
+    }
 }
 
 fn run_qpdf_after_start_pause(
@@ -1504,8 +2149,12 @@ fn run_qpdf_after_start_pause(
         working_directory: &workspace.root,
         temporary_directory: &workspace.temporary,
     };
-    let mut process = spawn_sandboxed(&profile, &specification)
-        .map_err(|error| map_sandbox_error(error, stage))?;
+    let mut process = if observation.capture_limit == CAPTURE_LIMIT_BYTES {
+        spawn_sandboxed(&profile, &specification)
+    } else {
+        spawn_sandboxed_with_capture_limit(&profile, &specification, observation.capture_limit)
+    }
+    .map_err(|error| map_sandbox_error(error, stage))?;
     if observation.pause.is_some() || observation.started.is_some() {
         process
             .resume()
@@ -1528,7 +2177,7 @@ fn map_sandbox_error(error: SandboxError, stage: OperationStage) -> OperationErr
         SandboxError::Timeout => OperationError::safe(
             "QPDF_TIMEOUT",
             "The PDF engine exceeded its safe time limit",
-            "No output was published. Try a smaller local merge.",
+            "No output was published. Try a smaller local PDF operation.",
             stage,
             true,
         ),
@@ -1712,8 +2361,8 @@ fn digest_hex(bytes: &[u8]) -> String {
 fn invalid_request() -> OperationError {
     OperationError::safe(
         "INVALID_OPERATION_REQUEST",
-        "The PDF Merge request is not valid",
-        "Choose between 2 and 128 ordered local PDFs and a Windows-safe .pdf output name.",
+        "The PDF operation request is not valid",
+        "Choose the required local PDF input or inputs and a Windows-safe .pdf output name.",
         OperationStage::Inspect,
         false,
     )
@@ -1736,7 +2385,7 @@ fn source_changed(index: usize, stage: OperationStage) -> OperationError {
     input_error(
         "SOURCE_CHANGED",
         "A source PDF changed",
-        "Select the affected PDF again before retrying the merge.",
+        "Select the affected PDF again before retrying the local operation.",
         stage,
         true,
         index,
@@ -1852,7 +2501,7 @@ fn workspace_error() -> OperationError {
     OperationError::safe(
         "WORKSPACE_FAILED",
         "A private PDF workspace could not be prepared",
-        "Close other instances and try the merge again.",
+        "Close other instances and try the local PDF operation again.",
         OperationStage::Plan,
         true,
     )
@@ -1881,8 +2530,8 @@ fn process_error(stage: OperationStage) -> OperationError {
 fn verify_error(code: &str) -> OperationError {
     OperationError::safe(
         code,
-        "The merged PDF did not pass independent verification",
-        "No output was published. Retry from the original source PDFs.",
+        "The PDF output did not pass independent verification",
+        "No output was published. Retry from the original local PDF input or inputs.",
         OperationStage::Verify,
         true,
     )
@@ -1925,7 +2574,7 @@ fn cleanup_error() -> OperationError {
 fn metadata_error() -> OperationError {
     OperationError::safe(
         "METADATA_WRITE_FAILED",
-        "PDF Merge metadata could not be saved",
+        "PDF operation metadata could not be saved",
         "The operation cannot report success until its local audit metadata is durable.",
         OperationStage::Audit,
         true,

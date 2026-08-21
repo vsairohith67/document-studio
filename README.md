@@ -2,9 +2,9 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository contains the Document Studio product specifications, the accepted Windows foundation/PDF Merge slices, and the draft G03 local PDF workspace under independent review on PR #6. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and six production PDF operations. G03 is not complete or merged, and G04 remains blocked.
+This repository contains the Document Studio product specifications and the accepted Windows foundation, PDF Merge, and G03 Viewer/Core PDF slices. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and accepted local PDF operations. **G03 — COMPLETE** on accepted main merge `8d6844ebdc1fd6eedf41373d53ad36eb399cc489`. **G04A — active implementation** on its approved feature branch; G04A is not accepted or complete.
 
-## G03 Viewer and Core PDF status
+## Current delivery status
 
 G01 proved the safety architecture before a production document engine was adopted. G02 now applies that architecture to a real local PDF operation:
 
@@ -21,7 +21,7 @@ G01 proved the safety architecture before a production document engine was adopt
 - The shared Precision Paper organizer prepares selection, reorder, removal, output rotation and split ranges without creating history until Apply/Export.
 - `pdf.extract-pages`, `pdf.remove-pages`, `pdf.reorder-pages`, `pdf.rotate-pages` and `pdf.split` 1.0.0 persist typed plans and reuse the accepted qpdf/publication/recovery boundary.
 - Every split output is planned before processing. Completion requires every verified publication; partial publication is a truthful failed state that preserves already published user files.
-- OCR, repair, compression, conversion, freeform editing, annotations, forms, signatures, redaction, printing, cloud, accounts and AI remain later goals.
+- G04A adds only lossless structural PDF compression. Balanced/aggressive compression, image controls, batch work, conversion, OCR, repair, PDF/A, editing, redaction, cloud, accounts and AI remain later goals.
 
 ## Start here
 
@@ -46,7 +46,7 @@ cargo test --workspace --all-targets --locked
 npm --workspace @document-studio/desktop run tauri -- dev
 ```
 
-The development window provides PDF Merge and Viewer workspaces. `diagnostic.copy` remains covered as a foundation regression operation but is not a main user workflow.
+The development window provides PDF Merge, Viewer, and the active G04A Optimize workspace. `diagnostic.copy` remains covered as a foundation regression operation but is not a main user workflow.
 
 ## Build philosophy
 
@@ -75,8 +75,8 @@ The development window provides PDF Merge and Viewer workspaces. `diagnostic.cop
 - `.github/`, `CONTRIBUTING.md`, `SECURITY.md` - repository workflow, issue/PR templates and security reporting.
 - `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md` - release history and dependency/model adoption gate.
 
-Current implementation version: `0.3.0-g03-viewer-core-pdf`
-Implementation date: `17 August 2026`
+Current implementation version: `0.4.0-g04a-lossless-compression-dev`
+Implementation date: `21 August 2026`
 
 ## Goal Mode build workflow
 

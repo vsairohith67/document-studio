@@ -195,7 +195,17 @@ export interface PdfMergeCreateRequest {
   requestedOutputName: string;
 }
 
-export type JobsCreateRequest = DiagnosticCopyCreateRequest | PdfMergeCreateRequest;
+export interface PdfCompressLosslessCreateRequest {
+  operationId: 'pdf.compress-lossless';
+  inputPaths: [string];
+  destinationDirectory: string;
+  requestedOutputName: string;
+}
+
+export type JobsCreateRequest =
+  | DiagnosticCopyCreateRequest
+  | PdfMergeCreateRequest
+  | PdfCompressLosslessCreateRequest;
 
 export const CORE_PDF_OPERATION_IDS = [
   'pdf.extract-pages',

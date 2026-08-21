@@ -205,12 +205,23 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
     ]:
         if stale in state:
             raise SystemExit(f'Stale G03 repository-state claim remains: {stale}')
-    for false_status in ['g03 is complete', 'g03 is merged', 'g03: complete', 'g04 has started', 'g04 is started']:
+    for false_status in [
+        'g03 is not complete',
+        'g03 is not merged',
+        'g04 remains blocked',
+        'g04 is blocked',
+        'draft pr #6',
+    ]:
         if false_status in state:
-            raise SystemExit(f'False G03/G04 status claim remains: {false_status}')
-    for required in ['draft pr #6', 'changes required', 'g04 remains blocked']:
+            raise SystemExit(f'Stale G03/G04 status claim remains: {false_status}')
+    for required in [
+        'g03 — complete',
+        '8d6844ebdc1fd6eedf41373d53ad36eb399cc489',
+        'g04a — active implementation',
+        'g04a is not accepted or complete',
+    ]:
         if required not in state:
-            raise SystemExit(f'G03 review status is missing required truth: {required}')
+            raise SystemExit(f'Current G03/G04A status is missing required truth: {required}')
 
     manifest = inputs['asset_manifest']
     if not isinstance(manifest, dict) or manifest.get('version') != '6.2.108':
@@ -266,8 +277,8 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
 
 g03_state_paths = [
     ROOT / 'MANIFEST.json',
-    ROOT / 'codex/prompts/03-core-pdf.md',
-    ROOT / 'docs/implementation-log/G03-viewer-core-pdf.md',
+    ROOT / 'README.md',
+    ROOT / 'docs/18-ROADMAP-AND-MILESTONES.md',
 ]
 G03_VALIDATION_INPUTS = {
     'state': '\n'.join(path.read_text(encoding='utf-8') for path in g03_state_paths),
@@ -291,5 +302,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01/G02 compatibility and G03 dependency, migration and document consistency verified.'
+    f'{len(rows)} feature entries found; G01/G02 compatibility, G03 accepted status, and G03 dependency, migration and document consistency verified.'
 )

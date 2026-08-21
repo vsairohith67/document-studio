@@ -1,9 +1,11 @@
 # G03 Viewer and Core PDF Implementation Log
 
-Status: Draft PR #6; independent review returned CHANGES REQUIRED; F01–F10 remediation pending exact-head CI and independent re-review
+Status: COMPLETE — accepted on main by PR #6 merge `8d6844ebdc1fd6eedf41373d53ad36eb399cc489` on 21 August 2026
 Accepted base: `6e96b394eba7fafe787920e9d6bdd0c4b99f2670`
 Implementation branch: `feat/g03-viewer-core-pdf`
 Target: Windows x64, Tauri 2, WebView2, PDF.js 6.2.108 and qpdf 12.3.2
+
+The sections below preserve the contemporaneous implementation, review, remediation, and evidence record. Their draft/CHANGES REQUIRED language describes those historical gates and is not the current repository status.
 
 ## Plan-ready synchronization
 

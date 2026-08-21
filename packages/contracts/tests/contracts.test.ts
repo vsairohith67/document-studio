@@ -3,6 +3,7 @@ import addFormats from 'ajv-formats';
 import { describe, expect, it } from 'vitest';
 import fixtures from '../fixtures/foundation-contracts.json';
 import pdfMergeFixtures from '../fixtures/pdf-merge-contracts.json';
+import pdfCompressLosslessFixtures from '../fixtures/pdf-compress-lossless-contracts.json';
 import ipcSchema from '../ipc.schema.json';
 import jobSchema from '../job.schema.json';
 import operationSchema from '../operation.schema.json';
@@ -91,5 +92,31 @@ describe('pdf.merge contracts', () => {
       ...pdfMergeFixtures.minimumRequest,
       settings: {},
     })).toBe(false);
+  });
+});
+
+describe('pdf.compress-lossless contracts', () => {
+  it('accepts exactly the public v1 manifest and one-PDF request', () => {
+    expect(pdfCompressLosslessFixtures.operationManifest.id).toBe('pdf.compress-lossless');
+    expect(pdfCompressLosslessFixtures.operationManifest.version).toBe('1.0.0');
+    expect(
+      validateOperation(pdfCompressLosslessFixtures.operationManifest),
+      JSON.stringify(validateOperation.errors),
+    ).toBe(true);
+    expect(
+      validateJobsCreateRequest(pdfCompressLosslessFixtures.request),
+      JSON.stringify(validateJobsCreateRequest.errors),
+    ).toBe(true);
+  });
+
+  it('rejects zero, multiple, non-PDF, and settings-bearing requests', () => {
+    for (const candidate of [
+      { ...pdfCompressLosslessFixtures.request, inputPaths: [] },
+      { ...pdfCompressLosslessFixtures.request, inputPaths: ['C:\\input\\a.pdf', 'C:\\input\\b.pdf'] },
+      { ...pdfCompressLosslessFixtures.request, requestedOutputName: 'compressed.txt' },
+      { ...pdfCompressLosslessFixtures.request, settings: { quality: 'balanced' } },
+    ]) {
+      expect(validateJobsCreateRequest(candidate)).toBe(false);
+    }
   });
 });

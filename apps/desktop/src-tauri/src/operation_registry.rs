@@ -3,9 +3,10 @@ use serde_json::json;
 use crate::contracts::{
     JobsCreateRequest, OperationError, OperationInputs, OperationManifest, OperationOutputs,
     OperationStage, CORE_PDF_OPERATION_VERSION, DIAGNOSTIC_COPY_OPERATION_ID,
-    DIAGNOSTIC_COPY_VERSION, PDF_EXTRACT_OPERATION_ID, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS,
-    PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION, PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID,
-    PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID, QPDF_DEPENDENCY_ID,
+    DIAGNOSTIC_COPY_VERSION, PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION,
+    PDF_EXTRACT_OPERATION_ID, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS, PDF_MERGE_OPERATION_ID,
+    PDF_MERGE_VERSION, PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
+    PDF_SPLIT_OPERATION_ID, QPDF_DEPENDENCY_ID,
 };
 use crate::path_policy::validate_output_name;
 
@@ -13,12 +14,14 @@ use crate::path_policy::validate_output_name;
 pub enum OperationKind {
     DiagnosticCopy,
     PdfMerge,
+    PdfCompressLossless,
 }
 
 pub fn all_manifests() -> Vec<OperationManifest> {
     vec![
         diagnostic_copy_manifest(),
         pdf_merge_manifest(),
+        pdf_compress_lossless_manifest(),
         extract_pages_manifest(),
         remove_pages_manifest(),
         reorder_pages_manifest(),
@@ -49,6 +52,16 @@ pub fn validate_create_request(
             }
             Ok(OperationKind::PdfMerge)
         }
+        PDF_COMPRESS_LOSSLESS_OPERATION_ID if request.input_paths.len() == 1 => {
+            if !request
+                .requested_output_name
+                .to_ascii_lowercase()
+                .ends_with(".pdf")
+            {
+                return Err(invalid_pdf_output_name());
+            }
+            Ok(OperationKind::PdfCompressLossless)
+        }
         DIAGNOSTIC_COPY_OPERATION_ID => Err(OperationError::safe(
             "INVALID_INPUT_COUNT",
             "Choose exactly one input",
@@ -60,6 +73,13 @@ pub fn validate_create_request(
             "INVALID_INPUT_COUNT",
             "Choose between 2 and 128 PDFs",
             "PDF Merge requires at least two and no more than 128 input files.",
+            OperationStage::Inspect,
+            false,
+        )),
+        PDF_COMPRESS_LOSSLESS_OPERATION_ID => Err(OperationError::safe(
+            "INVALID_INPUT_COUNT",
+            "Choose exactly one PDF",
+            "Lossless PDF Compression accepts exactly one local PDF.",
             OperationStage::Inspect,
             false,
         )),
@@ -110,6 +130,33 @@ pub fn pdf_merge_manifest() -> OperationManifest {
             "page-count",
             "reopen",
             "publication-hash",
+        ],
+    )
+}
+
+pub fn pdf_compress_lossless_manifest() -> OperationManifest {
+    manifest(
+        PDF_COMPRESS_LOSSLESS_OPERATION_ID,
+        PDF_COMPRESS_LOSSLESS_VERSION,
+        "Lossless PDF Compression",
+        "optimize",
+        "Losslessly recompresses one local PDF while preserving its referenced document structure.",
+        vec!["application/pdf"],
+        1,
+        1,
+        "application/pdf",
+        vec![QPDF_DEPENDENCY_ID],
+        vec![
+            "regular-file",
+            "pdf-magic",
+            "sha256",
+            "qpdf-strict-check",
+            "unencrypted",
+            "page-count",
+            "structural-inventory",
+            "reopen",
+            "publication-hash",
+            "source-immutability",
         ],
     )
 }
@@ -334,14 +381,21 @@ mod tests {
     #[test]
     fn registry_exposes_accepted_and_g03_manifests() {
         let manifests = all_manifests();
-        assert_eq!(manifests.len(), 7);
+        assert_eq!(manifests.len(), 8);
         assert_eq!(manifests[0].id, "diagnostic.copy");
         assert_eq!(manifests[1].id, "pdf.merge");
         assert_eq!(manifests[1].inputs.minimum, 2);
         assert_eq!(manifests[1].inputs.maximum, 128);
         assert_eq!(manifests[1].dependencies, ["qpdf"]);
+        assert_eq!(manifests[2].id, "pdf.compress-lossless");
+        assert_eq!(manifests[2].inputs.minimum, 1);
+        assert_eq!(manifests[2].inputs.maximum, 1);
+        assert_eq!(manifests[2].dependencies, ["qpdf"]);
+        assert!(manifests[2]
+            .verification
+            .contains(&"structural-inventory".to_owned()));
         assert_eq!(
-            manifests[2..]
+            manifests[3..]
                 .iter()
                 .map(|manifest| manifest.id.as_str())
                 .collect::<Vec<_>>(),
@@ -373,6 +427,11 @@ mod tests {
             OperationKind::PdfMerge
         );
         assert_eq!(
+            validate_create_request(&request("pdf.compress-lossless", 1, "compressed.PDF"))
+                .unwrap(),
+            OperationKind::PdfCompressLossless
+        );
+        assert_eq!(
             validate_create_request(&request("pdf.merge", 1, "merged.pdf"))
                 .unwrap_err()
                 .code,
@@ -386,6 +445,18 @@ mod tests {
         );
         assert_eq!(
             validate_create_request(&request("pdf.merge", 2, "merged.txt"))
+                .unwrap_err()
+                .code,
+            "INVALID_OUTPUT_NAME"
+        );
+        assert_eq!(
+            validate_create_request(&request("pdf.compress-lossless", 2, "compressed.pdf"))
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT_COUNT"
+        );
+        assert_eq!(
+            validate_create_request(&request("pdf.compress-lossless", 1, "compressed.txt"))
                 .unwrap_err()
                 .code,
             "INVALID_OUTPUT_NAME"

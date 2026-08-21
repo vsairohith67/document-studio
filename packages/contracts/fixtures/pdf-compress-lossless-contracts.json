@@ -1,0 +1,56 @@
+{
+  "request": {
+    "operationId": "pdf.compress-lossless",
+    "inputPaths": ["C:\\Users\\Example\\Documents\\source.pdf"],
+    "destinationDirectory": "C:\\Users\\Example\\Documents",
+    "requestedOutputName": "source-compressed.pdf"
+  },
+  "operationManifest": {
+    "id": "pdf.compress-lossless",
+    "version": "1.0.0",
+    "name": "Lossless PDF Compression",
+    "category": "optimize",
+    "description": "Losslessly recompresses one local PDF while preserving its referenced document structure.",
+    "risk": "normal",
+    "locality": "local",
+    "inputs": {
+      "acceptedMimeTypes": ["application/pdf"],
+      "minimum": 1,
+      "maximum": 1,
+      "allowDirectories": false
+    },
+    "settingsSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "outputs": {
+      "mimeType": "application/pdf",
+      "multiplicity": "single"
+    },
+    "dependencies": ["qpdf"],
+    "verification": [
+      "regular-file",
+      "pdf-magic",
+      "sha256",
+      "qpdf-strict-check",
+      "unencrypted",
+      "page-count",
+      "structural-inventory",
+      "reopen",
+      "publication-hash",
+      "source-immutability"
+    ],
+    "stages": [
+      "inspect",
+      "preflight",
+      "estimate",
+      "plan",
+      "execute",
+      "verify",
+      "publish",
+      "audit",
+      "cleanup"
+    ]
+  }
+}
