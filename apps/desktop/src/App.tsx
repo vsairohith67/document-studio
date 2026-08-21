@@ -7,6 +7,11 @@ const ViewerWorkspace = lazy(async () => {
   return { default: module.ViewerWorkspace };
 });
 
+const OptimizeWorkspace = lazy(async () => {
+  const module = await import('./OptimizeWorkspace');
+  return { default: module.OptimizeWorkspace };
+});
+
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const maximumInputs = 128;
 
@@ -35,7 +40,7 @@ function validPdfOutputName(name: string): boolean {
 }
 
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<'merge' | 'viewer'>('merge');
+  const [workspaceMode, setWorkspaceMode] = useState<'merge' | 'viewer' | 'optimize'>('merge');
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [inputs, setInputs] = useState<SelectedPdf[]>([]);
   const [destination, setDestination] = useState<string | null>(null);
@@ -218,6 +223,19 @@ export default function App() {
   const progressPercent = progressTotal > 0 ? Math.min(100, Math.round((progressValue / progressTotal) * 100)) : job?.state === 'completed' ? 100 : 0;
   const activeError = job?.errors.at(-1);
 
+  if (workspaceMode === 'optimize') {
+    return (
+      <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing Lossless PDF Compression…</div></main>}>
+        <OptimizeWorkspace
+          system={system}
+          dependencies={dependencies}
+          onOpenMerge={() => setWorkspaceMode('merge')}
+          onOpenViewer={() => setWorkspaceMode('viewer')}
+        />
+      </Suspense>
+    );
+  }
+
   if (workspaceMode === 'viewer') {
     return (
       <div className="app-shell viewer-shell">
@@ -225,7 +243,7 @@ export default function App() {
           <div className="brand" aria-label="Document Studio">DS</div>
           <button className="rail-button" onClick={() => setWorkspaceMode('merge')}>Merge</button>
           <button className="rail-button active" aria-current="page">Viewer</button>
-          <button className="rail-button" disabled>Tools</button>
+          <button className="rail-button" onClick={() => setWorkspaceMode('optimize')}>Optimize</button>
           <button className="rail-button" disabled>Settings</button>
         </aside>
         <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing the local PDF workspace…</div></main>}><ViewerWorkspace /></Suspense>
@@ -238,7 +256,7 @@ export default function App() {
       <aside className="rail" aria-label="Primary navigation">
         <div className="brand" aria-label="Document Studio">DS</div>
         <button className="rail-button active" aria-current="page">Merge</button>
-        <button className="rail-button" onClick={() => setWorkspaceMode('viewer')}>Viewer</button><button className="rail-button" disabled>Tools</button><button className="rail-button" disabled>Settings</button>
+        <button className="rail-button" onClick={() => setWorkspaceMode('viewer')}>Viewer</button><button className="rail-button" onClick={() => setWorkspaceMode('optimize')}>Optimize</button><button className="rail-button" disabled>Settings</button>
       </aside>
       <main className="workspace">
         <header className="page-header">
@@ -292,6 +310,7 @@ export default function App() {
               {(job?.state === 'failed' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? 'The merge did not finish'}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span></div>}
             </article>
             <article className="card placeholder-card" aria-labelledby="viewer-heading"><p className="eyebrow">LOCAL PDF WORKSPACE</p><h2 id="viewer-heading">View and organize pages</h2><p>Open one PDF for progressive viewing, search, selection and verified page operations.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('viewer')}>Open Viewer</button></article>
+            <article className="card placeholder-card" aria-labelledby="optimize-heading"><p className="eyebrow">LOSSLESS OPTIMIZE</p><h2 id="optimize-heading">Recompress one PDF</h2><p>Use verified structural recompression without image-quality settings or presets.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('optimize')}>Open Optimize</button></article>
           </aside>
         </section>
         <section className="history-section" aria-labelledby="history-heading">

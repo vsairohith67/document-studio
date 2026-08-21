@@ -15,6 +15,7 @@ use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use crate::contracts::{PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS};
 
 pub const MERGED_STAGING_RELATIVE_PATH: &str = r"staging\merged.pdf";
+pub const COMPRESSED_STAGING_RELATIVE_PATH: &str = r"staging\compressed.pdf";
 pub const QPDF_BUNDLE_MANIFEST_JSON: &str =
     include_str!("../resources/qpdf/12.3.2/qpdf-manifest.json");
 const QPDF_CACHE_DIRECTORY: &str = "qpdf/12.3.2";
@@ -328,7 +329,7 @@ pub enum QpdfContractError {
     SnapshotPath,
     #[error("snapshot paths must be physically distinct")]
     DuplicateSnapshotPath,
-    #[error("the staging output path is not the owned merge path")]
+    #[error("the staging output path is not the owned operation path")]
     StagingPath,
     #[error("qpdf returned an unexpected status")]
     UnexpectedExit,
@@ -401,6 +402,29 @@ pub fn build_production_merge_arguments(
     arguments.push(OsString::from("--"));
     arguments.push(staging_relative_path.as_os_str().to_owned());
     Ok(arguments)
+}
+
+pub fn build_lossless_compression_arguments(
+    input_relative_path: &Path,
+    staging_relative_path: &Path,
+) -> Result<Vec<OsString>, QpdfContractError> {
+    if input_relative_path != snapshot_relative_path(0)
+        || !input_relative_path.as_os_str().is_ascii()
+    {
+        return Err(QpdfContractError::SnapshotPath);
+    }
+    if staging_relative_path != Path::new(COMPRESSED_STAGING_RELATIVE_PATH) {
+        return Err(QpdfContractError::StagingPath);
+    }
+
+    Ok(vec![
+        input_relative_path.as_os_str().to_owned(),
+        OsString::from("--stream-data=compress"),
+        OsString::from("--object-streams=generate"),
+        OsString::from("--recompress-flate"),
+        OsString::from("--compression-level=9"),
+        staging_relative_path.as_os_str().to_owned(),
+    ])
 }
 
 pub fn interpret_structural_check_exit(

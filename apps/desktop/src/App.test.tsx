@@ -36,7 +36,7 @@ const inputTwo: FileInspection = { path: 'C:\\input\\two.pdf', displayName: 'two
 const inputThree: FileInspection = { path: 'C:\\input\\three.pdf', displayName: 'three.pdf', sizeBytes: 12288, modifiedAt: '2026-08-17T12:02:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-three' };
 const dependencies: DependencyDiagnostic[] = [
   { id: 'document-studio-core', kind: 'built-in', status: 'available', version: '0.1.0', capabilities: ['diagnostic.copy'], checkedAt: '2026-08-17T12:00:00Z', errorCode: null },
-  { id: 'qpdf', kind: 'external', status: 'available', version: '12.3.2', capabilities: ['pdf.merge'], checkedAt: '2026-08-17T12:00:00Z', errorCode: null },
+  { id: 'qpdf', kind: 'external', status: 'available', version: '12.3.2', capabilities: ['pdf.merge', 'pdf.compress-lossless'], checkedAt: '2026-08-17T12:00:00Z', errorCode: null },
 ];
 
 function makeJob(state: JobRecord['state'] = 'queued'): JobRecord {

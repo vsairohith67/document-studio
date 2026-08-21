@@ -8,6 +8,7 @@ pub mod job_engine;
 pub mod operation_registry;
 pub mod page_plan;
 pub mod path_policy;
+pub mod pdf_compression;
 pub mod pdf_merge;
 pub mod pdf_operations;
 pub mod process_sandbox;

@@ -640,6 +640,20 @@ pub fn spawn_sandboxed(
     profile: &FixedAppContainerProfile,
     spec: &SandboxLaunchSpec<'_>,
 ) -> Result<OwnedSandboxProcess, SandboxError> {
+    spawn_sandboxed_with_capture_limit(profile, spec, CAPTURE_LIMIT_BYTES)
+}
+
+pub(crate) fn spawn_sandboxed_with_capture_limit(
+    profile: &FixedAppContainerProfile,
+    spec: &SandboxLaunchSpec<'_>,
+    capture_limit: usize,
+) -> Result<OwnedSandboxProcess, SandboxError> {
+    if capture_limit == 0 {
+        return Err(SandboxError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox capture limit must be positive",
+        )));
+    }
     if !spec.executable.is_file()
         || !spec.working_directory.is_dir()
         || !spec.temporary_directory.is_dir()
@@ -734,8 +748,8 @@ pub fn spawn_sandboxed(
     }
     stdout_pipe.close_write();
     stderr_pipe.close_write();
-    let stdout = capture_bounded(stdout_pipe.take_read());
-    let stderr = capture_bounded(stderr_pipe.take_read());
+    let stdout = capture_bounded(stdout_pipe.take_read(), capture_limit);
+    let stderr = capture_bounded(stderr_pipe.take_read(), capture_limit);
 
     let mut guard = UnassignedProcessGuard::from(process);
     let job = create_limited_job()?;
@@ -837,26 +851,26 @@ impl Drop for CapturePipe {
     }
 }
 
-fn capture_bounded(handle: HANDLE) -> JoinHandle<Vec<u8>> {
+fn capture_bounded(handle: HANDLE, capture_limit: usize) -> JoinHandle<Vec<u8>> {
     let handle = handle as usize;
     std::thread::spawn(move || {
         // SAFETY: ownership of the pipe read handle is transferred to this File.
         let mut pipe = unsafe { std::fs::File::from_raw_handle(handle as RawHandle) };
-        let mut captured = Vec::with_capacity(CAPTURE_LIMIT_BYTES);
+        let mut captured = Vec::with_capacity(capture_limit);
         let mut buffer = [0_u8; 8192];
         while let Ok(read) = pipe.read(&mut buffer) {
             if read == 0 {
                 break;
             }
-            if read >= CAPTURE_LIMIT_BYTES {
+            if read >= capture_limit {
                 captured.clear();
-                captured.extend_from_slice(&buffer[read - CAPTURE_LIMIT_BYTES..read]);
+                captured.extend_from_slice(&buffer[read - capture_limit..read]);
                 continue;
             }
             let overflow = captured
                 .len()
                 .saturating_add(read)
-                .saturating_sub(CAPTURE_LIMIT_BYTES);
+                .saturating_sub(capture_limit);
             if overflow > 0 {
                 captured.drain(..overflow);
             }

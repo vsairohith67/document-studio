@@ -16,6 +16,7 @@
     "test:browser": "playwright test",
     "test:webview2": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-webview2-smoke.ps1",
     "verify:g03": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g03-boundaries.ps1",
+    "verify:g04a": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04a-boundaries.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

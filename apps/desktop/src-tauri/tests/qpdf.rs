@@ -2,9 +2,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use document_studio_lib::qpdf::{
-    build_production_merge_arguments, interpret_encryption_check_exit,
-    interpret_structural_check_exit, EncryptionCheckOutcome, OrdinalSnapshot, QpdfContractError,
-    StructuralCheckOutcome, MERGED_STAGING_RELATIVE_PATH, QPDF_BUNDLE_MANIFEST_JSON,
+    build_lossless_compression_arguments, build_production_merge_arguments,
+    interpret_encryption_check_exit, interpret_structural_check_exit, EncryptionCheckOutcome,
+    OrdinalSnapshot, QpdfContractError, StructuralCheckOutcome, COMPRESSED_STAGING_RELATIVE_PATH,
+    MERGED_STAGING_RELATIVE_PATH, QPDF_BUNDLE_MANIFEST_JSON,
 };
 
 #[test]
@@ -28,6 +29,55 @@ fn compiled_qpdf_manifest_matches_the_reviewed_zero_capability_bundle() {
         0
     );
     assert_eq!(manifest["files"].as_array().unwrap().len(), 15);
+}
+
+#[test]
+fn lossless_compression_arguments_are_exact_direct_qpdf_argv() {
+    let arguments = build_lossless_compression_arguments(
+        Path::new(r"inputs\source-0000.pdf"),
+        Path::new(COMPRESSED_STAGING_RELATIVE_PATH),
+    )
+    .unwrap();
+    assert_eq!(
+        arguments,
+        [
+            r"inputs\source-0000.pdf",
+            "--stream-data=compress",
+            "--object-streams=generate",
+            "--recompress-flate",
+            "--compression-level=9",
+            r"staging\compressed.pdf",
+        ]
+        .map(OsString::from)
+        .to_vec()
+    );
+    assert!(arguments.iter().all(|argument| argument != "cmd.exe"));
+    assert!(arguments
+        .iter()
+        .all(|argument| argument != "powershell.exe"));
+    assert!(arguments
+        .iter()
+        .all(|argument| !argument.to_string_lossy().contains("--remove-")));
+}
+
+#[test]
+fn lossless_compression_builder_rejects_unowned_paths() {
+    assert_eq!(
+        build_lossless_compression_arguments(
+            Path::new(r"C:\source.pdf"),
+            Path::new(COMPRESSED_STAGING_RELATIVE_PATH),
+        )
+        .unwrap_err(),
+        QpdfContractError::SnapshotPath
+    );
+    assert_eq!(
+        build_lossless_compression_arguments(
+            Path::new(r"inputs\source-0000.pdf"),
+            Path::new(r"staging\other.pdf"),
+        )
+        .unwrap_err(),
+        QpdfContractError::StagingPath
+    );
 }
 
 #[test]

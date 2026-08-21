@@ -198,6 +198,44 @@ test('renders progressively through the matching worker and bounded raw range co
   expect(selectedText).toContain('Page 1');
 });
 
+test('G04A lossless recompression renders the same representative PDF.js pixels', async ({ page }, testInfo) => {
+  const sourcePath = testInfo.outputPath('g04a-visual-source.pdf');
+  const compressedPath = testInfo.outputPath('g04a-visual-compressed.pdf');
+  const sourceBytes = syntheticPdf(1);
+  await writeFile(sourcePath, sourceBytes);
+  execFileSync(
+    resolve(import.meta.dirname, '..', 'src-tauri', 'resources', 'qpdf', '12.3.2', 'bin', 'qpdf.exe'),
+    [
+      sourcePath,
+      '--stream-data=compress',
+      '--object-streams=generate',
+      '--recompress-flate',
+      '--compression-level=9',
+      compressedPath,
+    ],
+    { stdio: 'pipe' },
+  );
+  await installTransportSequence(page, [
+    { pageCount: 1, bytes: sourceBytes, displayName: 'g04a-visual-source.pdf' },
+    { pageCount: 1, bytes: await readFile(compressedPath), displayName: 'g04a-visual-compressed.pdf' },
+  ]);
+  await openViewer(page);
+  await expect.poll(() => page.evaluate(() => performance
+    .getEntriesByName('g03-first-page-displayed').length)).toBeGreaterThan(0);
+  const completedRenders = await page.evaluate(() => performance
+    .getEntriesByName('g03-first-page-displayed').length);
+  const sourcePixels = await page.locator('.pdf-page-surface canvas').first()
+    .evaluate((canvas) => (canvas as HTMLCanvasElement).toDataURL('image/png'));
+
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+  await expect(page.getByText('g04a-visual-compressed.pdf')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => performance
+    .getEntriesByName('g03-first-page-displayed').length)).toBeGreaterThan(completedRenders);
+  const compressedPixels = await page.locator('.pdf-page-surface canvas').first()
+    .evaluate((canvas) => (canvas as HTMLCanvasElement).toDataURL('image/png'));
+  expect(compressedPixels).toBe(sourcePixels);
+});
+
 test('unlocks an encrypted PDF only in memory and keeps structural operations disabled', async ({ page }, testInfo) => {
   const clearPath = testInfo.outputPath('clear.pdf');
   const encryptedPath = testInfo.outputPath('encrypted.pdf');

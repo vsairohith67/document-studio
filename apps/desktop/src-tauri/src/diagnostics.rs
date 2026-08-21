@@ -3,7 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use crate::app_state::AppState;
 use crate::contracts::{
     DependencyDiagnostic, DependencyKind, DependencyStatus, OperationError, OperationStage,
-    PDF_MERGE_OPERATION_ID, QPDF_DEPENDENCY_ID,
+    PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_MERGE_OPERATION_ID, QPDF_DEPENDENCY_ID,
 };
 use crate::process_sandbox::{
     authorize_qpdf_paths, ensure_production_profile, run_sandboxed_capture, SandboxLaunchSpec,
@@ -98,7 +98,10 @@ fn qpdf_diagnostic(state: &AppState, checked_at: &str) -> DependencyDiagnostic {
             DependencyStatus::Unhealthy
         },
         version: Some(crate::contracts::QPDF_VERSION.to_owned()),
-        capabilities: vec![PDF_MERGE_OPERATION_ID.to_owned()],
+        capabilities: vec![
+            PDF_MERGE_OPERATION_ID.to_owned(),
+            PDF_COMPRESS_LOSSLESS_OPERATION_ID.to_owned(),
+        ],
         checked_at: checked_at.to_owned(),
         error_code: result.err().map(|_| "QPDF_RUNTIME_UNAVAILABLE".to_owned()),
     }
