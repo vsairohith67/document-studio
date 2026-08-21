@@ -10,9 +10,8 @@ if ([string]::IsNullOrWhiteSpace($Executable)) {
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $evidenceRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("document-studio-production-webview2-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $evidenceRoot | Out-Null
-$originalLocalAppData = $env:LOCALAPPDATA
-$originalAppData = $env:APPDATA
 $originalArguments = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
+$originalUserDataFolder = $env:WEBVIEW2_USER_DATA_FOLDER
 
 function Get-OwnedDescendants([int]$RootPid) {
   $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
@@ -44,26 +43,91 @@ function Test-LoopbackPort([int]$Port) {
   }
 }
 
+function Get-ProcessLog([string]$Path) {
+  if (!(Test-Path -LiteralPath $Path)) { return '<not created>' }
+  $content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if ([string]::IsNullOrWhiteSpace($content)) { return '<empty>' }
+  if ($content.Length -le 4096) { return $content.Trim() }
+  return $content.Substring($content.Length - 4096).Trim()
+}
+
+function Get-UdfProcesses([string]$UserDataFolder) {
+  $escaped = [regex]::Escape($UserDataFolder)
+  return @(Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.Name -ieq 'msedgewebview2.exe' -and
+      [string]$_.CommandLine -match $escaped
+    } |
+    Select-Object ProcessId, ParentProcessId, Name, CommandLine)
+}
+
+function Write-CaseDiagnostics(
+  [string]$Name,
+  [System.Diagnostics.Process]$Process,
+  [System.Diagnostics.Stopwatch]$Stopwatch,
+  [string]$UserDataFolder,
+  [string]$StandardOutput,
+  [string]$StandardError,
+  [object[]]$ObservedProcesses
+) {
+  $exitCode = '<running>'
+  if ($Process.HasExited) {
+    $Process.WaitForExit()
+    $exitCode = [string]$Process.ExitCode
+  }
+  $profileEntries = @()
+  if (Test-Path -LiteralPath $UserDataFolder) {
+    $profileEntries = @(Get-ChildItem -LiteralPath $UserDataFolder -Force -ErrorAction SilentlyContinue |
+      Select-Object -First 20 -ExpandProperty Name)
+  }
+  Write-Output "Production WebView2 diagnostics: case=$Name; executable=$Executable; pid=$($Process.Id); exitCode=$exitCode; elapsedMs=$($Stopwatch.ElapsedMilliseconds); udf=$UserDataFolder; udfEntries=$($profileEntries -join ',')."
+  foreach ($observed in $ObservedProcesses) {
+    Write-Output "Observed process: pid=$($observed.ProcessId); parent=$($observed.ParentProcessId); name=$($observed.Name); command=$($observed.CommandLine)"
+  }
+  Write-Output "Process stdout: $(Get-ProcessLog $StandardOutput)"
+  Write-Output "Process stderr: $(Get-ProcessLog $StandardError)"
+}
+
 function Invoke-Case([string]$Name, [string]$Arguments, [int]$ForbiddenPort) {
   $caseRoot = Join-Path $evidenceRoot $Name
-  $local = Join-Path $caseRoot 'local'
-  $roaming = Join-Path $caseRoot 'roaming'
-  New-Item -ItemType Directory -Path $local,$roaming | Out-Null
-  $env:LOCALAPPDATA = $local
-  $env:APPDATA = $roaming
+  $userDataFolder = Join-Path $caseRoot 'webview2-user-data'
+  $standardOutput = Join-Path $caseRoot 'application.stdout.log'
+  $standardError = Join-Path $caseRoot 'application.stderr.log'
+  New-Item -ItemType Directory -Path $userDataFolder | Out-Null
+  $env:WEBVIEW2_USER_DATA_FOLDER = $userDataFolder
   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $Arguments
-  $process = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden
+  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $process = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden `
+    -RedirectStandardOutput $standardOutput -RedirectStandardError $standardError
   $owned = @()
+  $observed = @()
+  $browser = @()
   try {
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     do {
-      if ($process.HasExited) { throw "Production application exited before WebView2 started in $Name." }
+      if ($process.HasExited) {
+        Write-CaseDiagnostics $Name $process $stopwatch $userDataFolder $standardOutput $standardError $observed
+        throw "Production application exited before WebView2 started in $Name."
+      }
       $owned = @(Get-OwnedDescendants $process.Id)
+      $observed = @($owned)
       $browser = @($owned | Where-Object { $_.Name -ieq 'msedgewebview2.exe' })
-      if ($browser.Count -gt 0) { break }
+      $profileReady = @(Get-ChildItem -LiteralPath $userDataFolder -Force -ErrorAction SilentlyContinue).Count -gt 0
+      if ($browser.Count -gt 0 -and $profileReady) { break }
       Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
-    if ($browser.Count -eq 0) { throw "No owned WebView2 child was created in $Name." }
+    if ($browser.Count -eq 0 -or !$profileReady) {
+      Write-CaseDiagnostics $Name $process $stopwatch $userDataFolder $standardOutput $standardError $observed
+      throw "No ready owned WebView2 child and profile were created in $Name."
+    }
+    $userDataPattern = [regex]::Escape($userDataFolder)
+    $browserWithOwnedProfile = @($browser | Where-Object {
+      [string]$_.CommandLine -match $userDataPattern
+    })
+    if ($browserWithOwnedProfile.Count -eq 0) {
+      Write-CaseDiagnostics $Name $process $stopwatch $userDataFolder $standardOutput $standardError $observed
+      throw "The owned WebView2 process did not use the isolated profile in $Name."
+    }
     foreach ($child in $browser) {
       $command = [string]$child.CommandLine
       if ($command -match '(?i)--remote-debugging-|--remote-allow-origins') {
@@ -71,11 +135,24 @@ function Invoke-Case([string]$Name, [string]$Arguments, [int]$ForbiddenPort) {
       }
     }
     if (Test-LoopbackPort $ForbiddenPort) { throw "A forbidden CDP listener appeared in $Name." }
+    Write-Output "Production WebView2 ready: case=$Name; elapsedMs=$($stopwatch.ElapsedMilliseconds); pid=$($process.Id); browserPid=$($browserWithOwnedProfile[0].ProcessId); udf=$userDataFolder."
   } finally {
     if (!$process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-    $process.WaitForExit(10000) | Out-Null
-    foreach ($child in $owned | Sort-Object ProcessId -Descending) {
+    if (!$process.WaitForExit(10000)) {
+      throw "Production application cleanup did not complete in $Name."
+    }
+    $profileProcesses = @(Get-UdfProcesses $userDataFolder)
+    foreach ($child in @($owned + $profileProcesses) | Sort-Object ProcessId -Unique -Descending) {
       Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+      $profileProcesses = @(Get-UdfProcesses $userDataFolder)
+      if ($profileProcesses.Count -eq 0) { break }
+      Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $cleanupDeadline)
+    if ($profileProcesses.Count -ne 0) {
+      throw "Owned WebView2 cleanup did not complete in $Name."
     }
   }
 }
@@ -89,8 +166,7 @@ try {
   Invoke-Case 'benign' '--disable-gpu --force-color-profile=srgb' $port
   Write-Output 'Production WebView2 inherited-argument smoke passed (malicious family cleared; benign value created no CDP).'
 } finally {
-  $env:LOCALAPPDATA = $originalLocalAppData
-  $env:APPDATA = $originalAppData
   $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $originalArguments
+  $env:WEBVIEW2_USER_DATA_FOLDER = $originalUserDataFolder
   Remove-Item -LiteralPath $evidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
