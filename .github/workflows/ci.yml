@@ -76,6 +76,7 @@ jobs:
           npm test
           npm run build
           npm run verify:g03 --workspace @document-studio/desktop
+          npm run verify:g04a --workspace @document-studio/desktop
       - name: Install locked project-local Chromium
         shell: pwsh
         env:
