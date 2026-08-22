@@ -42,13 +42,14 @@ jobs:
           components: rustfmt, clippy
           targets: x86_64-pc-windows-msvc
       - name: Restore Cargo dependency cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-1.97.1-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-1.97.1-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
       - name: Install pinned Cosign verifier
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
@@ -123,3 +124,12 @@ jobs:
           npm --workspace @document-studio/desktop run tauri -- build --no-bundle
           powershell -NoProfile -ExecutionPolicy Bypass -File .\apps\desktop\scripts\test-production-webview2-arguments.ps1
           npm run verify:g03 --workspace @document-studio/desktop
+      - name: Save Cargo dependency cache on trusted main
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-1.97.1-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
