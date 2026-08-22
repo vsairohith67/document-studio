@@ -34,6 +34,7 @@ interface OptimizeWorkspaceProps {
   dependencies: DependencyDiagnostic[];
   onOpenMerge: () => void;
   onOpenViewer: () => void;
+  onOpenConvert?: () => void;
 }
 
 export function OptimizeWorkspace({
@@ -41,6 +42,7 @@ export function OptimizeWorkspace({
   dependencies,
   onOpenMerge,
   onOpenViewer,
+  onOpenConvert = () => undefined,
 }: OptimizeWorkspaceProps) {
   const [source, setSource] = useState<FileInspection | null>(null);
   const [destination, setDestination] = useState<string | null>(null);
@@ -201,6 +203,7 @@ export function OptimizeWorkspace({
         <button className="rail-button" onClick={onOpenMerge}>Merge</button>
         <button className="rail-button" onClick={onOpenViewer}>Viewer</button>
         <button className="rail-button active" aria-current="page">Optimize</button>
+        <button className="rail-button" onClick={onOpenConvert}>Convert</button>
         <button className="rail-button" disabled>Settings</button>
       </aside>
       <main className="workspace">

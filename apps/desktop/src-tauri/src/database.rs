@@ -9,12 +9,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::contracts::{
-    DependencyDiagnostic, JobInput, JobOutput, JobProgress, JobRecord, JobState, OperationError,
-    OperationStage, OutputStatus, ProgressUnit, SettingRecord, StoredOperationPlan,
-    DEFAULT_HISTORY_RETENTION_DAYS, DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY,
-    HISTORY_RETENTION_SCOPE, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
-    LEGACY_DIAGNOSTIC_COPY_VERSION, MAX_HISTORY_PURGE, OPERATION_PLAN_MAX_BYTES,
-    OPERATION_PLAN_SCHEMA_VERSION,
+    DependencyDiagnostic, JobInput, JobOutput, JobProgress, JobRecord, JobState, JobWarning,
+    OperationError, OperationSpecEnvelope, OperationStage, OutputStatus, ProgressUnit,
+    SettingRecord, StoredOperationPlan, StoredOperationSpec, DEFAULT_HISTORY_RETENTION_DAYS,
+    DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY, HISTORY_RETENTION_SCOPE,
+    LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN, LEGACY_DIAGNOSTIC_COPY_VERSION,
+    MAX_HISTORY_PURGE, OPERATION_PLAN_MAX_BYTES, OPERATION_PLAN_SCHEMA_VERSION,
+    OPERATION_SPEC_MAX_BYTES, OPERATION_SPEC_SCHEMA_VERSION,
 };
 use crate::job_engine::can_transition;
 
@@ -55,6 +56,11 @@ pub const FOUNDATION_MIGRATIONS: &[Migration] = &[
         name: "job_operation_plans",
         sql: include_str!("../migrations/0004_job_operation_plans.sql"),
     },
+    Migration {
+        version: 5,
+        name: "job_operation_specs_and_warnings",
+        sql: include_str!("../migrations/0005_job_operation_specs_and_warnings.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -85,6 +91,10 @@ pub enum DatabaseError {
     OperationPlanInvalid,
     #[error("operation plan does not match the owning job operation")]
     OperationPlanMismatch,
+    #[error("operation settings are not canonical, bounded, or consistent with the job")]
+    OperationSpecInvalid,
+    #[error("operation settings do not match the owning job operation")]
+    OperationSpecMismatch,
 }
 
 pub struct Database {
@@ -135,7 +145,7 @@ impl Database {
     }
 
     pub fn create_job(&mut self, job: &JobRecord) -> Result<(), DatabaseError> {
-        self.create_job_internal(job, None)
+        self.create_job_internal(job, None, None)
     }
 
     pub fn create_job_with_plan(
@@ -143,13 +153,22 @@ impl Database {
         job: &JobRecord,
         plan: &StoredOperationPlan,
     ) -> Result<(), DatabaseError> {
-        self.create_job_internal(job, Some(plan))
+        self.create_job_internal(job, Some(plan), None)
+    }
+
+    pub fn create_job_with_spec(
+        &mut self,
+        job: &JobRecord,
+        spec: &StoredOperationSpec,
+    ) -> Result<(), DatabaseError> {
+        self.create_job_internal(job, None, Some(spec))
     }
 
     fn create_job_internal(
         &mut self,
         job: &JobRecord,
         plan: Option<&StoredOperationPlan>,
+        spec: Option<&StoredOperationSpec>,
     ) -> Result<(), DatabaseError> {
         let sequence = metadata_i64(job.sequence, "job sequence")?;
         let completed_units = metadata_i64(job.progress.completed_units, "completed units")?;
@@ -266,8 +285,138 @@ impl Database {
             )?;
         }
 
+        if let Some(spec) = spec {
+            let spec_bytes = spec.canonical_json.as_bytes();
+            let canonical = serde_json::to_string(&spec.envelope)?;
+            if spec.envelope.schema_version != OPERATION_SPEC_SCHEMA_VERSION
+                || spec.envelope.operation_id != job.operation_id
+                || spec_bytes.len() < 2
+                || spec_bytes.len() > OPERATION_SPEC_MAX_BYTES
+                || canonical != spec.canonical_json
+                || sha256_hex(spec_bytes) != spec.sha256
+            {
+                return Err(DatabaseError::OperationSpecInvalid);
+            }
+            transaction.execute(
+                "INSERT INTO job_operation_specs (
+                    job_id, schema_version, operation_id, settings_json,
+                    settings_sha256, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    job.id,
+                    spec.envelope.schema_version,
+                    spec.envelope.operation_id,
+                    spec.canonical_json,
+                    spec.sha256,
+                    spec.created_at,
+                ],
+            )?;
+        }
+
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn get_operation_spec(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<StoredOperationSpec>, DatabaseError> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT specs.schema_version, specs.operation_id, specs.settings_json,
+                        specs.settings_sha256, specs.created_at, jobs.operation_id
+                 FROM job_operation_specs AS specs
+                 INNER JOIN jobs ON jobs.id = specs.job_id
+                 WHERE specs.job_id = ?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, u8>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            schema_version,
+            operation_id,
+            canonical_json,
+            sha256,
+            created_at,
+            job_operation_id,
+        )) = stored
+        else {
+            return Ok(None);
+        };
+        if canonical_json.len() < 2
+            || canonical_json.len() > OPERATION_SPEC_MAX_BYTES
+            || sha256_hex(canonical_json.as_bytes()) != sha256
+        {
+            return Err(DatabaseError::OperationSpecInvalid);
+        }
+        if operation_id != job_operation_id {
+            return Err(DatabaseError::OperationSpecMismatch);
+        }
+        let envelope: OperationSpecEnvelope = serde_json::from_str(&canonical_json)?;
+        if schema_version != OPERATION_SPEC_SCHEMA_VERSION
+            || envelope.schema_version != schema_version
+            || envelope.operation_id != operation_id
+            || serde_json::to_string(&envelope)? != canonical_json
+        {
+            return Err(DatabaseError::OperationSpecInvalid);
+        }
+        Ok(Some(StoredOperationSpec {
+            envelope,
+            canonical_json,
+            sha256,
+            created_at,
+        }))
+    }
+
+    pub fn record_warning(
+        &mut self,
+        job_id: &str,
+        code: &str,
+        sanitized_detail: &str,
+        input_index: Option<u32>,
+        page_index: Option<u32>,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO job_warnings (
+                job_id, code, sanitized_detail, input_index, page_index, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                job_id,
+                code,
+                sanitized_detail,
+                input_index,
+                page_index,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_warnings(&self, job_id: &str) -> Result<Vec<JobWarning>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT code, sanitized_detail, input_index, page_index, created_at
+             FROM job_warnings WHERE job_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([job_id], |row| {
+            Ok(JobWarning {
+                code: row.get(0)?,
+                sanitized_detail: row.get(1)?,
+                input_index: row.get(2)?,
+                page_index: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn get_operation_plan(

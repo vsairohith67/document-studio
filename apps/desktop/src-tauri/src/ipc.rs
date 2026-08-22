@@ -9,7 +9,7 @@ use crate::app_state::{AppState, CancelOutcome};
 use crate::contracts::{
     CancelResponse, CorePdfJobCreateRequest, DestinationGrant, DestinationGrantRequest,
     FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest, JobIdRequest,
-    JobRecord, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
+    JobRecord, JobWarning, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
     SettingGetRequest, SettingRecord, SettingSetRequest, SystemStatus, ViewerDocumentMetadata,
     ViewerRangeRequest, ViewerSessionRequest, JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID,
     PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
@@ -17,6 +17,7 @@ use crate::contracts::{
 };
 use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
+use crate::image_to_pdf::ImageToPdfService;
 use crate::operation_registry::{all_manifests, validate_create_request, OperationKind};
 use crate::path_policy::canonical_regular_file;
 use crate::pdf_compression::PdfCompressionService;
@@ -35,7 +36,7 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
         .unwrap_or(0);
     Ok(SystemStatus {
         product: "Document Studio".to_owned(),
-        phase: "g04a-lossless-pdf-compression".to_owned(),
+        phase: "g04b-image-pdf-conversion".to_owned(),
         offline_by_default: true,
         database_schema_version: u32::try_from(version).unwrap_or(0),
     })
@@ -170,6 +171,9 @@ pub fn jobs_create(
         OperationKind::PdfCompressLossless => {
             PdfCompressionService::new(state.inner().clone()).create_job(request)?
         }
+        OperationKind::ImageToPdf => {
+            ImageToPdfService::new(state.inner().clone()).create_job(request)?
+        }
     };
     let job_id = job.id.clone();
     let worker_job_id = job_id.clone();
@@ -192,6 +196,12 @@ pub fn jobs_create(
             }
             OperationKind::PdfCompressLossless => {
                 let service = PdfCompressionService::new(worker_state);
+                let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
+                    let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                });
+            }
+            OperationKind::ImageToPdf => {
+                let service = ImageToPdfService::new(worker_state);
                 let _ = service.execute_with_registered_token(&worker_job_id, token, |event| {
                     let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
                 });
@@ -311,6 +321,22 @@ pub fn jobs_get(
 }
 
 #[tauri::command]
+pub fn jobs_warnings(
+    request: JobIdRequest,
+    state: State<'_, AppState>,
+) -> Result<Vec<JobWarning>, OperationError> {
+    state
+        .database()
+        .get_job(&request.job_id)
+        .map_err(|_| metadata_error())?
+        .ok_or_else(job_not_found)?;
+    state
+        .database()
+        .list_warnings(&request.job_id)
+        .map_err(|_| metadata_error())
+}
+
+#[tauri::command]
 pub fn history_list(
     request: HistoryListRequest,
     state: State<'_, AppState>,
@@ -414,9 +440,10 @@ pub fn diagnostic_copy_manifest() -> OperationManifest {
 }
 
 fn inspected_mime_type(path: &Path) -> Result<String, OperationError> {
-    crate::pdf_merge::inspect_pdf_mime(path)
-        .map(str::to_owned)
-        .map_err(|_| path_error())
+    match crate::pdf_merge::inspect_pdf_mime(path) {
+        Ok(value) => Ok(value.to_owned()),
+        Err(_) => crate::image_to_pdf::inspect_image_mime(path).map(str::to_owned),
+    }
 }
 
 fn cancel_queued_job(job_id: &str, state: &AppState) -> Result<CancelResponse, OperationError> {

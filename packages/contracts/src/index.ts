@@ -202,10 +202,26 @@ export interface PdfCompressLosslessCreateRequest {
   requestedOutputName: string;
 }
 
+export interface ImageToPdfCreateRequest {
+  operationId: 'image.to-pdf';
+  inputPaths: [string, ...string[]];
+  destinationDirectory: string;
+  requestedOutputName: string;
+}
+
 export type JobsCreateRequest =
   | DiagnosticCopyCreateRequest
   | PdfMergeCreateRequest
-  | PdfCompressLosslessCreateRequest;
+  | PdfCompressLosslessCreateRequest
+  | ImageToPdfCreateRequest;
+
+export interface JobWarning {
+  code: string;
+  sanitizedDetail: string;
+  inputIndex: number | null;
+  pageIndex: number | null;
+  createdAt: string;
+}
 
 export const CORE_PDF_OPERATION_IDS = [
   'pdf.extract-pages',

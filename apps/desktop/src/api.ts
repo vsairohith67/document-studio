@@ -12,6 +12,7 @@ import type {
   HistoryListRequest,
   JobIdRequest,
   JobRecord,
+  JobWarning,
   JobsCreateRequest,
   OperationManifest,
   ProgressEvent,
@@ -89,6 +90,15 @@ export const api = {
       if (Array.isArray(selected)) return selected;
       return typeof selected === 'string' ? [selected] : [];
     },
+    async selectImageInputs(): Promise<string[]> {
+      const selected = await open({
+        directory: false,
+        multiple: true,
+        filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }],
+      });
+      if (Array.isArray(selected)) return selected;
+      return typeof selected === 'string' ? [selected] : [];
+    },
     async selectInput(): Promise<string | null> {
       const selected = await open({ directory: false, multiple: false });
       return typeof selected === 'string' ? selected : null;
@@ -109,6 +119,7 @@ export const api = {
     resolveInterrupted: (request: JobIdRequest) =>
       invoke<JobRecord>('jobs_resolve_interrupted', { request }),
     get: (request: JobIdRequest) => invoke<JobRecord>('jobs_get', { request }),
+    warnings: (request: JobIdRequest) => invoke<JobWarning[]>('jobs_warnings', { request }),
     onProgress: (handler: (event: ProgressEvent) => void): Promise<UnlistenFn> =>
       browserTestTransport()?.onProgress?.(handler)
       ?? (browserTestMode()
