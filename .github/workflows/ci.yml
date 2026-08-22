@@ -1,7 +1,13 @@
 name: CI
 on:
   push:
+    branches:
+      - main
   pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -35,6 +41,14 @@ jobs:
           toolchain: 1.97.1
           components: rustfmt, clippy
           targets: x86_64-pc-windows-msvc
+      - name: Restore Cargo dependency cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-1.97.1-${{ hashFiles('Cargo.lock') }}
       - name: Install pinned Cosign verifier
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
         with:
