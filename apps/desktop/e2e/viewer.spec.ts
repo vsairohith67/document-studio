@@ -236,20 +236,10 @@ test('G04A lossless recompression renders the same representative PDF.js pixels'
   expect(compressedPixels).toBe(sourcePixels);
 });
 
-test('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer', async ({ page }, testInfo) => {
-  const evidenceDirectory = testInfo.outputPath('g04b-visual-evidence');
-  execFileSync(
-    'cargo',
-    [
-      'test', '--locked', '--test', 'image_to_pdf',
-      'jpeg_png_and_webp_publish_one_verified_page_each_in_selected_order',
-      '--', '--exact',
-    ],
-    {
-      cwd: resolve(import.meta.dirname, '..', '..', '..'),
-      env: { ...process.env, DOCUMENT_STUDIO_G04B_VISUAL_EVIDENCE_DIR: evidenceDirectory },
-      stdio: 'pipe',
-    },
+test('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer', async ({ page }) => {
+  const evidenceDirectory = resolve(
+    import.meta.dirname,
+    '..', '..', '..', 'target', 'g04b-browser-visual-evidence',
   );
   const sourceBytes = await readFile(resolve(evidenceDirectory, 'source.png'));
   const outputBytes = await readFile(resolve(evidenceDirectory, 'output.pdf'));

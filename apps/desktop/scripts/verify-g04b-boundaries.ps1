@@ -13,6 +13,7 @@ $migration = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\migrations\0005
 $convert = Get-Content -Raw (Join-Path $desktopRoot 'src\ConvertWorkspace.tsx')
 $contractSource = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\src\index.ts')
 $package = Get-Content -Raw (Join-Path $desktopRoot 'package.json')
+$visualProducer = Get-Content -Raw (Join-Path $desktopRoot 'scripts\prepare-g04b-visual-evidence.mjs')
 
 $exactManifestLines = @(
   'flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }',
@@ -74,8 +75,19 @@ foreach ($required in @(
 if (!$viewerTests.Contains('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer')) {
   throw 'G04B browser-backed visual evidence is missing.'
 }
-if (!$package.Contains('"pretest:browser": "cargo test --locked --test image_to_pdf --no-run"')) {
-  throw 'G04B native visual fixture producer must compile before Playwright timing starts.'
+if (!$package.Contains('"pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs"')) {
+  throw 'G04B native visual fixture producer must run before Playwright timing starts.'
+}
+foreach ($required in @(
+  'DOCUMENT_STUDIO_G04B_VISUAL_EVIDENCE_DIR',
+  'jpeg_png_and_webp_publish_one_verified_page_each_in_selected_order',
+  "'--', '--exact'",
+  "'source.png', 'output.pdf'"
+)) {
+  if (!$visualProducer.Contains($required)) { throw "G04B pre-browser visual producer is missing: $required" }
+}
+if (!$viewerTests.Contains("'target', 'g04b-browser-visual-evidence'")) {
+  throw 'G04B browser visual test is not consuming the pre-generated native evidence.'
 }
 if ($registry -notmatch 'IMAGE_TO_PDF_OPERATION_ID' -or
     $contractSource -notmatch "operationId: 'image\.to-pdf'" -or

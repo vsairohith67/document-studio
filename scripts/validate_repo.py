@@ -365,8 +365,18 @@ def validate_g04b_boundaries(inputs: dict[str, str]) -> None:
     viewer_tests = inputs['viewer_tests']
     if 'G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer' not in viewer_tests:
         raise SystemExit('G04B browser-backed visual evidence is missing')
-    if '"pretest:browser": "cargo test --locked --test image_to_pdf --no-run"' not in inputs['package']:
-        raise SystemExit('G04B native visual producer must compile before Playwright timing')
+    if '"pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs"' not in inputs['package']:
+        raise SystemExit('G04B native visual producer must run before Playwright timing')
+    for required in [
+        'DOCUMENT_STUDIO_G04B_VISUAL_EVIDENCE_DIR',
+        'jpeg_png_and_webp_publish_one_verified_page_each_in_selected_order',
+        "'--', '--exact'",
+        "'source.png', 'output.pdf'",
+    ]:
+        if required not in inputs['visual_producer']:
+            raise SystemExit(f'G04B pre-browser visual producer is missing: {required}')
+    if "'target', 'g04b-browser-visual-evidence'" not in viewer_tests:
+        raise SystemExit('G04B browser test is not consuming pre-generated native evidence')
 
     convert = inputs['convert']
     for required in [
@@ -391,6 +401,7 @@ G04B_VALIDATION_INPUTS = {
     'image_tests': (ROOT / 'apps/desktop/src-tauri/tests/image_to_pdf.rs').read_text(encoding='utf-8'),
     'viewer_tests': (ROOT / 'apps/desktop/e2e/viewer.spec.ts').read_text(encoding='utf-8'),
     'package': (ROOT / 'apps/desktop/package.json').read_text(encoding='utf-8'),
+    'visual_producer': (ROOT / 'apps/desktop/scripts/prepare-g04b-visual-evidence.mjs').read_text(encoding='utf-8'),
     'convert': (ROOT / 'apps/desktop/src/ConvertWorkspace.tsx').read_text(encoding='utf-8'),
     'rust_production': '\n'.join(
         path.read_text(encoding='utf-8')
