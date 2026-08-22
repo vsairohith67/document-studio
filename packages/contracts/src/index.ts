@@ -27,6 +27,8 @@ export const OPERATION_STAGES = [
   'recovery',
 ] as const;
 
+export const CORE_PDF_MAX_PAGES = 4096;
+
 export type OperationStage = (typeof OPERATION_STAGES)[number];
 export type ProgressUnit = 'bytes' | 'items' | 'steps';
 export type OperationRisk = 'normal' | 'sensitive' | 'irreversible';
