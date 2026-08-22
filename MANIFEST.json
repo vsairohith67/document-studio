@@ -1,12 +1,12 @@
 {
   "product": "Document Studio",
-  "version": "0.4.0-g04a-lossless-compression-dev",
-  "audit_date": "21 August 2026",
+  "version": "0.5.0-g04b-image-pdf-conversion-dev",
+  "audit_date": "22 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
-  "current_goal": "G04A — Lossless PDF Compression (active implementation)",
+  "current_goal": "G04B — Image/PDF Conversion (active implementation)",
   "current_goal_prompt": "codex/prompts/04-compression-conversion.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
@@ -28,7 +28,7 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G01 through G03 are accepted on main. G03 — COMPLETE at merge 8d6844ebdc1fd6eedf41373d53ad36eb399cc489. G04A — active implementation on feat/g04a-lossless-compress; G04A is not accepted or complete.",
+  "publication_status": "G01 through G04A are accepted on main. G04A — COMPLETE at merge a27306653119e6e4fcdef162308445b78129f974. G04B — active implementation on feat/g04b-image-pdf-convert; G04B is not accepted or complete. The PDF-to-images renderer dependency is blocked.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
@@ -63,11 +63,23 @@
     "pdf.rotate-pages@1.0.0",
     "pdf.split@1.0.0"
   ],
-  "active_operation": {
+  "completed_operation": {
     "id": "pdf.compress-lossless",
     "version": "1.0.0",
-    "status": "implementation; not accepted or complete",
+    "status": "accepted on main at G04A merge a27306653119e6e4fcdef162308445b78129f974",
     "engine": "qpdf 12.3.2"
+  },
+  "active_operation": {
+    "id": "image.to-pdf",
+    "version": "1.0.0",
+    "status": "implementation; not accepted or complete",
+    "engine": "image 0.25.10, pdf-writer 0.15.0, flate2 1.1.9, independently verified by qpdf 12.3.2"
+  },
+  "blocked_operation": {
+    "id": "pdf.to-images",
+    "version": "1.0.0",
+    "status": "dependency blocked; no production implementation",
+    "reason": "No reviewed Windows PDF renderer currently satisfies exact artifact provenance, licence, redistribution and sandbox requirements."
   },
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [

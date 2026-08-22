@@ -29,6 +29,7 @@ required = [
     'codex/goals/G01-foundation.md',
     'codex/goals/G02-pdf-merge.md',
     'codex/goals/G03-core-pdf-viewer.md',
+    'codex/goals/G04-optimize-convert.md',
     'diagrams/goal-mode-execution.svg',
     'notion-import/pages/25-GOAL-MODE-BUILD-PLAYBOOK.md',
     'docs/feature-catalog.csv',
@@ -49,14 +50,17 @@ required = [
     'apps/desktop/src-tauri/migrations/0002_jobs.sql',
     'apps/desktop/src-tauri/migrations/0003_workflows.sql',
     'apps/desktop/src-tauri/migrations/0004_job_operation_plans.sql',
+    'apps/desktop/src-tauri/migrations/0005_job_operation_specs_and_warnings.sql',
     'docs/adr/ADR-005-storage-ownership-and-provider-persistence.md',
     'docs/adr/ADR-006-foundation-dependencies-and-sqlite.md',
     'docs/adr/ADR-007-durable-publication-and-recovery.md',
     'docs/adr/ADR-010-pdfjs-local-rendering-security.md',
     'docs/adr/ADR-011-opaque-viewer-document-sessions.md',
     'docs/adr/ADR-012-versioned-page-plans-and-multi-output-publication.md',
+    'docs/adr/ADR-013-g04b-image-pdf-conversion-dependencies.md',
     'docs/implementation-log/G01-foundation.md',
     'docs/implementation-log/G03-viewer-core-pdf.md',
+    'docs/implementation-log/G04B-image-pdf-conversion.md',
     'docs/implementation-log/assets/g01-tauri-dev-launch.png',
     'Cargo.toml',
     'Cargo.lock',
@@ -217,11 +221,15 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
     for required in [
         'g03 — complete',
         '8d6844ebdc1fd6eedf41373d53ad36eb399cc489',
-        'g04a — active implementation',
-        'g04a is not accepted or complete',
+        'g04a — complete',
+        'a27306653119e6e4fcdef162308445b78129f974',
+        'g04b — active implementation',
+        'g04b is not accepted or complete',
+        'pdf-to-images',
+        'dependency-blocked',
     ]:
         if required not in state:
-            raise SystemExit(f'Current G03/G04A status is missing required truth: {required}')
+            raise SystemExit(f'Current G03/G04 status is missing required truth: {required}')
 
     manifest = inputs['asset_manifest']
     if not isinstance(manifest, dict) or manifest.get('version') != '6.2.108':
@@ -293,6 +301,101 @@ G03_VALIDATION_INPUTS = {
 }
 validate_g03_acceptance_consistency(G03_VALIDATION_INPUTS)
 
+g04b_spec_migration = (
+    ROOT / 'apps/desktop/src-tauri/migrations/0005_job_operation_specs_and_warnings.sql'
+).read_text(encoding='utf-8')
+for required_constraint in [
+    'CREATE TABLE job_operation_specs',
+    'length(CAST(settings_json AS BLOB)) BETWEEN 2 AND 65536',
+    'CREATE TABLE job_warnings',
+    'sanitized_detail TEXT NOT NULL',
+]:
+    if required_constraint not in g04b_spec_migration:
+        raise SystemExit(f'G04B metadata migration is missing {required_constraint}')
+
+
+def validate_g04b_boundaries(inputs: dict[str, str]) -> None:
+    cargo = inputs['cargo']
+    for required in [
+        'flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }',
+        'image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }',
+        'pdf-writer = { version = "=0.15.0", default-features = false }',
+    ]:
+        if required not in cargo:
+            raise SystemExit(f'G04B exact dependency declaration is missing: {required}')
+    for prohibited in ['libvips', 'pdfium', 'mupdf', 'poppler', 'ghostscript', 'reqwest']:
+        if re.search(rf'^\s*{prohibited}\s*=', cargo, re.IGNORECASE | re.MULTILINE):
+            raise SystemExit(f'G04B unreviewed dependency found: {prohibited}')
+
+    contracts = inputs['contracts']
+    for required in [
+        'IMAGE_TO_PDF_OPERATION_ID: &str = "image.to-pdf"',
+        'IMAGE_TO_PDF_MAX_INPUTS: usize = 128',
+        'IMAGE_MAX_DIMENSION: u32 = 8_192',
+        'IMAGE_MAX_PIXELS: u64 = 16_777_216',
+        'IMAGE_TO_PDF_MAX_TOTAL_PIXELS: u64 = 67_108_864',
+        'IMAGE_TO_PDF_MAX_TOTAL_INPUT_BYTES: u64 = 536_870_912',
+    ]:
+        if required not in contracts:
+            raise SystemExit(f'G04B bounded contract is missing: {required}')
+
+    writer = inputs['writer']
+    for required in [
+        'apply_orientation',
+        's_mask',
+        'verify_output',
+        'source_hashes',
+        'publish_verified_staging_with_observer',
+        'record_warning',
+    ]:
+        if required not in writer:
+            raise SystemExit(f'G04B writer/verifier path is missing: {required}')
+
+    image_tests = inputs['image_tests']
+    for required in [
+        'altered_persisted_settings_fail_closed_before_conversion',
+        'let too_many = vec![source.clone(); 129]',
+        'let maximum = vec![source.clone(); 128]',
+        'IMAGE_PDF_PUBLICATION_FAILED',
+        'reconcile_startup',
+    ]:
+        if required not in image_tests:
+            raise SystemExit(f'G04B native acceptance evidence is missing: {required}')
+
+    viewer_tests = inputs['viewer_tests']
+    if 'G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer' not in viewer_tests:
+        raise SystemExit('G04B browser-backed visual evidence is missing')
+
+    convert = inputs['convert']
+    for required in [
+        'PDF to images · dependency blocked',
+        'No accepted production renderer passed the provenance and license gate',
+        'event.altKey',
+        "event.key === 'Delete'",
+        'api.jobs.warnings',
+    ]:
+        if required not in convert:
+            raise SystemExit(f'G04B truthful accessible UI is missing: {required}')
+
+    rust_production = inputs['rust_production']
+    if 'pdf.to-images' in rust_production:
+        raise SystemExit('G04B contains an unauthorized production PDF-to-images renderer path')
+
+
+G04B_VALIDATION_INPUTS = {
+    'cargo': (ROOT / 'apps/desktop/src-tauri/Cargo.toml').read_text(encoding='utf-8'),
+    'contracts': (ROOT / 'apps/desktop/src-tauri/src/contracts.rs').read_text(encoding='utf-8'),
+    'writer': (ROOT / 'apps/desktop/src-tauri/src/image_to_pdf.rs').read_text(encoding='utf-8'),
+    'image_tests': (ROOT / 'apps/desktop/src-tauri/tests/image_to_pdf.rs').read_text(encoding='utf-8'),
+    'viewer_tests': (ROOT / 'apps/desktop/e2e/viewer.spec.ts').read_text(encoding='utf-8'),
+    'convert': (ROOT / 'apps/desktop/src/ConvertWorkspace.tsx').read_text(encoding='utf-8'),
+    'rust_production': '\n'.join(
+        path.read_text(encoding='utf-8')
+        for path in (ROOT / 'apps/desktop/src-tauri/src').rglob('*.rs')
+    ),
+}
+validate_g04b_boundaries(G04B_VALIDATION_INPUTS)
+
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):
     if 'attachments/archive' in str(p):
@@ -302,5 +405,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01/G02 compatibility, G03 accepted status, and G03 dependency, migration and document consistency verified.'
+    f'{len(rows)} feature entries found; G01-G04A accepted status and G04B dependency, migration, scope and document consistency verified.'
 )

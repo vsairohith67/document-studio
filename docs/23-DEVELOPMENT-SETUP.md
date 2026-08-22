@@ -73,9 +73,16 @@ cargo test -p document-studio --locked --features test-runtime --test process_sa
 
 The acquisition script is for an explicitly reviewed dependency update only. It refuses an existing destination, downloads only the three pinned official assets, requires Cosign 3.0.6, verifies provenance and archive hash, and emits the exact reviewed runtime tree. Never put qpdf on PATH or invoke it through a shell.
 
-### libvips
+### G04B image/PDF conversion
 
-Use a reviewed Windows binary or a reproducible build. Prefer dynamic linking and ship the required LGPL notices/source-offer information. Use it for image conversion, thumbnails and image-heavy compression paths.
+Images-to-PDF uses only the exact in-process Rust crates approved by ADR-013 and locked in `Cargo.lock`. It does not require libvips, a renderer installation or a system package. Verify its narrow boundary with:
+
+```powershell
+npm run verify:g04b --workspace @document-studio/desktop
+cargo test --locked --test image_to_pdf
+```
+
+PDF-to-images remains dependency-blocked. Do not install or discover PDFium, MuPDF, libvips or another renderer as a fallback. A renderer may be introduced only through a separate exact-artifact/licence/sandbox approval.
 
 ### PDF.js
 

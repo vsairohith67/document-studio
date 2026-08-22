@@ -42,3 +42,11 @@ The Viewer is a second workbench mode; it does not replace PDF Merge or any IPC 
 React lazy-loads the viewer chunk, PDF.js legacy ESM API and matching worker. TanStack Virtual mounts viewport pages/thumbnails plus small overscan; measured scroll-container geometry marks actual visibility independently, so overscan cannot define the current page. Candidate loading retains separate ownership until page-one metadata validates, then swaps atomically. Render tasks, canvases, text layers and indexing are cancellable and bounded; Close disposes active and candidate PDF.js/Rust sessions.
 
 Apply/Export converts ephemeral organizer state into one durable operation-plan envelope. Rust pins the viewer handle, writes one ASCII snapshot, rechecks qpdf page count, runs one of five registered operations through the accepted AppContainer/Job Object, independently verifies staging outputs, and calls G01 publication. Split inserts every output record before execution and never claims cross-file atomicity.
+
+## G04A optimization and G04B conversion paths
+
+G04A lossless compression is an accepted direct qpdf operation that reuses the G02 sandbox, verification and publication boundary without adding a codec or a Tauri capability.
+
+G04B's `image.to-pdf@1.0.0` path is an in-process Rust adapter. It content-sniffs and privately snapshots 1-128 JPEG/PNG/WebP inputs, applies bounded decoding and orientation/alpha rules, emits one image per PDF page, then uses qpdf only as an independent verifier before durable publication. Migration 5 binds each job to canonical hashed settings in `job_operation_specs` and records only sanitized metadata in `job_warnings`; it does not alter G03 page plans or persist document bodies.
+
+`pdf.to-images@1.0.0` has no adapter. The operation registry and Convert screen expose its dependency-blocked state without downloading, discovering or invoking a renderer. A later implementation needs an approved renderer artifact and a bounded multi-output architecture decision.
