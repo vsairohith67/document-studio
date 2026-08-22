@@ -12,6 +12,7 @@ $registry = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\operation_re
 $migration = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\migrations\0005_job_operation_specs_and_warnings.sql')
 $convert = Get-Content -Raw (Join-Path $desktopRoot 'src\ConvertWorkspace.tsx')
 $contractSource = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\src\index.ts')
+$package = Get-Content -Raw (Join-Path $desktopRoot 'package.json')
 
 $exactManifestLines = @(
   'flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }',
@@ -72,6 +73,9 @@ foreach ($required in @(
 }
 if (!$viewerTests.Contains('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer')) {
   throw 'G04B browser-backed visual evidence is missing.'
+}
+if (!$package.Contains('"pretest:browser": "cargo test --locked --test image_to_pdf --no-run"')) {
+  throw 'G04B native visual fixture producer must compile before Playwright timing starts.'
 }
 if ($registry -notmatch 'IMAGE_TO_PDF_OPERATION_ID' -or
     $contractSource -notmatch "operationId: 'image\.to-pdf'" -or
