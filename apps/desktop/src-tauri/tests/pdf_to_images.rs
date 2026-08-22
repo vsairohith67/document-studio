@@ -7,7 +7,7 @@ use std::sync::{Arc, Barrier};
 use document_studio_lib::app_state::{AppState, CancelOutcome};
 use document_studio_lib::contracts::{
     JobState, OperationError, OperationStage, PdfImageFormat, PdfToImagesJobCreateRequest,
-    PdfToImagesPagePlan,
+    PdfToImagesPagePlan, ViewerSessionRequest,
 };
 use document_studio_lib::database::Database;
 use document_studio_lib::pdf_to_images::{
@@ -533,40 +533,61 @@ fn cancellation_cleans_owned_staging_and_source_remains_immutable() {
     let destination = tempdir().unwrap();
     let source = support::write_pdf_fixture(source_dir.path(), "input.pdf", "G04B2", 612);
     let original = std::fs::read(&source).unwrap();
-    let session = service
-        .create_job(request(
-            &state,
-            &source,
-            destination.path(),
-            1,
-            vec![PdfToImagesPagePlan {
-                source_page_index: 0,
-                width: 4096,
-                height: 4096,
-            }],
-            PdfImageFormat::Png,
-            300,
-        ))
-        .unwrap();
+    let create_request = request(
+        &state,
+        &source,
+        destination.path(),
+        1,
+        vec![PdfToImagesPagePlan {
+            source_page_index: 0,
+            width: 4096,
+            height: 4096,
+        }],
+        PdfImageFormat::Png,
+        300,
+    );
+    let viewer_request = ViewerSessionRequest {
+        session_id: create_request.viewer_session_id.clone(),
+        generation: create_request.viewer_generation,
+    };
+    let session = service.create_job(create_request).unwrap();
+    let job_id = session.job.id.clone();
+    let unrelated_user_file = destination.path().join("other-operation.png");
+    std::fs::write(&unrelated_user_file, b"user-owned").unwrap();
     assert!(std::fs::write(&source, b"mutation denied while opaque session owns source").is_err());
     let started = std::time::Instant::now();
     assert_eq!(
-        state.cancellations.request(&session.job.id),
+        state.cancellations.request(&job_id),
         CancelOutcome::Requested
     );
-    assert!(service.cancel_if_idle(&session.job.id, |_| {}).unwrap());
+    let mut events = Vec::new();
+    assert!(service
+        .cancel_if_idle(&job_id, |event| events.push(event))
+        .unwrap());
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    let cancelled = state.database().get_job(&session.job.id).unwrap().unwrap();
+    let cancelled = state.database().get_job(&job_id).unwrap().unwrap();
     assert_eq!(cancelled.state, JobState::Cancelled);
     assert!(cancelled
         .outputs
         .iter()
         .all(|output| output.staging_path.is_none()));
+    assert!(!state.workspaces.root().join(&job_id).exists());
+    assert_eq!(
+        state.cancellations.request(&job_id),
+        CancelOutcome::NotRunning
+    );
+    let stale_render_session = upload(&service, &session, 0, vec![0; 4]).unwrap_err();
+    assert_eq!(stale_render_session.code, "PIXEL_TRANSFER_REJECTED");
+    assert_eq!(events.len(), 1);
+    let event_json = serde_json::to_string(&events).unwrap();
+    assert!(!event_json.contains(source.to_string_lossy().as_ref()));
+    assert!(!event_json.contains(destination.path().to_string_lossy().as_ref()));
+    assert_eq!(std::fs::read(&unrelated_user_file).unwrap(), b"user-owned");
     assert_eq!(std::fs::read(&source).unwrap(), original);
-    assert!(std::fs::read_dir(destination.path())
-        .unwrap()
-        .next()
-        .is_none());
+    state.viewer_sessions.close(&viewer_request).unwrap();
+    std::fs::write(&source, &original)
+        .expect("all source handles close after viewer reconciliation");
+    assert_eq!(std::fs::read_dir(destination.path()).unwrap().count(), 1);
 }
 
 #[test]

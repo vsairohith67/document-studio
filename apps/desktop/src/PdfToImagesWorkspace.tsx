@@ -19,6 +19,7 @@ import {
   planPdfImagePages,
   renderPdfImageJob,
 } from './viewer/pdfToImages';
+import { PdfToImagesOperation } from './viewer/pdfToImagesLifecycle';
 
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 
@@ -69,6 +70,7 @@ export function PdfToImagesWorkspace() {
   const openButtonRef = useRef<HTMLButtonElement>(null);
   const thumbnailScrollRef = useRef<HTMLDivElement>(null);
   const jobIdRef = useRef<string | null>(null);
+  const operationRef = useRef<PdfToImagesOperation | null>(null);
 
   const thumbnailVirtualizer = useVirtualizer({
     count: pdf?.numPages ?? 0,
@@ -77,20 +79,45 @@ export function PdfToImagesWorkspace() {
     overscan: 3,
   });
 
-  const closeDocument = useCallback(async () => {
+  const closeDocument = useCallback(async (requireReconciliation = false) => {
     const resource = resourceRef.current;
     const opened = metadataRef.current;
-    resourceRef.current = null;
-    metadataRef.current = null;
-    await resource?.close().catch(() => undefined);
+    let cleanupFailed = false;
+    if (resource) {
+      try {
+        await resource.close();
+        if (resourceRef.current === resource) resourceRef.current = null;
+      } catch {
+        cleanupFailed = true;
+        if (!requireReconciliation && resourceRef.current === resource) resourceRef.current = null;
+      }
+    }
     if (opened) {
-      await api.viewer.close({ sessionId: opened.sessionId, generation: opened.generation }).catch(() => undefined);
+      try {
+        await api.viewer.close({ sessionId: opened.sessionId, generation: opened.generation });
+        if (metadataRef.current === opened) metadataRef.current = null;
+      } catch {
+        cleanupFailed = true;
+        if (!requireReconciliation && metadataRef.current === opened) metadataRef.current = null;
+      }
     }
     setPdf(null);
     setMetadata(null);
     setSelectedOrder([]);
     setSelectionAnchor(null);
     setFocusedPage(0);
+    if (requireReconciliation && cleanupFailed) {
+      throw new Error('The local PDF source session could not be fully reconciled.');
+    }
+  }, []);
+
+  const releaseOperation = useCallback((operation: PdfToImagesOperation) => {
+    if (operationRef.current !== operation) return;
+    operationRef.current = null;
+    jobIdRef.current = null;
+    renderTaskRef.current = null;
+    renderAbortRef.current = null;
+    setBusy(false);
   }, []);
 
   useEffect(() => {
@@ -109,15 +136,17 @@ export function PdfToImagesWorkspace() {
   }, []);
 
   useEffect(() => () => {
-    renderAbortRef.current?.abort();
+    const operation = operationRef.current;
+    void operation?.requestCancellation().catch(() => undefined);
     renderTaskRef.current?.cancel();
-    const activeJobId = jobIdRef.current;
-    if (activeJobId) void api.jobs.cancel({ jobId: activeJobId }).catch(() => undefined);
     const destinationGrant = destinationRef.current;
     if (destinationGrant) {
       void api.viewer.revokeDestination(destinationGrant.grantId).catch(() => undefined);
     }
-    void closeDocument();
+    const cleanup = operation
+      ? operation.startFrontendCleanup(() => closeDocument(true))
+      : closeDocument();
+    void cleanup.catch(() => undefined);
   }, [closeDocument]);
 
   const openPdf = async () => {
@@ -239,14 +268,17 @@ export function PdfToImagesWorkspace() {
             : null;
 
   const start = async () => {
-    if (!pdf || !metadata || !destination || validation) return;
-    const controller = new AbortController();
-    renderAbortRef.current = controller;
+    if (!pdf || !metadata || !destination || validation || operationRef.current) return;
+    const operation = new PdfToImagesOperation(api.jobs);
+    operationRef.current = operation;
+    renderAbortRef.current = operation.controller;
     setBusy(true);
     setError(null);
     setJob(null);
+    let ownershipReconciled = true;
     try {
-      const pages = await planPdfImagePages(pdf, selectedOrder, dpi, controller.signal);
+      const pages = await planPdfImagePages(pdf, selectedOrder, dpi, operation.signal);
+      if (operation.signal.aborted) throw new DOMException('Rendering cancelled', 'AbortError');
       const created = await api.jobs.createPdfToImages({
         viewerSessionId: metadata.sessionId,
         viewerGeneration: metadata.generation,
@@ -257,55 +289,91 @@ export function PdfToImagesWorkspace() {
         dpi,
         outputStem: stem,
       });
+      operation.registerCreatedJob(created.job.id);
       jobIdRef.current = created.job.id;
       setJob(created.job);
+      if (operation.signal.aborted) {
+        const cancelled = await operation.reconcileAfterAbort();
+        setJob(cancelled);
+        setAnnouncement('Cancellation completed. Owned staging was reconciled; published images were preserved.');
+        return;
+      }
       setAnnouncement(`Rendering ${created.pages.length} selected page${created.pages.length === 1 ? '' : 's'} sequentially.`);
       const completed = await renderPdfImageJob(
         pdf,
         created,
         dpi,
-        controller.signal,
+        operation.signal,
         setJob,
         (task) => { renderTaskRef.current = task; },
       );
       setJob(completed);
       setAnnouncement('Every selected page was encoded, verified, and published.');
-      jobIdRef.current = null;
       await closeDocument();
       openButtonRef.current?.focus();
     } catch (reason) {
-      const activeJobId = jobIdRef.current;
-      if (activeJobId) {
-        const snapshot = await api.jobs.get({ jobId: activeJobId }).catch(() => null);
-        if (snapshot) setJob(snapshot);
+      if (operation.signal.aborted && operation.hasCreatedJob) {
+        try {
+          const cancelled = await operation.reconcileAfterAbort();
+          setJob(cancelled);
+          setAnnouncement('Cancellation completed. Owned staging was reconciled; published images were preserved.');
+        } catch (reconciliationError) {
+          ownershipReconciled = false;
+          setError(readableError(reconciliationError));
+        }
+      } else if (operation.hasCreatedJob) {
+        const activeJobId = jobIdRef.current;
+        if (activeJobId && operation.ownsJob(activeJobId)) {
+          const snapshot = await api.jobs.get({ jobId: activeJobId }).catch(() => null);
+          if (snapshot) setJob(snapshot);
+        }
       }
-      if (!(reason instanceof DOMException && reason.name === 'AbortError')) {
+      if (!operation.signal.aborted) {
         setError(readableError(reason));
       }
     } finally {
-      renderTaskRef.current = null;
-      renderAbortRef.current = null;
-      setBusy(false);
+      operation.markFrontendSettled();
+      if (ownershipReconciled) {
+        try {
+          await operation.waitForFrontendCleanup();
+          releaseOperation(operation);
+        } catch (cleanupError) {
+          setError(readableError(cleanupError));
+        }
+      }
     }
   };
 
   const cancel = async () => {
-    renderAbortRef.current?.abort();
+    const operation = operationRef.current;
+    if (!operation) return;
     renderTaskRef.current?.cancel();
     resourceRef.current?.transport.abort();
-    const activeJobId = jobIdRef.current;
-    if (activeJobId) {
-      try {
-        await api.jobs.cancel({ jobId: activeJobId });
-        setAnnouncement('Cancellation requested. Owned staging is being reconciled; published images are preserved.');
-      } catch (reason) {
-        setError(readableError(reason));
+    const cancellation = operation.requestCancellation();
+    const cleanup = operation.startFrontendCleanup(() => closeDocument(true));
+    let jobReconciled = false;
+    try {
+      await cancellation;
+      setAnnouncement(operation.hasCreatedJob
+        ? 'Cancellation requested. Owned staging is being reconciled; published images are preserved.'
+        : 'Cancellation requested before native job creation completed.');
+      if (operation.hasCreatedJob) {
+        const cancelled = await operation.reconcileAfterAbort();
+        if (operationRef.current === operation) setJob(cancelled);
+        jobReconciled = true;
       }
+    } catch (reason) {
+      setError(readableError(reason));
     }
-    jobIdRef.current = null;
-    await closeDocument();
-    setBusy(false);
-    openButtonRef.current?.focus();
+    try {
+      await cleanup;
+      await operation.waitForFrontendCleanup();
+    } catch (cleanupError) {
+      setError(readableError(cleanupError));
+      return;
+    }
+    if (jobReconciled && operation.isFrontendSettled) releaseOperation(operation);
+    if (operation.isFrontendSettled) openButtonRef.current?.focus();
   };
 
   const preview = useMemo(() => selectedOrder.map((sourcePageIndex, ordinal) => ({

@@ -13,7 +13,10 @@ $backend = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\pdf_to_images
 $api = Get-Content -Raw (Join-Path $desktopRoot 'src\api.ts')
 $session = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.ts')
 $renderer = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfToImages.ts')
+$lifecycle = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfToImagesLifecycle.ts')
+$lifecycleTests = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfToImagesLifecycle.test.ts')
 $workspace = Get-Content -Raw (Join-Path $desktopRoot 'src\PdfToImagesWorkspace.tsx')
+$workspaceTests = Get-Content -Raw (Join-Path $desktopRoot 'src\PdfToImagesWorkspace.test.tsx')
 $nativeTests = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\tests\pdf_to_images.rs')
 $browserTests = Get-Content -Raw (Join-Path $desktopRoot 'e2e\viewer.spec.ts')
 $webViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\webview2-smoke.mjs')
@@ -133,9 +136,34 @@ foreach ($required in @(
 foreach ($required in @(
   'PageThumbnail', "(['jpeg', 'png', 'webp'] as const)", '([72, 150, 300] as const)',
   'Select no more than 128 pages', 'Partial publication', 'RenderTask',
-  'transport.abort()', 'openButtonRef.current?.focus()', 'source path stays outside React'
+  'transport.abort()', 'openButtonRef.current?.focus()', 'source path stays outside React',
+  'operationRef.current', 'operation.registerCreatedJob(created.job.id)',
+  'operation.reconcileAfterAbort()', 'await operation.waitForFrontendCleanup()'
 )) {
   if (!$workspace.Contains($required)) { throw "G04B2 accessible UI boundary is missing $required." }
+}
+foreach ($required in @(
+  'class PdfToImagesOperation', 'requestCancellation()', 'registerCreatedJob(jobId: string)',
+  'ensureCancellationRequested()', 'reconcileAfterAbort()',
+  'reconciledCancellationStates', 'snapshot.id !== jobId',
+  'startFrontendCleanup', 'waitForFrontendCleanup'
+)) {
+  if (!$lifecycle.Contains($required)) { throw "G04B2 register-or-reconcile lifecycle is missing $required." }
+}
+foreach ($required in @(
+  'attempt < 32', 'returns after cancellation', 'toHaveBeenCalledTimes(1)',
+  'cancellation wins before create starts', 'after the job ID is known',
+  'rejects silent ownership replacement', 'other-operation.png',
+  'retains a failed source cleanup'
+)) {
+  if (!$lifecycleTests.Contains($required)) { throw "G04B2 deterministic cancellation race evidence is missing $required." }
+}
+foreach ($required in @(
+  'late-created job is terminal', 'heldSourceCleanup',
+  'normal subsequent operation', 'cancels before create starts',
+  'cancellation during rendering', 'ordinary failure handling'
+)) {
+  if (!$workspaceTests.Contains($required)) { throw "G04B2 component lifecycle evidence is missing $required." }
 }
 foreach ($required in @(
   'png_jpeg_and_lossless_webp_are_encoded_verified_and_published',
