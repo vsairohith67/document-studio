@@ -9,7 +9,7 @@ The dependency register distinguishes **adopt**, **evaluate**, **optional servic
 | Vite 8.1.5+ | Front-end build | Adopt | MIT; Vite 8 uses Rolldown; pair with `@vitejs/plugin-react` 6.x |
 | PDF.js 6.2.108 | Viewer rendering and text layer beneath Document Studio UI | Adopt for G03 | Apache-2.0; exact npm pin, local worker/assets, no generic viewer UI |
 | qpdf 12.3.2 | Structural PDF merge and verification | Adopt for G02 | Apache-2.0; signed checksum, exact archive/runtime hashes and bundled license materials verified |
-| libvips 8.18.2+ | Image conversion/compression | Adopt | LGPL-2.1-or-later; dynamic-linking/distribution review |
+| libvips 8.18.2+ | Possible later image conversion/compression adapter | Evaluate for G04C or a separately approved renderer chain | LGPL-2.1-or-later; dynamic-linking/distribution and every native loader/renderer require independent review |
 | OCRmyPDF 17.8.x | OCR orchestration | Evaluate as managed optional worker | MPL-2.0; native Windows needs Python, Tesseract and Ghostscript; packaging and sandboxing gate required |
 | Tesseract 5.5.2+ | OCR engine/language packs | Adopt | Apache-2.0; Windows installer is third-party, so binary provenance must be governed |
 | LibreOffice 26.2.4+ | Office conversion | Adopt external dependency | MPL-2.0 and bundled notices; detect installed version and isolate profile directories |
@@ -91,3 +91,21 @@ All installs used exact versions plus `--ignore-scripts`, so no lifecycle script
 The project-local Playwright acquisition contains Chrome for Testing and Headless Shell 151.0.7922.34 at revision 1234, ffmpeg revision 1011 and winldd revision 1007 under `.cache/ms-playwright/`; it is ignored, not system-wide, and not shipped. CI downloads only this locked test browser. Production remote debugging is absent.
 
 The PDF.js staging script checks package/API/worker version parity and copies only the 191 files in `apps/desktop/scripts/pdfjs-assets-6.2.108.json`. It verifies every source and staged path, byte size and SHA-256 in a fresh sibling, proves exact membership, then atomically replaces the old directory with rollback. QuickJS, no-WASM fallbacks, maps, debug/test/example content and generic viewer UI are excluded. The application makes no CDN or network request. Security review is monthly, version review quarterly, and every update requires explicit dependency approval, lock/integrity/licence review, worker hash/parity proof and the complete browser/WebView/security suite.
+
+## G04A lossless-compression adoption
+
+G04A adds no new production dependency. `pdf.compress-lossless@1.0.0` reuses the accepted, exactly bundled qpdf 12.3.2 runtime, fixed AppContainer/Job Object process profile, independent verification and durable no-overwrite publication boundary from ADR-009. G04A is accepted on main merge `a27306653119e6e4fcdef162308445b78129f974`.
+
+## G04B images-to-PDF adoption and renderer blocker
+
+[ADR-013](adr/ADR-013-g04b-image-pdf-conversion-dependencies.md) accepts only the in-process writer dependencies below. All are exact crates.io versions with registry checksums in `Cargo.lock`; no default codec set, native executable, DLL, installer, runtime download, network call, PATH lookup, shell permission or system service is added.
+
+| Crate | Exact version | Crates.io SHA-256 | Licence | Enabled role/features |
+|---|---:|---|---|---|
+| `image` | 0.25.10 | `85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104` | MIT OR Apache-2.0 | `default-features = false`; JPEG, PNG, WebP decoding, dimensions and orientation only |
+| `pdf-writer` | 0.15.0 | `f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753` | MIT OR Apache-2.0 | `default-features = false`; original PDF object generation |
+| `flate2` | 1.1.9 | `843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c` | MIT OR Apache-2.0 | `default-features = false`, `rust_backend`; deterministic image streams |
+
+On 22 August 2026 the exact direct crates and their resolved codec/compression subtree had no exact-version matches from the GitHub Advisory API/RustSec data reviewed for this gate. This is point-in-time evidence; every update and release must repeat the advisory, checksum, licence and notices review.
+
+`pdf.to-images@1.0.0` is not adopted. PDFium source does not supply the reviewed signed/versioned Windows runtime provenance required here; MuPDF requires an AGPL-compliant distribution or commercial licence; libvips does not remove the need to approve its PDF renderer chain; and PDF.js export needs a new durable raster architecture. The operation remains on the roadmap but is dependency-blocked with no production code or fallback.

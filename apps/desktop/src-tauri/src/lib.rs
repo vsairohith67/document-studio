@@ -3,6 +3,7 @@ pub mod contracts;
 pub mod database;
 pub mod diagnostic_copy;
 pub mod diagnostics;
+pub mod image_to_pdf;
 pub mod ipc;
 pub mod job_engine;
 pub mod operation_registry;
@@ -370,6 +371,7 @@ pub fn run() {
         ipc::jobs_cancel,
         ipc::jobs_resolve_interrupted,
         ipc::jobs_get,
+        ipc::jobs_warnings,
         ipc::history_list,
         ipc::history_delete,
         ipc::dependencies_scan,
@@ -392,6 +394,7 @@ pub fn run() {
         ipc::jobs_cancel,
         ipc::jobs_resolve_interrupted,
         ipc::jobs_get,
+        ipc::jobs_warnings,
         ipc::history_list,
         ipc::history_delete,
         ipc::dependencies_scan,

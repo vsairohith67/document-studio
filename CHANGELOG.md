@@ -2,6 +2,20 @@
 
 All notable planning-package and software releases are recorded here.
 
+## 0.5.0-g04b-image-pdf-conversion - unreleased
+
+- Added the independently gated `image.to-pdf@1.0.0` implementation for ordered, content-sniffed JPEG/PNG/WebP inputs with fixed axis, pixel, selected-total, byte and decoder-allocation limits.
+- Added deterministic EXIF-orientation, alpha soft-mask and ICC-warning behavior; one image per zero-margin PDF page; source immutability proof; qpdf structural/page/encryption verification; and durable no-overwrite publication.
+- Added migration 5 for canonical hashed operation settings and sanitized job warnings without changing accepted G03 page plans or storing document content/raw paths.
+- Added the accessible two-direction Convert workspace. PDF-to-images remains visibly dependency-blocked because no renderer has passed provenance, licence, redistribution and sandbox review.
+- Added ADR-013, native/frontend/database tests and an exact G04B boundary verifier. G04C-G04F production work is excluded.
+
+## 0.4.0-g04a-lossless-compression - 2026-08-22
+
+- Added accepted `pdf.compress-lossless@1.0.0` through the existing qpdf 12.3.2 sandbox, independent verification and durable publication boundary.
+- Added the bounded Optimize UI, structural/visual/source-immutability evidence and exact G04A boundary verification.
+- Accepted and merged G04A to main at `a27306653119e6e4fcdef162308445b78129f974`.
+
 ## 0.3.0-g03-viewer-core-pdf - unreleased
 
 - Added opaque retained-handle PDF viewer sessions, backend open/drop handling, raw bounded range IPC and explicit close/source-change behavior without exposing source paths.

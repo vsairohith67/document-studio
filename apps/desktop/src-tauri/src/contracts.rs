@@ -9,6 +9,13 @@ pub const PDF_MERGE_MIN_INPUTS: usize = 2;
 pub const PDF_MERGE_MAX_INPUTS: usize = 128;
 pub const PDF_COMPRESS_LOSSLESS_OPERATION_ID: &str = "pdf.compress-lossless";
 pub const PDF_COMPRESS_LOSSLESS_VERSION: &str = "1.0.0";
+pub const IMAGE_TO_PDF_OPERATION_ID: &str = "image.to-pdf";
+pub const IMAGE_TO_PDF_VERSION: &str = "1.0.0";
+pub const IMAGE_TO_PDF_MAX_INPUTS: usize = 128;
+pub const IMAGE_MAX_DIMENSION: u32 = 8_192;
+pub const IMAGE_MAX_PIXELS: u64 = 16_777_216;
+pub const IMAGE_TO_PDF_MAX_TOTAL_PIXELS: u64 = 67_108_864;
+pub const IMAGE_TO_PDF_MAX_TOTAL_INPUT_BYTES: u64 = 536_870_912;
 pub const PDF_EXTRACT_OPERATION_ID: &str = "pdf.extract-pages";
 pub const PDF_REMOVE_OPERATION_ID: &str = "pdf.remove-pages";
 pub const PDF_REORDER_OPERATION_ID: &str = "pdf.reorder-pages";
@@ -19,6 +26,8 @@ pub const CORE_PDF_MAX_PAGES: u32 = 4096;
 pub const PDF_SPLIT_MAX_OUTPUTS: usize = 128;
 pub const OPERATION_PLAN_SCHEMA_VERSION: u8 = 1;
 pub const OPERATION_PLAN_MAX_BYTES: usize = 65_536;
+pub const OPERATION_SPEC_SCHEMA_VERSION: u8 = 1;
+pub const OPERATION_SPEC_MAX_BYTES: usize = 65_536;
 pub const QPDF_DEPENDENCY_ID: &str = "qpdf";
 pub const QPDF_VERSION: &str = "12.3.2";
 pub const LEGACY_DIAGNOSTIC_COPY_VERSION: &str = "1.0.0";
@@ -388,6 +397,32 @@ pub struct JobsCreateRequest {
     pub input_paths: Vec<String>,
     pub destination_directory: String,
     pub requested_output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationSpecEnvelope {
+    pub schema_version: u8,
+    pub operation_id: String,
+    pub settings: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredOperationSpec {
+    pub envelope: OperationSpecEnvelope,
+    pub canonical_json: String,
+    pub sha256: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobWarning {
+    pub code: String,
+    pub sanitized_detail: String,
+    pub input_index: Option<u32>,
+    pub page_index: Option<u32>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

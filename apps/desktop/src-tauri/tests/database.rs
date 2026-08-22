@@ -2,10 +2,11 @@ use std::fs;
 
 use chrono::{TimeZone, Utc};
 use document_studio_lib::contracts::{
-    CorePdfPlanPayload, JobRecord, JobState, OperationPlanEnvelope, OperationStage, OutputRotation,
-    OutputStatus, PageRotation, RotatePagesPlan, SplitOutputRange, SplitPlan, StoredOperationPlan,
-    CORE_PDF_OPERATION_VERSION, PDF_EXTRACT_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
-    PDF_SPLIT_OPERATION_ID,
+    CorePdfPlanPayload, JobRecord, JobState, OperationPlanEnvelope, OperationSpecEnvelope,
+    OperationStage, OutputRotation, OutputStatus, PageRotation, RotatePagesPlan, SplitOutputRange,
+    SplitPlan, StoredOperationPlan, StoredOperationSpec, CORE_PDF_OPERATION_VERSION,
+    IMAGE_TO_PDF_OPERATION_ID, IMAGE_TO_PDF_VERSION, PDF_EXTRACT_OPERATION_ID,
+    PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID,
 };
 use document_studio_lib::database::{
     apply_migrations, configure_connection, Database, DatabaseError, Migration,
@@ -158,12 +159,12 @@ fn insert_version_three_job(connection: &Connection, job: &JobRecord) {
 }
 
 #[test]
-fn fresh_database_migrates_to_version_four_and_reopens_idempotently() {
+fn fresh_database_migrates_to_version_five_and_reopens_idempotently() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("metadata.sqlite3");
     {
         let database = Database::open(&path).unwrap();
-        assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4, 5]);
         let integrity: String = database
             .connection()
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -172,11 +173,11 @@ fn fresh_database_migrates_to_version_four_and_reopens_idempotently() {
     }
 
     let reopened = Database::open(&path).unwrap();
-    assert_eq!(reopened.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(reopened.migration_versions().unwrap(), vec![1, 2, 3, 4, 5]);
 }
 
 #[test]
-fn migrations_one_through_three_upgrade_to_four_preserves_legacy_jobs_without_plan_backfill() {
+fn migrations_one_through_three_upgrade_to_five_preserves_legacy_jobs_without_backfill() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("version-three.sqlite3");
     let mut connection = Connection::open(&path).unwrap();
@@ -221,7 +222,7 @@ fn migrations_one_through_three_upgrade_to_four_preserves_legacy_jobs_without_pl
     drop(connection);
 
     let database = Database::open(&path).unwrap();
-    assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4]);
+    assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4, 5]);
     let checksums_after = database
         .connection()
         .prepare(
@@ -242,6 +243,15 @@ fn migrations_one_through_three_upgrade_to_four_preserves_legacy_jobs_without_pl
         )
         .unwrap();
     assert_eq!(migration_four_count, 1);
+    let migration_five_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 5",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migration_five_count, 1);
     assert_eq!(
         database.get_job(&diagnostic.id).unwrap(),
         Some(diagnostic.clone())
@@ -268,6 +278,21 @@ fn migrations_one_through_three_upgrade_to_four_preserves_legacy_jobs_without_pl
         plan_count, 0,
         "migration 4 must add no default or empty plans"
     );
+    let spec_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM job_operation_specs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        spec_count, 0,
+        "migration 5 must not invent operation settings"
+    );
+    let warning_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM job_warnings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(warning_count, 0, "migration 5 must not invent warnings");
     let preserved_stage_runs: i64 = database
         .connection()
         .query_row(
@@ -302,6 +327,8 @@ fn migrations_one_through_three_upgrade_to_four_preserves_legacy_jobs_without_pl
         "job_errors_job_created_idx",
         "workflow_runs_status_idx",
         "job_operation_plans_operation_idx",
+        "job_operation_specs_operation_idx",
+        "job_warnings_job_created_idx",
     ] {
         let present: i64 = database
             .connection()
@@ -471,6 +498,62 @@ fn typed_operation_plan_is_canonical_hashed_bounded_and_multi_output() {
         Err(DatabaseError::OperationPlanInvalid)
     ));
     assert!(database.get_job(&rejected.id).unwrap().is_none());
+}
+
+#[test]
+fn operation_specs_are_canonical_hashed_bounded_and_warnings_are_sanitized() {
+    let mut database = Database::open_in_memory().unwrap();
+    let mut job = sample_job();
+    job.operation_id = IMAGE_TO_PDF_OPERATION_ID.to_owned();
+    job.operation_version = IMAGE_TO_PDF_VERSION.to_owned();
+    job.requested_output_name = "images.pdf".to_owned();
+    job.inputs[0].display_name = "image.png".to_owned();
+    job.inputs[0].mime_type = "image/png".to_owned();
+    job.outputs[0].requested_name = "images.pdf".to_owned();
+    job.outputs[0].mime_type = "application/pdf".to_owned();
+    job.outputs[0].status = OutputStatus::Planned;
+    let envelope = OperationSpecEnvelope {
+        schema_version: 1,
+        operation_id: IMAGE_TO_PDF_OPERATION_ID.to_owned(),
+        settings: json!({"alphaPolicy":"preserve-soft-mask","pageSizing":"one-point-per-oriented-pixel"}),
+    };
+    let canonical_json = serde_json::to_string(&envelope).unwrap();
+    let spec = StoredOperationSpec {
+        envelope,
+        sha256: sha256_hex(canonical_json.as_bytes()),
+        canonical_json,
+        created_at: job.created_at.clone(),
+    };
+    database.create_job_with_spec(&job, &spec).unwrap();
+    assert_eq!(database.get_operation_spec(&job.id).unwrap(), Some(spec));
+    database
+        .record_warning(
+            &job.id,
+            "ICC_PROFILE_NOT_RETAINED",
+            "The embedded color profile was normalized.",
+            Some(0),
+            Some(0),
+        )
+        .unwrap();
+    let warnings = database.list_warnings(&job.id).unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].input_index, Some(0));
+    assert_eq!(warnings[0].page_index, Some(0));
+    assert!(!warnings[0].sanitized_detail.contains(r"C:\"));
+
+    assert!(database
+        .connection()
+        .execute(
+            "UPDATE job_operation_specs SET settings_json = ?1 WHERE job_id = ?2",
+            ("x".repeat(65_537), &job.id),
+        )
+        .is_err());
+    assert!(database
+        .record_warning(&job.id, "X", "short code", None, None)
+        .is_err());
+    assert!(database
+        .record_warning(&job.id, "DETAIL_TOO_LONG", &"x".repeat(501), None, None)
+        .is_err());
 }
 
 #[test]

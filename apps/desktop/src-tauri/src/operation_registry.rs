@@ -3,7 +3,8 @@ use serde_json::json;
 use crate::contracts::{
     JobsCreateRequest, OperationError, OperationInputs, OperationManifest, OperationOutputs,
     OperationStage, CORE_PDF_OPERATION_VERSION, DIAGNOSTIC_COPY_OPERATION_ID,
-    DIAGNOSTIC_COPY_VERSION, PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION,
+    DIAGNOSTIC_COPY_VERSION, IMAGE_TO_PDF_MAX_INPUTS, IMAGE_TO_PDF_OPERATION_ID,
+    IMAGE_TO_PDF_VERSION, PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION,
     PDF_EXTRACT_OPERATION_ID, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS, PDF_MERGE_OPERATION_ID,
     PDF_MERGE_VERSION, PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
     PDF_SPLIT_OPERATION_ID, QPDF_DEPENDENCY_ID,
@@ -15,6 +16,7 @@ pub enum OperationKind {
     DiagnosticCopy,
     PdfMerge,
     PdfCompressLossless,
+    ImageToPdf,
 }
 
 pub fn all_manifests() -> Vec<OperationManifest> {
@@ -22,6 +24,7 @@ pub fn all_manifests() -> Vec<OperationManifest> {
         diagnostic_copy_manifest(),
         pdf_merge_manifest(),
         pdf_compress_lossless_manifest(),
+        image_to_pdf_manifest(),
         extract_pages_manifest(),
         remove_pages_manifest(),
         reorder_pages_manifest(),
@@ -62,6 +65,18 @@ pub fn validate_create_request(
             }
             Ok(OperationKind::PdfCompressLossless)
         }
+        IMAGE_TO_PDF_OPERATION_ID
+            if (1..=IMAGE_TO_PDF_MAX_INPUTS).contains(&request.input_paths.len()) =>
+        {
+            if !request
+                .requested_output_name
+                .to_ascii_lowercase()
+                .ends_with(".pdf")
+            {
+                return Err(invalid_pdf_output_name());
+            }
+            Ok(OperationKind::ImageToPdf)
+        }
         DIAGNOSTIC_COPY_OPERATION_ID => Err(OperationError::safe(
             "INVALID_INPUT_COUNT",
             "Choose exactly one input",
@@ -80,6 +95,13 @@ pub fn validate_create_request(
             "INVALID_INPUT_COUNT",
             "Choose exactly one PDF",
             "Lossless PDF Compression accepts exactly one local PDF.",
+            OperationStage::Inspect,
+            false,
+        )),
+        IMAGE_TO_PDF_OPERATION_ID => Err(OperationError::safe(
+            "INVALID_INPUT_COUNT",
+            "Choose between 1 and 128 images",
+            "Image to PDF accepts JPEG, PNG, or WebP files in the selected order.",
             OperationStage::Inspect,
             false,
         )),
@@ -157,6 +179,34 @@ pub fn pdf_compress_lossless_manifest() -> OperationManifest {
             "reopen",
             "publication-hash",
             "source-immutability",
+        ],
+    )
+}
+
+pub fn image_to_pdf_manifest() -> OperationManifest {
+    manifest(
+        IMAGE_TO_PDF_OPERATION_ID,
+        IMAGE_TO_PDF_VERSION,
+        "Images to PDF",
+        "convert",
+        "Creates one verified PDF page per selected JPEG, PNG, or WebP image in exact order.",
+        vec!["image/jpeg", "image/png", "image/webp"],
+        1,
+        IMAGE_TO_PDF_MAX_INPUTS as u32,
+        "application/pdf",
+        vec!["document-studio-core", QPDF_DEPENDENCY_ID],
+        vec![
+            "regular-file",
+            "content-codec",
+            "sha256",
+            "dimension-cap",
+            "pixel-cap",
+            "qpdf-strict-check",
+            "unencrypted",
+            "page-count",
+            "selected-order",
+            "source-immutability",
+            "publication-hash",
         ],
     )
 }
@@ -379,9 +429,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_exposes_accepted_and_g03_manifests() {
+    fn registry_exposes_accepted_through_g04b_manifests() {
         let manifests = all_manifests();
-        assert_eq!(manifests.len(), 8);
+        assert_eq!(manifests.len(), 9);
         assert_eq!(manifests[0].id, "diagnostic.copy");
         assert_eq!(manifests[1].id, "pdf.merge");
         assert_eq!(manifests[1].inputs.minimum, 2);
@@ -394,8 +444,16 @@ mod tests {
         assert!(manifests[2]
             .verification
             .contains(&"structural-inventory".to_owned()));
+        assert_eq!(manifests[3].id, "image.to-pdf");
+        assert_eq!(manifests[3].inputs.minimum, 1);
+        assert_eq!(manifests[3].inputs.maximum, 128);
         assert_eq!(
-            manifests[3..]
+            manifests[3].inputs.accepted_mime_types,
+            ["image/jpeg", "image/png", "image/webp"]
+        );
+        assert_eq!(manifests[3].dependencies, ["document-studio-core", "qpdf"]);
+        assert_eq!(
+            manifests[4..]
                 .iter()
                 .map(|manifest| manifest.id.as_str())
                 .collect::<Vec<_>>(),
@@ -407,7 +465,7 @@ mod tests {
                 "pdf.split",
             ]
         );
-        assert!(manifests[2..]
+        assert!(manifests[4..]
             .iter()
             .all(|manifest| { manifest.version == "1.0.0" && manifest.dependencies == ["qpdf"] }));
     }
@@ -430,6 +488,14 @@ mod tests {
             validate_create_request(&request("pdf.compress-lossless", 1, "compressed.PDF"))
                 .unwrap(),
             OperationKind::PdfCompressLossless
+        );
+        assert_eq!(
+            validate_create_request(&request("image.to-pdf", 1, "images.PDF")).unwrap(),
+            OperationKind::ImageToPdf
+        );
+        assert_eq!(
+            validate_create_request(&request("image.to-pdf", 128, "images.pdf")).unwrap(),
+            OperationKind::ImageToPdf
         );
         assert_eq!(
             validate_create_request(&request("pdf.merge", 1, "merged.pdf"))
@@ -457,6 +523,18 @@ mod tests {
         );
         assert_eq!(
             validate_create_request(&request("pdf.compress-lossless", 1, "compressed.txt"))
+                .unwrap_err()
+                .code,
+            "INVALID_OUTPUT_NAME"
+        );
+        assert_eq!(
+            validate_create_request(&request("image.to-pdf", 129, "images.pdf"))
+                .unwrap_err()
+                .code,
+            "INVALID_INPUT_COUNT"
+        );
+        assert_eq!(
+            validate_create_request(&request("image.to-pdf", 1, "images.png"))
                 .unwrap_err()
                 .code,
             "INVALID_OUTPUT_NAME"

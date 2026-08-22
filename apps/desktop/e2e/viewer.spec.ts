@@ -236,6 +236,43 @@ test('G04A lossless recompression renders the same representative PDF.js pixels'
   expect(compressedPixels).toBe(sourcePixels);
 });
 
+test('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer', async ({ page }) => {
+  const evidenceDirectory = resolve(
+    import.meta.dirname,
+    '..', '..', '..', 'target', 'g04b-browser-visual-evidence',
+  );
+  const sourceBytes = await readFile(resolve(evidenceDirectory, 'source.png'));
+  const outputBytes = await readFile(resolve(evidenceDirectory, 'output.pdf'));
+  await installTransport(page, 3, outputBytes);
+  await openViewer(page);
+
+  const sourceDataUrl = `data:image/png;base64,${sourceBytes.toString('base64')}`;
+  const pixels = await page.evaluate(async (dataUrl) => {
+    const source = new Image();
+    source.src = dataUrl;
+    await source.decode();
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = source.naturalWidth;
+    sourceCanvas.height = source.naturalHeight;
+    sourceCanvas.getContext('2d')!.drawImage(source, 0, 0);
+    const sourcePixel = Array.from(sourceCanvas.getContext('2d')!.getImageData(
+      Math.floor(sourceCanvas.width / 2),
+      Math.floor(sourceCanvas.height / 2),
+      1,
+      1,
+    ).data);
+    const rendered = document.querySelector<HTMLCanvasElement>('.pdf-page-surface canvas')!;
+    const renderedPixel = Array.from(rendered.getContext('2d')!.getImageData(
+      Math.floor(rendered.width / 2),
+      Math.floor(rendered.height / 2),
+      1,
+      1,
+    ).data);
+    return { sourcePixel, renderedPixel };
+  }, sourceDataUrl);
+  expect(pixels.renderedPixel).toEqual(pixels.sourcePixel);
+});
+
 test('unlocks an encrypted PDF only in memory and keeps structural operations disabled', async ({ page }, testInfo) => {
   const clearPath = testInfo.outputPath('clear.pdf');
   const encryptedPath = testInfo.outputPath('encrypted.pdf');
