@@ -41,3 +41,15 @@ The bundled Microsoft Visual C++ 14.44.35211 runtime DLLs are the unmodified red
 - The lock also contains optional platform-specific package metadata, including `fsevents`, that may declare install scripts. Document Studio does not claim such metadata is absent: approved installs and CI use `--ignore-scripts`, so package lifecycle scripts are not executed.
 
 A distributable build must retain all applicable PDF.js asset licence/notices and regenerate the complete shipped-runtime notice inventory from the lockfile and staged asset tree. Any package or browser revision change requires a fresh dependency review.
+
+## G04 notices
+
+G04A adds no new package and reuses the accepted Apache-2.0 qpdf 12.3.2 bundle.
+
+G04B's images-to-PDF writer adds these exact crates from crates.io:
+
+- `image` 0.25.10: MIT OR Apache-2.0; only JPEG, PNG and WebP features are enabled.
+- `pdf-writer` 0.15.0: MIT OR Apache-2.0; default features are disabled.
+- `flate2` 1.1.9: MIT OR Apache-2.0; only the pure-Rust backend is enabled.
+
+Their exact registry checksums and boundaries are recorded in ADR-013 and the dependency register. A distributable build must regenerate complete transitive notices from the accepted `Cargo.lock`. G04B does not bundle PDFium, MuPDF, libvips or another PDF raster renderer; `pdf.to-images@1.0.0` remains dependency-blocked.
