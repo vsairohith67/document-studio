@@ -40,8 +40,8 @@ vi.mock('./api', async (importOriginal) => {
 import { ConvertWorkspace } from './ConvertWorkspace';
 
 const system: SystemStatus = {
-  product: 'Document Studio', phase: 'g04b-image-pdf-conversion',
-  offlineByDefault: true, databaseSchemaVersion: 5,
+  product: 'Document Studio', phase: 'g04b2-pdf-to-images',
+  offlineByDefault: true, databaseSchemaVersion: 5, webview2RuntimeVersion: '151.0.7922.34',
 };
 const dependencies: DependencyDiagnostic[] = [
   { id: 'document-studio-core', kind: 'built-in', status: 'available', version: '0.1.0', capabilities: ['image.to-pdf'], checkedAt: '2026-08-22T00:00:00Z', errorCode: null },
@@ -83,11 +83,14 @@ describe('G04B Convert workspace', () => {
     mocks.cancel.mockResolvedValue({ outcome: 'requested' });
   });
 
-  it('shows the independently blocked renderer and has no accessibility violations', async () => {
+  it('enables the accepted PDF.js renderer direction and has no accessibility violations', async () => {
+    const user = userEvent.setup();
     const { container } = renderWorkspace();
     expect(screen.getByRole('tab', { name: /Images to PDF/ }).getAttribute('aria-selected')).toBe('true');
-    expect((screen.getByRole('tab', { name: /PDF to images/ }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/No accepted production renderer/)).toBeTruthy();
+    expect((screen.getByRole('tab', { name: /PDF to images/ }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(screen.getByRole('tab', { name: /PDF to images/ }));
+    expect(screen.getByRole('heading', { name: 'Select pages and output order' })).toBeTruthy();
+    expect(screen.getByText('PDF.js 6.2.108')).toBeTruthy();
     const accessibility = await axe.run(container, { rules: { 'color-contrast': { enabled: false } } });
     expect(accessibility.violations).toEqual([]);
   });

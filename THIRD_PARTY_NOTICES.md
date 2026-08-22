@@ -52,4 +52,4 @@ G04B's images-to-PDF writer adds these exact crates from crates.io:
 - `pdf-writer` 0.15.0: MIT OR Apache-2.0; default features are disabled.
 - `flate2` 1.1.9: MIT OR Apache-2.0; only the pure-Rust backend is enabled.
 
-Their exact registry checksums and boundaries are recorded in ADR-013 and the dependency register. A distributable build must regenerate complete transitive notices from the accepted `Cargo.lock`. G04B does not bundle PDFium, MuPDF, libvips or another PDF raster renderer; `pdf.to-images@1.0.0` remains dependency-blocked.
+Their exact registry checksums and boundaries are recorded in ADR-013 and the dependency register. A distributable build must regenerate complete transitive notices from the accepted `Cargo.lock`. G04B2 reuses accepted `pdfjs-dist` 6.2.108 for rendering and `image` 0.25.10 for encoding; it does not bundle PDFium, MuPDF, Poppler, PDFBox, libvips or another raster renderer.

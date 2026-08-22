@@ -139,10 +139,44 @@ export interface SystemStatus {
   phase: string;
   offlineByDefault: boolean;
   databaseSchemaVersion: number;
+  webview2RuntimeVersion: string | null;
 }
 
 export interface CancelResponse {
   outcome: 'requested' | 'cancelled';
+}
+
+export type PdfImageFormat = 'jpeg' | 'png' | 'webp';
+
+export interface PdfToImagesPagePlan {
+  sourcePageIndex: number;
+  width: number;
+  height: number;
+}
+
+export interface PdfToImagesJobCreateRequest {
+  viewerSessionId: string;
+  viewerGeneration: number;
+  destinationGrantId: string;
+  sourcePageCount: number;
+  pages: PdfToImagesPagePlan[];
+  format: PdfImageFormat;
+  dpi: 72 | 150 | 300;
+  outputStem: string;
+}
+
+export interface PdfPixelTransferTicket {
+  pageOrdinal: number;
+  sourcePageIndex: number;
+  nonce: string;
+  expectedWidth: number;
+  expectedHeight: number;
+}
+
+export interface PdfToImagesJobSession {
+  job: JobRecord;
+  renderSessionId: string;
+  pages: PdfPixelTransferTicket[];
 }
 
 export interface SettingRecord<T = unknown> {

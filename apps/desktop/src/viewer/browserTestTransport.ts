@@ -2,6 +2,9 @@ import type {
   CorePdfJobCreateRequest,
   DestinationGrant,
   JobRecord,
+  PdfPixelTransferTicket,
+  PdfToImagesJobCreateRequest,
+  PdfToImagesJobSession,
   ProgressEvent,
   ViewerDocumentMetadata,
   ViewerRangeRequest,
@@ -16,6 +19,12 @@ export interface BrowserTestTransport {
   chooseDestination(): Promise<DestinationGrant | null>;
   revokeDestination(grantId: string): Promise<void>;
   createCorePdf(request: CorePdfJobCreateRequest): Promise<JobRecord>;
+  createPdfToImages?(request: PdfToImagesJobCreateRequest): Promise<PdfToImagesJobSession>;
+  submitPdfPixels?(
+    session: PdfToImagesJobSession,
+    ticket: PdfPixelTransferTicket,
+    rgba: Uint8Array,
+  ): Promise<JobRecord>;
   onProgress?(handler: (event: ProgressEvent) => void): Promise<() => void>;
 }
 

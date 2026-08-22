@@ -49,6 +49,38 @@
         "requestedOutputName": { "allOf": [{ "$ref": "#/$defs/outputName" }, { "type": "string", "pattern": "\\.[pP][dD][fF]$" }] }
       }
     },
+    "pdfToImagesJobCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "viewerSessionId", "viewerGeneration", "destinationGrantId", "sourcePageCount",
+        "pages", "format", "dpi", "outputStem"
+      ],
+      "properties": {
+        "viewerSessionId": { "$ref": "#/$defs/uuid" },
+        "viewerGeneration": { "type": "integer", "minimum": 1 },
+        "destinationGrantId": { "$ref": "#/$defs/uuid" },
+        "sourcePageCount": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "pages": {
+          "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+          "items": { "$ref": "#/$defs/pdfToImagesPagePlan" }
+        },
+        "format": { "enum": ["jpeg", "png", "webp"] },
+        "dpi": { "enum": [72, 150, 300] },
+        "outputStem": { "type": "string", "minLength": 1, "maxLength": 96 }
+      }
+    },
+    "pdfToImagesPagePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourcePageIndex", "width", "height"],
+      "properties": {
+        "sourcePageIndex": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 8192 }
+      }
+    },
+    "uuid": { "type": "string", "format": "uuid" },
     "localPath": {
       "type": "string",
       "minLength": 1,

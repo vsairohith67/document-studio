@@ -2,7 +2,7 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository contains the Document Studio product specifications and the accepted Windows foundation, PDF Merge, G03 Viewer/Core PDF, and G04A lossless-compression slices. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and accepted local PDF operations. **G04A — COMPLETE** on accepted main merge `a27306653119e6e4fcdef162308445b78129f974`. **G04B — active implementation** on `feat/g04b-image-pdf-convert`; G04B is not accepted or complete. Images-to-PDF is implemented for review, while PDF-to-images is dependency-blocked and has no production renderer path.
+This repository contains the Document Studio product specifications and the accepted Windows foundation, PDF Merge, G03 Viewer/Core PDF, G04A lossless-compression and G04B images-to-PDF slices. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and accepted local PDF operations. **G04B — COMPLETE** on accepted main `6940a1381822a5872f4c345cc0e5cd15b2e6294c`. **G04B2 — active implementation** on `feat/g04b2-pdf-to-images`, adding PDF-to-images with the existing accepted PDF.js 6.2.108 renderer and `image` 0.25.10 encoder; G04B2 is not accepted or complete.
 
 ## Current delivery status
 
@@ -22,7 +22,8 @@ G01 proved the safety architecture before a production document engine was adopt
 - `pdf.extract-pages`, `pdf.remove-pages`, `pdf.reorder-pages`, `pdf.rotate-pages` and `pdf.split` 1.0.0 persist typed plans and reuse the accepted qpdf/publication/recovery boundary.
 - Every split output is planned before processing. Completion requires every verified publication; partial publication is a truthful failed state that preserves already published user files.
 - G04A adds accepted lossless structural PDF compression through the existing qpdf sandbox and publication boundary.
-- G04B adds a bounded local `image.to-pdf@1.0.0` review implementation for JPEG/JPG, PNG and WebP. `pdf.to-images@1.0.0` remains visible but dependency-blocked until a renderer passes provenance, licence, redistribution and sandbox review.
+- G04B adds accepted bounded local `image.to-pdf@1.0.0` for JPEG/JPG, PNG and WebP.
+- G04B2 adds `pdf.to-images@1.0.0` for ordered JPEG, PNG and lossless WebP output at 72/150/300 DPI through sequential private PDF.js canvases, authenticated raw IPC and Rust encoding.
 - G04C balanced compression, G04D Office conversion, G04E text/Markdown/local-HTML conversion and G04F batch work remain later slices. OCR, repair, PDF/A, editing, redaction, cloud, accounts and AI remain later goals.
 
 ## Start here
@@ -33,7 +34,7 @@ G01 proved the safety architecture before a production document engine was adopt
 4. Read `docs/implementation-log/G01-foundation.md` for the accepted Phase 0 evidence.
 5. Read `docs/implementation-log/G02-pdf-merge.md` for implementation, test, security, and performance evidence.
 6. Read `docs/implementation-log/G03-viewer-core-pdf.md` for the viewer, page operations and real-browser evidence.
-7. Read `docs/implementation-log/G04B-image-pdf-conversion.md` and ADR-013 for the independently gated writer and renderer blocker.
+7. Read `docs/implementation-log/G04B-image-pdf-conversion.md`, `docs/implementation-log/G04B2-pdf-to-images.md` and ADR-013 for the independently gated conversion paths.
 
 ## Validate and run on Windows
 
@@ -49,7 +50,7 @@ cargo test --workspace --all-targets --locked
 npm --workspace @document-studio/desktop run tauri -- dev
 ```
 
-The development window provides PDF Merge, Viewer, the accepted G04A Optimize workspace, and the active G04B Convert workspace. `diagnostic.copy` remains covered as a foundation regression operation but is not a main user workflow.
+The development window provides PDF Merge, Viewer, the accepted G04A Optimize workspace, and both local Convert directions. `diagnostic.copy` remains covered as a foundation regression operation but is not a main user workflow.
 
 ## Build philosophy
 
@@ -78,7 +79,7 @@ The development window provides PDF Merge, Viewer, the accepted G04A Optimize wo
 - `.github/`, `CONTRIBUTING.md`, `SECURITY.md` - repository workflow, issue/PR templates and security reporting.
 - `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md` - release history and dependency/model adoption gate.
 
-Current implementation version: `0.5.0-g04b-image-pdf-conversion-dev`
+Current implementation version: `0.5.1-g04b2-pdf-to-images-dev`
 Implementation date: `22 August 2026`
 
 ## Goal Mode build workflow

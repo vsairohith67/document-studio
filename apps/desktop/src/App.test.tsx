@@ -30,7 +30,7 @@ vi.mock('./api', async (importOriginal) => {
 
 import App from './App';
 
-const system: SystemStatus = { product: 'Document Studio', phase: 'G02', offlineByDefault: true, databaseSchemaVersion: 3 };
+const system: SystemStatus = { product: 'Document Studio', phase: 'G02', offlineByDefault: true, databaseSchemaVersion: 3, webview2RuntimeVersion: '151.0.7922.34' };
 const inputOne: FileInspection = { path: 'C:\\input\\one.pdf', displayName: 'one.pdf', sizeBytes: 4096, modifiedAt: '2026-08-17T12:00:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-one' };
 const inputTwo: FileInspection = { path: 'C:\\input\\two.pdf', displayName: 'two.pdf', sizeBytes: 8192, modifiedAt: '2026-08-17T12:01:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-two' };
 const inputThree: FileInspection = { path: 'C:\\input\\three.pdf', displayName: 'three.pdf', sizeBytes: 12288, modifiedAt: '2026-08-17T12:02:00Z', mimeType: 'application/pdf', fileIdentity: 'volume:file-three' };
