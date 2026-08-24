@@ -13,8 +13,13 @@ $environmentNames = @(
     'DOCUMENT_STUDIO_TEST_APP_DATA',
     'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
     'DOCUMENT_STUDIO_TEST_CDP_PORT',
+    'WEBVIEW2_BROWSER_EXECUTABLE_FOLDER',
     'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
-    'WEBVIEW2_USER_DATA_FOLDER'
+    'WEBVIEW2_USER_DATA_FOLDER',
+    'WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER',
+    'WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER',
+    'WEBVIEW2_FUTURE_HOSTILE_OVERRIDE',
+    'COREWEBVIEW2_MAX_INSTANCES'
 )
 $environmentState = @{}
 foreach ($name in $environmentNames) {
@@ -700,8 +705,13 @@ try {
     Set-TestEnvironmentValue -Name 'DOCUMENT_STUDIO_TEST_APP_DATA' -Value $appDataDirectory
     Set-TestEnvironmentValue -Name 'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR' -Value $primaryUdfDirectory
     Set-TestEnvironmentValue -Name 'DOCUMENT_STUDIO_TEST_CDP_PORT' -Value $null
-    Set-TestEnvironmentValue -Name 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS' -Value $null
-    Set-TestEnvironmentValue -Name 'WEBVIEW2_USER_DATA_FOLDER' -Value $null
+    Set-TestEnvironmentValue -Name 'webview2_browser_executable_folder' -Value (Join-Path $ownedRoot 'missing-hostile-runtime')
+    Set-TestEnvironmentValue -Name 'WebView2_Additional_Browser_Arguments' -Value '--remote-debugging-pipe --remote-debugging-port=65535 --remote-allow-origins=*'
+    Set-TestEnvironmentValue -Name 'WEBVIEW2_USER_DATA_FOLDER' -Value (Join-Path $ownedRoot 'hostile-inherited-user-data')
+    Set-TestEnvironmentValue -Name 'WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER' -Value '1'
+    Set-TestEnvironmentValue -Name 'WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER' -Value 'document-studio-hostile-debugger-pipe'
+    Set-TestEnvironmentValue -Name 'WeBvIeW2_FuTuRe_HoStIlE_Override' -Value 'document-studio-hostile-future-value'
+    Set-TestEnvironmentValue -Name 'CoReWeBvIeW2_MaX_InStAnCeS' -Value '1'
 
     $phase = 'PRIMARY_STARTUP'
     $startupWatch.Start()
@@ -740,6 +750,11 @@ try {
             $markerPresent = $false
         }
         if ($markerPresent) {
+            $runtimeEvidence = Get-Content -LiteralPath $primaryMarker -Raw
+            if ($runtimeEvidence -notmatch '(?m)^WEBVIEW2_ENVIRONMENT=clean\r?$' -or
+                $runtimeEvidence -notmatch '(?m)^COREWEBVIEW2_MAX_INSTANCES=20\r?$') {
+                Throw-HarnessFailure -Code 'PRIMARY_RUNTIME_NOT_READY' -Message 'The primary did not prove the exact post-policy WebView2 environment.'
+            }
             $metrics.runtimeMarkerCreatedMs = $elapsed
             break
         }

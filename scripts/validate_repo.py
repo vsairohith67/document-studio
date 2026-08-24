@@ -277,9 +277,25 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
         if required not in viewer:
             raise SystemExit(f'G03 transactional candidate replacement is missing {required}')
     runtime = str(inputs['runtime'])
-    for required in ['to_ascii_lowercase', 'contains("--remote-debugging-")', 'contains("--remote-allow-origins")']:
-        if required not in runtime:
-            raise SystemExit(f'G03 production remote-debug family sanitizer is missing {required}')
+    environment_policy = str(inputs['environment_policy'])
+    if runtime.index('webview2_environment::enforce_webview2_environment_policy();') > runtime.index(
+        'let context = tauri::generate_context!();'
+    ):
+        raise SystemExit('SEC1C WebView2 environment policy runs after Tauri context generation')
+    for required in [
+        'WEBVIEW2_ENVIRONMENT_PREFIX',
+        'COREWEBVIEW2_MAX_INSTANCES_ENV',
+        'COREWEBVIEW2_MAX_INSTANCES_VALUE: &str = "20"',
+        'std::env::vars_os()',
+        'eq_ignore_ascii_case',
+        'std::env::remove_var(key)',
+        'std::env::set_var(plan.enforced_key, plan.enforced_value)',
+        'test_runtime_environment_evidence',
+        'WeBvIeW2_FuTuRe_HOSTILE_OVERRIDE',
+        'CoReWeBvIeW2_MaX_InStAnCeS',
+    ]:
+        if required not in environment_policy:
+            raise SystemExit(f'SEC1C WebView2 environment policy is missing {required}')
     if 'renderForms: false' not in str(inputs['session']) or 'AnnotationMode.DISABLE' not in str(inputs['session']):
         raise SystemExit('G03 form/annotation rendering boundary is not explicit')
     session = str(inputs['session'])
@@ -352,6 +368,7 @@ G03_VALIDATION_INPUTS = {
     'session': (ROOT / 'apps/desktop/src/viewer/pdfSession.ts').read_text(encoding='utf-8'),
     'viewer_tests': (ROOT / 'apps/desktop/e2e/viewer.spec.ts').read_text(encoding='utf-8'),
     'runtime': (ROOT / 'apps/desktop/src-tauri/src/lib.rs').read_text(encoding='utf-8'),
+    'environment_policy': (ROOT / 'apps/desktop/src-tauri/src/webview2_environment.rs').read_text(encoding='utf-8'),
     'contracts': (ROOT / 'packages/contracts/src/index.ts').read_text(encoding='utf-8'),
     'rust_contracts': (ROOT / 'apps/desktop/src-tauri/src/contracts.rs').read_text(encoding='utf-8'),
     'rust_pdf': (ROOT / 'apps/desktop/src-tauri/src/pdf_merge.rs').read_text(encoding='utf-8'),

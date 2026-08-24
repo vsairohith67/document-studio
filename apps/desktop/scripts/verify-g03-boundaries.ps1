@@ -104,6 +104,7 @@ if ($ipc -notmatch 'Result<Response, OperationError>' -or $ipc -notmatch '\.map\
   throw 'viewer_read_range must return raw tauri::ipc::Response bytes.'
 }
 $runtimeSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\lib.rs')
+$environmentPolicySource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\webview2_environment.rs')
 foreach ($testOnlyDeclaration in @(
   'const TEST_WEBVIEW2_DATA_DIRECTORY_ENV: &str = "DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR";',
   'const TEST_WEBVIEW2_CDP_PORT_ENV: &str = "DOCUMENT_STUDIO_TEST_CDP_PORT";',
@@ -115,36 +116,65 @@ foreach ($testOnlyDeclaration in @(
     throw "Test-only WebView2 declaration is not feature gated: $testOnlyDeclaration"
   }
 }
-if ($runtimeSource -match 'WEBVIEW2_USER_DATA_FOLDER' -or
-    $runtimeSource -notmatch '#\[cfg\(not\(feature = "test-runtime"\)\)\]\s+fn remove_remote_debugging_arguments' -or
-    $runtimeSource -notmatch '#\[cfg\(feature = "test-runtime"\)\]\s+let test_webview_override = prepare_test_webview_context' -or
+if ($runtimeSource -notmatch '#\[cfg\(feature = "test-runtime"\)\]\s+let test_webview_override = prepare_test_webview_context' -or
     $runtimeSource -notmatch 'WebviewWindowBuilder::from_config' -or
     $runtimeSource -notmatch '\.data_directory\(test_webview_override\.settings\.data_directory\.clone\(\)\)' -or
     $runtimeSource -notmatch '\.additional_browser_args\(arguments\)' -or
     $runtimeSource -notmatch '\.run\(context\)') {
   throw 'Runtime source does not preserve the production/test WebView2 window boundary.'
 }
-if ($runtimeSource -notmatch 'to_ascii_lowercase' -or
-    $runtimeSource -notmatch 'contains\("--remote-debugging-"\)' -or
-    $runtimeSource -notmatch 'contains\("--remote-allow-origins"\)' -or
-    $runtimeSource -match 'split_whitespace\(\)\s*\.filter') {
-  throw 'Production WebView2 arguments are not cleared by the fail-closed remote-debug family sanitizer.'
+$policyCall = $runtimeSource.IndexOf('webview2_environment::enforce_webview2_environment_policy();')
+$contextCreation = $runtimeSource.IndexOf('let context = tauri::generate_context!();')
+if ($policyCall -lt 0 -or $contextCreation -lt 0 -or $policyCall -gt $contextCreation) {
+  throw 'The WebView2 environment policy must execute before Tauri context generation.'
+}
+foreach ($required in @(
+  'const WEBVIEW2_ENVIRONMENT_PREFIX: &str = "WEBVIEW2_";',
+  'const COREWEBVIEW2_MAX_INSTANCES_ENV: &str = "COREWEBVIEW2_MAX_INSTANCES";',
+  'const COREWEBVIEW2_MAX_INSTANCES_VALUE: &str = "20";',
+  'std::env::vars_os()',
+  'eq_ignore_ascii_case',
+  'std::env::remove_var(key);',
+  'std::env::set_var(plan.enforced_key, plan.enforced_value);',
+  'test_runtime_environment_evidence',
+  'WeBvIeW2_FuTuRe_HOSTILE_OVERRIDE',
+  'CoReWeBvIeW2_MaX_InStAnCeS'
+)) {
+  if ($environmentPolicySource -notmatch [regex]::Escape($required)) {
+    throw "The fail-closed WebView2 environment policy is missing: $required"
+  }
 }
 $webViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\test-webview2-smoke.ps1')
 if ($webViewSmoke -notmatch '\[System\.Net\.Sockets\.TcpListener\]::new\(\[System\.Net\.IPAddress\]::Loopback, 0\)' -or
     $webViewSmoke -notmatch "'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR'" -or
     $webViewSmoke -notmatch "'DOCUMENT_STUDIO_TEST_CDP_PORT'" -or
-    $webViewSmoke -match 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS|WEBVIEW2_USER_DATA_FOLDER' -or
-    $webViewSmoke -match '--remote-allow-origins=\*|\b9333\b') {
-  throw 'The WebView2 smoke must use the test builder, dynamic loopback CDP and an isolated profile.'
+    $webViewSmoke -notmatch 'WebView2_Additional_Browser_Arguments' -or
+    $webViewSmoke -notmatch 'webview2_browser_executable_folder' -or
+    $webViewSmoke -notmatch 'WeBvIeW2_FuTuRe_HoStIlE_Override' -or
+    $webViewSmoke -notmatch 'CoReWeBvIeW2_MaX_InStAnCeS' -or
+    $webViewSmoke -notmatch 'COREWEBVIEW2_MAX_INSTANCES=20' -or
+    $webViewSmoke -match '\b9333\b|taskkill') {
+  throw 'The WebView2 smoke must scrub hostile inheritance while retaining the explicit test builder, dynamic loopback CDP and isolated profile.'
+}
+$singleInstanceSmoke = Get-Content -Raw (Join-Path $repositoryRoot 'scripts\test_single_instance.ps1')
+if ($singleInstanceSmoke -notmatch 'WEBVIEW2_ENVIRONMENT=clean' -or
+    $singleInstanceSmoke -notmatch 'COREWEBVIEW2_MAX_INSTANCES=20' -or
+    $singleInstanceSmoke -match 'Get-Process\s+msedgewebview2|taskkill') {
+  throw 'The single-instance smoke must prove the post-policy environment without global WebView2 process cleanup.'
 }
 $productionWebViewSmoke = Get-Content -Raw (Join-Path $desktopRoot 'scripts\test-production-webview2-arguments.ps1')
 if ($productionWebViewSmoke -notmatch 'Get-OwnedDescendants' -or
     $productionWebViewSmoke -notmatch 'document-studio-production-webview2-' -or
     $productionWebViewSmoke -notmatch 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS' -or
-    $productionWebViewSmoke -notmatch '\(\?i\)--remote-debugging-\|--remote-allow-origins' -or
-    $productionWebViewSmoke -match 'Get-Process\s+msedgewebview2|taskkill') {
-  throw 'The production WebView2 argument smoke must isolate profiles and inspect/clean only owned descendants.'
+    $productionWebViewSmoke -notmatch 'WEBVIEW2_BROWSER_EXECUTABLE_FOLDER' -or
+    $productionWebViewSmoke -notmatch 'WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER' -or
+    $productionWebViewSmoke -notmatch 'WeBvIeW2_FuTuRe_HoStIlE_Override' -or
+    $productionWebViewSmoke -notmatch 'CoReWeBvIeW2_MaX_InStAnCeS' -or
+    $productionWebViewSmoke -notmatch 'CreationTimeUtcTicks' -or
+    $productionWebViewSmoke -notmatch '\(\?i\)--remote-debugging-' -or
+    $productionWebViewSmoke -notmatch '\(\?i\)--remote-allow-origins' -or
+    $productionWebViewSmoke -match 'Get-Process\s+msedgewebview2|taskkill|WEBVIEW2_USER_DATA_FOLDER\s*=') {
+  throw 'The production WebView2 environment smoke must inspect two app-owned-profile launches and clean only owned descendants.'
 }
 $viewerSource = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src\viewer') -File -Recurse |
   Where-Object { $_.Extension -in @('.ts', '.tsx') } |
@@ -202,7 +232,6 @@ if (Test-Path -LiteralPath $releaseBinary) {
     'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
     'DOCUMENT_STUDIO_TEST_APP_DATA',
     'DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY',
-    'WEBVIEW2_USER_DATA_FOLDER',
     'VITE_NOT_READY',
     'WEBVIEW2_CDP_NOT_READY',
     'g03-webview2-',
@@ -215,9 +244,10 @@ if (Test-Path -LiteralPath $releaseBinary) {
       throw "The production executable contains test-only WebView2 token $forbidden."
     }
   }
-  if (-not $releaseText.Contains('--remote-debugging-') -or
-      -not $releaseText.Contains('--remote-allow-origins')) {
-    throw 'The production executable no longer contains the required remote-debug argument deny-list.'
+  foreach ($required in @('WEBVIEW2_', 'COREWEBVIEW2_MAX_INSTANCES')) {
+    if (-not $releaseText.Contains($required)) {
+      throw "The production executable no longer contains the WebView2 environment policy token $required."
+    }
   }
 }
 $browserTransportSource = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\browserTestTransport.ts')
@@ -225,4 +255,4 @@ if ($browserTransportSource -notmatch "import\.meta\.env\.MODE === 'test-browser
   throw 'The browser test transport is not compile-time gated to test-browser mode.'
 }
 
-Write-Output 'G03 dependency pins, exact PDF.js assets, 4,096-page admission bound, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug arguments fail closed.'
+Write-Output 'G03 dependency pins, exact PDF.js assets, 4,096-page admission bound, CSP, capability, raw IPC and production/test boundaries verified; inherited WebView2 environment controls fail closed before Tauri context generation.'
