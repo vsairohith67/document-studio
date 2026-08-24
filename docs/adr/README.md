@@ -14,6 +14,6 @@
 | [ADR-010](ADR-010-pdfjs-local-rendering-security.md) | Pin and locally package PDF.js with a reduced viewer surface | Accepted; implemented in G03 |
 | [ADR-011](ADR-011-opaque-viewer-document-sessions.md) | Stream local PDFs through opaque retained-handle sessions | Accepted; implemented in G03 |
 | [ADR-012](ADR-012-versioned-page-plans-and-multi-output-publication.md) | Persist typed page plans and represent partial publication truthfully | Accepted; implemented in G03 |
-| [ADR-013](ADR-013-g04b-image-pdf-conversion-dependencies.md) | Adopt a bounded in-process images-to-PDF writer and defer PDF raster export until a renderer passes provenance and licence gates | Writer accepted for G04B; renderer blocked |
+| [ADR-013](ADR-013-g04b-image-pdf-conversion-dependencies.md) | Adopt bounded image/PDF conversion engines and reuse accepted PDF.js for authenticated sequential raster export | Images-to-PDF accepted; G04B2 decision approved |
 
 Create a new ADR for decisions that are expensive to reverse, affect security/privacy, change the operation contract, add a production dependency/model or alter the platform sequence. Never rewrite an accepted ADR to hide history; supersede it with a new record.

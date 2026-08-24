@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Resolve-Path (Join-Path $desktopRoot '..\..')
-$expectedCsp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';"
+$expectedCsp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';"
 
 function Get-Sha256File([string]$Path) {
   $stream = [System.IO.File]::OpenRead($Path)
@@ -82,12 +82,12 @@ if ($worker.Count -ne 1 -or $worker[0].sha256 -ne 'b4e582882f5e811f4d1b7b511f68d
 
 $tauriConfigurationPath = Join-Path $desktopRoot 'src-tauri\tauri.conf.json'
 $tauriConfigurationHash = Get-Sha256File $tauriConfigurationPath
-if ($tauriConfigurationHash -ne 'b97a850398a47fb391bae2f076ea7e37775c5fc88b6de264cadd5f38638e4217') {
-  throw 'tauri.conf.json changed from the manually tested G03 production configuration.'
+if ($tauriConfigurationHash -ne '28ffc1d8a8b2b54c05312726a38fb8a83986fcd120404087a83c31fe912c87ca') {
+  throw 'tauri.conf.json changed from the natively tested G04B2 production configuration.'
 }
 $tauri = Get-Content -Raw $tauriConfigurationPath | ConvertFrom-Json
 if ($tauri.app.security.csp -ne $expectedCsp) {
-  throw 'The reviewed G03 CSP changed.'
+  throw 'The reviewed G04B2 CSP changed.'
 }
 if (@($tauri.app.windows).Count -ne 1 -or
     $tauri.app.windows[0].label -and $tauri.app.windows[0].label -ne 'main' -or
@@ -201,11 +201,13 @@ if (Test-Path -LiteralPath $releaseBinary) {
     'DOCUMENT_STUDIO_TEST_CDP_PORT',
     'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
     'DOCUMENT_STUDIO_TEST_APP_DATA',
+    'DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY',
     'WEBVIEW2_USER_DATA_FOLDER',
     'VITE_NOT_READY',
     'WEBVIEW2_CDP_NOT_READY',
     'g03-webview2-',
     'viewer_open_test_fixture',
+    'viewer_grant_test_destination',
     'browserTestTransport',
     'playwright'
   )) {

@@ -1,12 +1,12 @@
 {
   "product": "Document Studio",
-  "version": "0.5.0-g04b-image-pdf-conversion-dev",
+  "version": "0.5.1-g04b2-pdf-to-images-dev",
   "audit_date": "22 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
-  "current_goal": "G04B — Image/PDF Conversion (active implementation)",
+  "current_goal": "G04B2 — PDF to Images (active implementation)",
   "current_goal_prompt": "codex/prompts/04-compression-conversion.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
@@ -21,6 +21,8 @@
     "npm test",
     "npm run test:pdfjs-assets --workspace @document-studio/desktop",
     "npm run test:browser --workspace @document-studio/desktop",
+    "npm run test:webview2 --workspace @document-studio/desktop",
+    "npm run verify:g04b2 --workspace @document-studio/desktop",
     "npm run build",
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
@@ -28,7 +30,7 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G01 through G04A are accepted on main. G04A — COMPLETE at merge a27306653119e6e4fcdef162308445b78129f974. G04B — active implementation on feat/g04b-image-pdf-convert; G04B is not accepted or complete. The PDF-to-images renderer dependency is blocked.",
+  "publication_status": "G01 through G04B are accepted on main. G04B — COMPLETE at 6940a1381822a5872f4c345cc0e5cd15b2e6294c. G04B2 — active implementation on feat/g04b2-pdf-to-images; G04B2 is not accepted or complete and must pass its owner merge gate.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
@@ -69,17 +71,20 @@
     "status": "accepted on main at G04A merge a27306653119e6e4fcdef162308445b78129f974",
     "engine": "qpdf 12.3.2"
   },
-  "active_operation": {
+  "accepted_conversion_operation": {
     "id": "image.to-pdf",
     "version": "1.0.0",
-    "status": "implementation; not accepted or complete",
+    "status": "accepted on main at 6940a1381822a5872f4c345cc0e5cd15b2e6294c",
     "engine": "image 0.25.10, pdf-writer 0.15.0, flate2 1.1.9, independently verified by qpdf 12.3.2"
   },
-  "blocked_operation": {
+  "active_operation": {
     "id": "pdf.to-images",
     "version": "1.0.0",
-    "status": "dependency blocked; no production implementation",
-    "reason": "No reviewed Windows PDF renderer currently satisfies exact artifact provenance, licence, redistribution and sandbox requirements."
+    "status": "G04B2 implementation; not accepted or complete",
+    "engine": "pdfjs-dist 6.2.108 private canvas renderer with authenticated raw IPC; image 0.25.10 Rust encoder",
+    "formats": "PNG, fixed-quality JPEG, lossless WebP",
+    "dpi": [72, 150, 300],
+    "limits": "1-128 ordered pages; 8192 axes; 16777216 pixels per page; 67108864 aggregate pixels"
   },
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [

@@ -96,16 +96,16 @@ The PDF.js staging script checks package/API/worker version parity and copies on
 
 G04A adds no new production dependency. `pdf.compress-lossless@1.0.0` reuses the accepted, exactly bundled qpdf 12.3.2 runtime, fixed AppContainer/Job Object process profile, independent verification and durable no-overwrite publication boundary from ADR-009. G04A is accepted on main merge `a27306653119e6e4fcdef162308445b78129f974`.
 
-## G04B images-to-PDF adoption and renderer blocker
+## G04B image/PDF conversion adoption
 
 [ADR-013](adr/ADR-013-g04b-image-pdf-conversion-dependencies.md) accepts only the in-process writer dependencies below. All are exact crates.io versions with registry checksums in `Cargo.lock`; no default codec set, native executable, DLL, installer, runtime download, network call, PATH lookup, shell permission or system service is added.
 
 | Crate | Exact version | Crates.io SHA-256 | Licence | Enabled role/features |
 |---|---:|---|---|---|
-| `image` | 0.25.10 | `85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104` | MIT OR Apache-2.0 | `default-features = false`; JPEG, PNG, WebP decoding, dimensions and orientation only |
+| `image` | 0.25.10 | `85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104` | MIT OR Apache-2.0 | `default-features = false`; JPEG, PNG, WebP decoding plus G04B2 JPEG/PNG/lossless-WebP encoding |
 | `pdf-writer` | 0.15.0 | `f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753` | MIT OR Apache-2.0 | `default-features = false`; original PDF object generation |
 | `flate2` | 1.1.9 | `843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c` | MIT OR Apache-2.0 | `default-features = false`, `rust_backend`; deterministic image streams |
 
 On 22 August 2026 the exact direct crates and their resolved codec/compression subtree had no exact-version matches from the GitHub Advisory API/RustSec data reviewed for this gate. This is point-in-time evidence; every update and release must repeat the advisory, checksum, licence and notices review.
 
-`pdf.to-images@1.0.0` is not adopted. PDFium source does not supply the reviewed signed/versioned Windows runtime provenance required here; MuPDF requires an AGPL-compliant distribution or commercial licence; libvips does not remove the need to approve its PDF renderer chain; and PDF.js export needs a new durable raster architecture. The operation remains on the roadmap but is dependency-blocked with no production code or fallback.
+G04B2 adopts no new package. `pdf.to-images@1.0.0` reuses the already pinned local `pdfjs-dist` 6.2.108 display API/worker for private canvas rendering and existing `image` 0.25.10 for Rust-side durable encoding. The exact PDF.js 191-file asset manifest, Apache-2.0 notices, local-only staging and no-CDN policy remain unchanged. The application does not add PDFium, MuPDF, Poppler, PDFBox, libvips, an executable/DLL, runtime download, PATH/system discovery, shell access, an app-defined custom protocol or network capability. WebView2 is an installed platform runtime; its current version is recorded diagnostically and is not promised to produce byte-identical Skia pixels across runtime revisions.

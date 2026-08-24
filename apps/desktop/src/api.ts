@@ -15,6 +15,9 @@ import type {
   JobWarning,
   JobsCreateRequest,
   OperationManifest,
+  PdfPixelTransferTicket,
+  PdfToImagesJobCreateRequest,
+  PdfToImagesJobSession,
   ProgressEvent,
   SettingGetRequest,
   SettingRecord,
@@ -114,6 +117,29 @@ export const api = {
     createCorePdf: (request: CorePdfJobCreateRequest) =>
       browserTestTransport()?.createCorePdf(request)
       ?? invoke<JobRecord>('jobs_create_core_pdf', { request }),
+    createPdfToImages: (request: PdfToImagesJobCreateRequest) => {
+      const transport = browserTestTransport();
+      if (transport?.createPdfToImages) return transport.createPdfToImages(request);
+      return invoke<PdfToImagesJobSession>('jobs_create_pdf_to_images', { request });
+    },
+    submitPdfPixels(
+      session: PdfToImagesJobSession,
+      ticket: PdfPixelTransferTicket,
+      rgba: Uint8Array,
+    ): Promise<JobRecord> {
+      const transport = browserTestTransport();
+      if (transport?.submitPdfPixels) return transport.submitPdfPixels(session, ticket, rgba);
+      return invoke<JobRecord>('pdf_to_images_submit_page', rgba, {
+        headers: {
+          'x-document-studio-job-id': session.job.id,
+          'x-document-studio-render-session-id': session.renderSessionId,
+          'x-document-studio-page-ordinal': String(ticket.pageOrdinal),
+          'x-document-studio-page-nonce': ticket.nonce,
+          'x-document-studio-expected-width': String(ticket.expectedWidth),
+          'x-document-studio-expected-height': String(ticket.expectedHeight),
+        },
+      });
+    },
     cancel: (request: JobIdRequest) =>
       invoke<CancelResponse>('jobs_cancel', { request }),
     resolveInterrupted: (request: JobIdRequest) =>

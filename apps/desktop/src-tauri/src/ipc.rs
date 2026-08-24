@@ -2,7 +2,11 @@ use std::fs;
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use tauri::{ipc::Response, AppHandle, Emitter, State};
+use tauri::{
+    http::HeaderMap,
+    ipc::{InvokeBody, Request, Response},
+    AppHandle, Emitter, State,
+};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::app_state::{AppState, CancelOutcome};
@@ -10,10 +14,11 @@ use crate::contracts::{
     CancelResponse, CorePdfJobCreateRequest, DestinationGrant, DestinationGrantRequest,
     FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest, JobIdRequest,
     JobRecord, JobWarning, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
-    SettingGetRequest, SettingRecord, SettingSetRequest, SystemStatus, ViewerDocumentMetadata,
-    ViewerRangeRequest, ViewerSessionRequest, JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID,
+    PdfToImagesJobCreateRequest, PdfToImagesJobSession, SettingGetRequest, SettingRecord,
+    SettingSetRequest, SystemStatus, ViewerDocumentMetadata, ViewerRangeRequest,
+    ViewerSessionRequest, JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID,
     PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
-    PDF_SPLIT_OPERATION_ID,
+    PDF_SPLIT_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID,
 };
 use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
@@ -23,6 +28,7 @@ use crate::path_policy::canonical_regular_file;
 use crate::pdf_compression::PdfCompressionService;
 use crate::pdf_merge::PdfMergeService;
 use crate::pdf_operations::PdfPageOperationService;
+use crate::pdf_to_images::{PdfToImagesService, PixelUploadMetadata};
 use crate::recovery::{cancel_without_worker, resolve_interrupted, resolve_worker_spawn_failure};
 
 #[tauri::command]
@@ -36,9 +42,10 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
         .unwrap_or(0);
     Ok(SystemStatus {
         product: "Document Studio".to_owned(),
-        phase: "g04b-image-pdf-conversion".to_owned(),
+        phase: "g04b2-pdf-to-images".to_owned(),
         offline_by_default: true,
         database_schema_version: u32::try_from(version).unwrap_or(0),
+        webview2_runtime_version: tauri::webview_version().ok(),
     })
 }
 
@@ -81,6 +88,27 @@ pub fn viewer_open_test_fixture(
             )
         })?;
     state.viewer_sessions.open_pdf(&path)
+}
+
+#[cfg(feature = "test-runtime")]
+#[tauri::command]
+pub fn viewer_grant_test_destination(
+    state: State<'_, AppState>,
+) -> Result<DestinationGrant, OperationError> {
+    let app_data = std::env::var_os("DOCUMENT_STUDIO_TEST_APP_DATA")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(test_destination_error)?;
+    let destination = std::env::var_os("DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(test_destination_error)?;
+    let app_data =
+        crate::path_policy::canonical_directory(&app_data).map_err(|_| test_destination_error())?;
+    let destination = crate::path_policy::canonical_directory(&destination)
+        .map_err(|_| test_destination_error())?;
+    if destination == app_data || !destination.starts_with(&app_data) {
+        return Err(test_destination_error());
+    }
+    state.viewer_sessions.grant_destination(&destination)
 }
 
 #[tauri::command]
@@ -247,6 +275,68 @@ pub fn jobs_create_core_pdf(
     Ok(redact_viewer_job_paths(job))
 }
 
+#[tauri::command]
+pub fn jobs_create_pdf_to_images(
+    request: PdfToImagesJobCreateRequest,
+    state: State<'_, AppState>,
+) -> Result<PdfToImagesJobSession, OperationError> {
+    let mut session = PdfToImagesService::new(state.inner().clone()).create_job(request)?;
+    session.job = redact_viewer_job_paths(session.job);
+    Ok(session)
+}
+
+#[tauri::command]
+pub async fn pdf_to_images_submit_page(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<JobRecord, OperationError> {
+    let metadata = pixel_upload_metadata(&request)?;
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) if bytes.len() <= 67_108_864 => bytes.clone(),
+        _ => return Err(pixel_body_error()),
+    };
+    let worker_state = state.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        PdfToImagesService::new(worker_state).submit_page(metadata, bytes, |event| {
+            let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+        })
+    })
+    .await
+    .map_err(|_| pixel_body_error())??;
+    Ok(redact_viewer_job_paths(result))
+}
+
+fn pixel_upload_metadata(request: &Request<'_>) -> Result<PixelUploadMetadata, OperationError> {
+    pixel_upload_metadata_from_headers(request.headers())
+}
+
+fn pixel_upload_metadata_from_headers(
+    headers: &HeaderMap,
+) -> Result<PixelUploadMetadata, OperationError> {
+    fn header(headers: &HeaderMap, name: &'static str) -> Result<String, OperationError> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(str::to_owned)
+            .ok_or_else(pixel_header_error)
+    }
+    fn u32_header(headers: &HeaderMap, name: &'static str) -> Result<u32, OperationError> {
+        header(headers, name)?
+            .parse::<u32>()
+            .map_err(|_| pixel_header_error())
+    }
+    Ok(PixelUploadMetadata {
+        job_id: header(headers, "x-document-studio-job-id")?,
+        render_session_id: header(headers, "x-document-studio-render-session-id")?,
+        page_ordinal: u32_header(headers, "x-document-studio-page-ordinal")?,
+        nonce: header(headers, "x-document-studio-page-nonce")?,
+        expected_width: u32_header(headers, "x-document-studio-expected-width")?,
+        expected_height: u32_header(headers, "x-document-studio-expected-height")?,
+    })
+}
+
 fn spawn_registered_worker<W, S>(
     state: &AppState,
     job_id: &str,
@@ -276,6 +366,7 @@ where
 #[tauri::command]
 pub fn jobs_cancel(
     request: JobIdRequest,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CancelResponse, OperationError> {
     match state.cancellations.request(&request.job_id) {
@@ -284,6 +375,19 @@ pub fn jobs_cancel(
                 .database()
                 .request_cancellation(&request.job_id)
                 .map_err(|_| metadata_error())?;
+            let is_pdf_to_images = state
+                .database()
+                .get_job(&request.job_id)
+                .map_err(|_| metadata_error())?
+                .is_some_and(|job| job.operation_id == PDF_TO_IMAGES_OPERATION_ID);
+            if is_pdf_to_images {
+                let _ = PdfToImagesService::new(state.inner().clone()).cancel_if_idle(
+                    &request.job_id,
+                    |event| {
+                        let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                    },
+                )?;
+            }
             Ok(CancelResponse {
                 outcome: "requested".to_owned(),
             })
@@ -360,6 +464,7 @@ fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
             | PDF_REORDER_OPERATION_ID
             | PDF_ROTATE_OPERATION_ID
             | PDF_SPLIT_OPERATION_ID
+            | PDF_TO_IMAGES_OPERATION_ID
     ) {
         return job;
     }
@@ -503,17 +608,53 @@ fn job_not_found() -> OperationError {
     )
 }
 
+fn pixel_body_error() -> OperationError {
+    OperationError::safe(
+        "PIXEL_IPC_INVALID",
+        "The raw page pixel transfer is invalid",
+        "Only an authenticated bounded raw RGBA body is accepted.",
+        OperationStage::Execute,
+        false,
+    )
+}
+
+fn pixel_header_error() -> OperationError {
+    OperationError::safe(
+        "PIXEL_IPC_AUTH_INVALID",
+        "The raw page pixel identity is invalid",
+        "All bounded job, session, page, nonce, width, and height headers are required.",
+        OperationStage::Execute,
+        false,
+    )
+}
+
+#[cfg(feature = "test-runtime")]
+fn test_destination_error() -> OperationError {
+    OperationError::safe(
+        "TEST_DESTINATION_UNAVAILABLE",
+        "The isolated test destination is unavailable",
+        "Use a newly created destination inside the isolated test app-data boundary.",
+        OperationStage::Preflight,
+        false,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{diagnostic_copy_manifest, redact_viewer_job_paths, spawn_registered_worker};
+    use super::{
+        diagnostic_copy_manifest, pixel_upload_metadata_from_headers, redact_viewer_job_paths,
+        spawn_registered_worker,
+    };
     use crate::app_state::{AppState, CancelOutcome};
     use crate::contracts::{
         JobInput, JobOutput, JobProgress, JobRecord, JobState, JobsCreateRequest, OperationStage,
         OutputStatus, ProgressUnit, PDF_EXTRACT_OPERATION_ID, PDF_MERGE_OPERATION_ID,
+        PDF_TO_IMAGES_OPERATION_ID,
     };
     use crate::database::Database;
     use crate::diagnostic_copy::DiagnosticCopyService;
     use crate::workspace::WorkspaceManager;
+    use tauri::http::{HeaderMap, HeaderValue};
     use tempfile::tempdir;
 
     #[test]
@@ -580,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn g03_job_responses_redact_paths_without_changing_accepted_merge_records() {
+    fn opaque_viewer_job_responses_redact_paths_without_changing_accepted_merge_records() {
         let redacted = redact_viewer_job_paths(path_bearing_job(PDF_EXTRACT_OPERATION_ID));
         assert!(redacted.destination_directory.is_empty());
         assert!(redacted.inputs[0].source_path.is_empty());
@@ -592,11 +733,101 @@ mod tests {
             .unwrap()
             .contains(r"C:\Secret"));
 
+        let pdf_images = redact_viewer_job_paths(path_bearing_job(PDF_TO_IMAGES_OPERATION_ID));
+        assert!(pdf_images.destination_directory.is_empty());
+        assert!(pdf_images.inputs[0].source_path.is_empty());
+        assert!(pdf_images.inputs[0].canonical_path.is_empty());
+        assert!(pdf_images.outputs[0].staging_path.is_none());
+        assert!(pdf_images.outputs[0].partial_path.is_none());
+        assert!(pdf_images.outputs[0].final_path.is_none());
+        assert!(!serde_json::to_string(&pdf_images)
+            .unwrap()
+            .contains(r"C:\Secret"));
+
         let accepted_merge = redact_viewer_job_paths(path_bearing_job(PDF_MERGE_OPERATION_ID));
         assert_eq!(accepted_merge.destination_directory, r"C:\Secret\Output");
         assert_eq!(
             accepted_merge.inputs[0].source_path,
             r"C:\Secret\private.pdf"
+        );
+    }
+
+    fn pixel_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-document-studio-job-id",
+            HeaderValue::from_static("job-id"),
+        );
+        headers.insert(
+            "x-document-studio-render-session-id",
+            HeaderValue::from_static("render-session"),
+        );
+        headers.insert(
+            "x-document-studio-page-ordinal",
+            HeaderValue::from_static("0"),
+        );
+        headers.insert(
+            "x-document-studio-page-nonce",
+            HeaderValue::from_static("one-use-nonce"),
+        );
+        headers.insert(
+            "x-document-studio-expected-width",
+            HeaderValue::from_static("8192"),
+        );
+        headers.insert(
+            "x-document-studio-expected-height",
+            HeaderValue::from_static("2048"),
+        );
+        headers
+    }
+
+    #[test]
+    fn raw_pixel_headers_are_complete_bounded_and_strictly_numeric() {
+        let valid = pixel_upload_metadata_from_headers(&pixel_headers()).unwrap();
+        assert_eq!(valid.job_id, "job-id");
+        assert_eq!(valid.render_session_id, "render-session");
+        assert_eq!(valid.page_ordinal, 0);
+        assert_eq!(valid.nonce, "one-use-nonce");
+        assert_eq!((valid.expected_width, valid.expected_height), (8192, 2048));
+
+        for missing in [
+            "x-document-studio-job-id",
+            "x-document-studio-render-session-id",
+            "x-document-studio-page-ordinal",
+            "x-document-studio-page-nonce",
+            "x-document-studio-expected-width",
+            "x-document-studio-expected-height",
+        ] {
+            let mut headers = pixel_headers();
+            headers.remove(missing);
+            assert_eq!(
+                pixel_upload_metadata_from_headers(&headers)
+                    .unwrap_err()
+                    .code,
+                "PIXEL_IPC_AUTH_INVALID"
+            );
+        }
+        let mut invalid_number = pixel_headers();
+        invalid_number.insert(
+            "x-document-studio-expected-width",
+            HeaderValue::from_static("8192px"),
+        );
+        assert_eq!(
+            pixel_upload_metadata_from_headers(&invalid_number)
+                .unwrap_err()
+                .code,
+            "PIXEL_IPC_AUTH_INVALID"
+        );
+        let mut oversized = pixel_headers();
+        oversized.insert(
+            "x-document-studio-page-nonce",
+            HeaderValue::from_str(&"n".repeat(129)).unwrap(),
+        );
+        assert_eq!(
+            pixel_upload_metadata_from_headers(&oversized)
+                .unwrap_err()
+                .code,
+            "PIXEL_IPC_AUTH_INVALID"
         );
     }
 

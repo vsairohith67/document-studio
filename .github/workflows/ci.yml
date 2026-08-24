@@ -90,6 +90,7 @@ jobs:
           npm run verify:g03 --workspace @document-studio/desktop
           npm run verify:g04a --workspace @document-studio/desktop
           npm run verify:g04b --workspace @document-studio/desktop
+          npm run verify:g04b2 --workspace @document-studio/desktop
       - name: Install locked project-local Chromium
         shell: pwsh
         env:
@@ -112,7 +113,7 @@ jobs:
         run: |
           cargo build -p document-studio --locked --features test-runtime
           powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_single_instance.ps1 -Executable .\target\debug\document-studio.exe
-      - name: Prove real WebView2 raw viewer IPC
+      - name: Prove real WebView2 viewer and G04B2 raw IPC
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
         run: npm run test:webview2 --workspace @document-studio/desktop

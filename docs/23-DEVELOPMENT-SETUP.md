@@ -82,7 +82,13 @@ npm run verify:g04b --workspace @document-studio/desktop
 cargo test --locked --test image_to_pdf
 ```
 
-PDF-to-images remains dependency-blocked. Do not install or discover PDFium, MuPDF, libvips or another renderer as a fallback. A renderer may be introduced only through a separate exact-artifact/licence/sandbox approval.
+G04B2 reuses the exact local PDF.js 6.2.108 renderer and existing `image` 0.25.10 encoder. Do not install or discover PDFium, MuPDF, Poppler, PDFBox, libvips or another renderer as a fallback. Verify the raw transfer, caps, encoder and UI boundary with:
+
+```powershell
+npm run verify:g04b2 --workspace @document-studio/desktop
+cargo test --locked --test pdf_to_images
+npm run test:browser --workspace @document-studio/desktop -- --grep G04B2
+```
 
 ### PDF.js
 

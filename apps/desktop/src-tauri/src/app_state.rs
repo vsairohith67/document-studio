@@ -156,6 +156,7 @@ pub struct AppState {
     pub cancellations: Arc<CancellationRegistry>,
     pub qpdf: Option<crate::qpdf::QpdfRuntimeManager>,
     pub viewer_sessions: crate::viewer_sessions::ViewerSessionManager,
+    pub pdf_to_images_jobs: crate::pdf_to_images::PdfToImagesManager,
 }
 
 impl AppState {
@@ -166,6 +167,7 @@ impl AppState {
             cancellations: Arc::new(CancellationRegistry::default()),
             qpdf: None,
             viewer_sessions: crate::viewer_sessions::ViewerSessionManager::default(),
+            pdf_to_images_jobs: crate::pdf_to_images::PdfToImagesManager::default(),
         }
     }
 

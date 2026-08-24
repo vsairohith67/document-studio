@@ -62,12 +62,19 @@ fn document_content_and_secrets_do_not_enter_metadata_events_errors_or_diagnosti
     assert!(!error.detail.contains(PASSWORD_SENTINEL));
 
     let diagnostics = scan_dependencies(&state).unwrap();
+    let pdfjs = diagnostics
+        .iter()
+        .find(|dependency| dependency.id == "pdfjs")
+        .expect("PDF.js dependency diagnostic");
+    assert_eq!(pdfjs.status, DependencyStatus::Available);
+    assert_eq!(pdfjs.version.as_deref(), Some("6.2.108"));
+    assert_eq!(pdfjs.capabilities, ["pdf.to-images"]);
     assert!(diagnostics
         .iter()
         .filter(|dependency| {
             matches!(
                 dependency.id.as_str(),
-                "pdfjs" | "libreoffice" | "ocrmypdf" | "tesseract"
+                "libreoffice" | "ocrmypdf" | "tesseract"
             )
         })
         .all(|dependency| dependency.status == DependencyStatus::NotRequired));

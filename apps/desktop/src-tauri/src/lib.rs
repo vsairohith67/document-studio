@@ -12,6 +12,7 @@ pub mod path_policy;
 pub mod pdf_compression;
 pub mod pdf_merge;
 pub mod pdf_operations;
+pub mod pdf_to_images;
 pub mod process_sandbox;
 pub mod publication;
 pub mod qpdf;
@@ -368,6 +369,8 @@ pub fn run() {
         ipc::files_inspect,
         ipc::jobs_create,
         ipc::jobs_create_core_pdf,
+        ipc::jobs_create_pdf_to_images,
+        ipc::pdf_to_images_submit_page,
         ipc::jobs_cancel,
         ipc::jobs_resolve_interrupted,
         ipc::jobs_get,
@@ -391,6 +394,8 @@ pub fn run() {
         ipc::files_inspect,
         ipc::jobs_create,
         ipc::jobs_create_core_pdf,
+        ipc::jobs_create_pdf_to_images,
+        ipc::pdf_to_images_submit_page,
         ipc::jobs_cancel,
         ipc::jobs_resolve_interrupted,
         ipc::jobs_get,
@@ -402,6 +407,7 @@ pub fn run() {
         ipc::settings_set,
         ipc::viewer_open_dialog,
         ipc::viewer_open_test_fixture,
+        ipc::viewer_grant_test_destination,
         ipc::viewer_read_range,
         ipc::viewer_close,
         ipc::viewer_set_drop_enabled,

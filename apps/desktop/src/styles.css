@@ -82,7 +82,7 @@ h2 { margin-bottom: var(--ds-core-space-2); font-size: 1.15rem; letter-spacing: 
 .privacy-badge, .status-chip { background: var(--ds-core-color-accent-soft); color: var(--ds-core-color-accent); }
 .error-banner { margin-bottom: var(--ds-core-space-5); padding: var(--ds-core-space-4); border-left: var(--ds-core-space-1) solid var(--ds-core-color-danger); background: var(--ds-light-surface); color: var(--ds-core-color-danger); }
 
-.foundation-grid, .merge-layout, .optimize-layout, .convert-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .75fr); gap: var(--ds-core-space-5); align-items: start; }
+.foundation-grid, .merge-layout, .optimize-layout, .convert-layout, .pdf-images-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, .75fr); gap: var(--ds-core-space-5); align-items: start; }
 .side-stack { display: grid; gap: var(--ds-core-space-5); }
 .card {
   border: 1px solid var(--ds-light-border);
@@ -98,6 +98,19 @@ h2 { margin-bottom: var(--ds-core-space-2); font-size: 1.15rem; letter-spacing: 
 .conversion-tabs button.active { border-bottom-color: var(--ds-core-color-accent); color: var(--ds-core-color-accent); }
 .dependency-blocker { display: grid; gap: var(--ds-core-space-1); margin-bottom: var(--ds-core-space-5); padding: var(--ds-core-space-4); border-left: var(--ds-core-space-1) solid var(--ds-core-color-warning); background: var(--ds-light-surface); }
 .dependency-blocker span { color: var(--ds-core-color-muted); font-size: .84rem; line-height: 1.5; }
+.pdf-page-picker { min-width: 0; }
+.pdf-image-thumbnail-scroll { height: min(520px, 58vh); margin-top: var(--ds-core-space-3); overflow: auto; border: 1px solid var(--ds-light-border); border-radius: var(--ds-core-radius-md); background: var(--ds-light-background); padding: var(--ds-core-space-2); }
+.pdf-image-thumbnail-scroll .page-thumbnail { background: var(--ds-light-surface); }
+.choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ds-core-space-2); margin: var(--ds-core-space-4) 0; padding: 0; border: 0; }
+.choice-grid legend { grid-column: 1 / -1; margin-bottom: var(--ds-core-space-2); color: var(--ds-core-color-muted); font-size: .78rem; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
+.choice-grid label { display: flex; align-items: center; justify-content: center; gap: var(--ds-core-space-2); min-height: 42px; padding: var(--ds-core-space-2); border: 1px solid var(--ds-light-border); border-radius: var(--ds-core-radius-sm); background: var(--ds-light-background); font-size: .82rem; font-weight: 700; }
+.output-preview-list { display: grid; gap: var(--ds-core-space-2); max-height: 340px; margin: var(--ds-core-space-3) 0 0; padding: 0; overflow: auto; list-style: none; }
+.output-preview-list > li { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: var(--ds-core-space-2); padding: var(--ds-core-space-2); border: 1px solid var(--ds-light-border); border-radius: var(--ds-core-radius-sm); background: var(--ds-light-background); content-visibility: auto; }
+.output-preview-list > li > div:not(.row-actions) { min-width: 0; display: grid; gap: var(--ds-core-space-1); }
+.output-preview-list strong, .output-preview-list small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.output-preview-list small { color: var(--ds-core-color-muted); }
+.output-status-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--ds-core-space-3); padding: var(--ds-core-space-2) 0; border-bottom: 1px solid var(--ds-light-border); font-size: .78rem; }
+.output-status-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drop-zone {
   width: 100%; min-height: 88px; display: grid; place-items: center; gap: var(--ds-core-space-1);
   margin-top: var(--ds-core-space-4); border: 1px dashed var(--ds-core-color-accent);
@@ -270,7 +283,7 @@ progress { width: 100%; height: var(--ds-core-space-2); accent-color: var(--ds-c
 
 @media (max-width: 960px) {
   .workspace { padding: var(--ds-core-space-6); }
-  .foundation-grid, .merge-layout, .optimize-layout, .convert-layout { grid-template-columns: 1fr; }
+  .foundation-grid, .merge-layout, .optimize-layout, .convert-layout, .pdf-images-layout { grid-template-columns: 1fr; }
   .viewer-shell { height: auto; overflow: visible; }
   .viewer-workspace { height: auto; min-height: 100vh; grid-template-rows: auto auto auto auto; }
   .viewer-body { grid-template-columns: 1fr; grid-template-rows: 210px minmax(620px, 72vh) auto; }
