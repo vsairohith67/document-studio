@@ -2,6 +2,15 @@
 
 Every tool must implement the same lifecycle.
 
+## Durable completion outcomes
+
+Every serialized `JobRecord` includes required nullable `completionKind` and `reason` fields. Existing jobs and operations use `null`/`null` and retain their accepted terminal evidence. A new operation may use an explicit outcome only in one of these combinations:
+
+- `published` / `null`: the job is completed, at least one expected output is fully published with final hash/size/time evidence, and no staging or partial ownership remains.
+- `no-benefit` / `savings-threshold-not-met`: the job is completed with a finish time, zero outputs, zero errors, no resolved output name and no temporary ownership.
+
+No-benefit is successful completion without publication. It is not a new `JobState`, an error or permission to create a fake output. The generic state graph still rejects `Verifying → Completed`; only the internal cleanup-preconditioned CAS transaction in ADR-015 may perform that specialized transition. G04C2A adds this foundation but no balanced-compression manifest, control or production operation.
+
 ## Manifest fields
 
 - `id` and semantic version.

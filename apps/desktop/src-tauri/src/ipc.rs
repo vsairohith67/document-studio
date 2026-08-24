@@ -690,6 +690,8 @@ mod tests {
             updated_at: "2026-08-17T00:00:01Z".to_owned(),
             finished_at: Some("2026-08-17T00:00:01Z".to_owned()),
             version: 1,
+            completion_kind: None,
+            reason: None,
             inputs: vec![JobInput {
                 ordinal: 0,
                 display_name: "private.pdf".to_owned(),

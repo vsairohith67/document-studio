@@ -2,11 +2,12 @@ use std::fs;
 
 use chrono::{TimeZone, Utc};
 use document_studio_lib::contracts::{
-    CorePdfPlanPayload, JobRecord, JobState, OperationPlanEnvelope, OperationSpecEnvelope,
-    OperationStage, OutputRotation, OutputStatus, PageRotation, RotatePagesPlan, SplitOutputRange,
-    SplitPlan, StoredOperationPlan, StoredOperationSpec, CORE_PDF_OPERATION_VERSION,
-    IMAGE_TO_PDF_OPERATION_ID, IMAGE_TO_PDF_VERSION, PDF_EXTRACT_OPERATION_ID,
-    PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID,
+    CorePdfPlanPayload, JobCompletionKind, JobCompletionReason, JobRecord, JobState,
+    OperationPlanEnvelope, OperationSpecEnvelope, OperationStage, OutputRotation, OutputStatus,
+    PageRotation, RotatePagesPlan, SplitOutputRange, SplitPlan, StoredOperationPlan,
+    StoredOperationSpec, CORE_PDF_OPERATION_VERSION, IMAGE_TO_PDF_OPERATION_ID,
+    IMAGE_TO_PDF_VERSION, PDF_EXTRACT_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
+    PDF_SPLIT_OPERATION_ID,
 };
 use document_studio_lib::database::{
     apply_migrations, configure_connection, Database, DatabaseError, Migration,
@@ -67,6 +68,22 @@ fn sample_split_job(id: &str) -> (JobRecord, StoredOperationPlan) {
     })
     .unwrap();
     (job, validated.stored)
+}
+
+fn sample_no_benefit_job(id: &str, finished_at: &str) -> JobRecord {
+    let mut job = sample_job();
+    job.id = id.to_owned();
+    job.operation_id = "pdf.compress-balanced".to_owned();
+    job.operation_version = "1.0.0".to_owned();
+    job.state = JobState::Completed;
+    job.stage = None;
+    job.progress.completed_units = job.progress.total_units;
+    job.resolved_output_name = None;
+    job.updated_at = finished_at.to_owned();
+    job.finished_at = Some(finished_at.to_owned());
+    job.outputs.clear();
+    job.errors.clear();
+    job
 }
 
 fn insert_version_three_job(connection: &Connection, job: &JobRecord) {
@@ -159,12 +176,15 @@ fn insert_version_three_job(connection: &Connection, job: &JobRecord) {
 }
 
 #[test]
-fn fresh_database_migrates_to_version_five_and_reopens_idempotently() {
+fn fresh_database_migrates_to_version_six_and_reopens_idempotently() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("metadata.sqlite3");
     {
         let database = Database::open(&path).unwrap();
-        assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            database.migration_versions().unwrap(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
         let integrity: String = database
             .connection()
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
@@ -173,11 +193,14 @@ fn fresh_database_migrates_to_version_five_and_reopens_idempotently() {
     }
 
     let reopened = Database::open(&path).unwrap();
-    assert_eq!(reopened.migration_versions().unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        reopened.migration_versions().unwrap(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
 }
 
 #[test]
-fn migrations_one_through_three_upgrade_to_five_preserves_legacy_jobs_without_backfill() {
+fn migrations_one_through_three_upgrade_to_six_preserves_legacy_jobs_without_backfill() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("version-three.sqlite3");
     let mut connection = Connection::open(&path).unwrap();
@@ -222,7 +245,10 @@ fn migrations_one_through_three_upgrade_to_five_preserves_legacy_jobs_without_ba
     drop(connection);
 
     let database = Database::open(&path).unwrap();
-    assert_eq!(database.migration_versions().unwrap(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(
+        database.migration_versions().unwrap(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
     let checksums_after = database
         .connection()
         .prepare(
@@ -252,6 +278,15 @@ fn migrations_one_through_three_upgrade_to_five_preserves_legacy_jobs_without_ba
         )
         .unwrap();
     assert_eq!(migration_five_count, 1);
+    let migration_six_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 6",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migration_six_count, 1);
     assert_eq!(
         database.get_job(&diagnostic.id).unwrap(),
         Some(diagnostic.clone())
@@ -293,6 +328,13 @@ fn migrations_one_through_three_upgrade_to_five_preserves_legacy_jobs_without_ba
         .query_row("SELECT COUNT(*) FROM job_warnings", [], |row| row.get(0))
         .unwrap();
     assert_eq!(warning_count, 0, "migration 5 must not invent warnings");
+    let outcome_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM job_completion_outcomes", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(outcome_count, 0, "migration 6 must not invent outcomes");
     let preserved_stage_runs: i64 = database
         .connection()
         .query_row(
@@ -346,6 +388,52 @@ fn migrations_one_through_three_upgrade_to_five_preserves_legacy_jobs_without_ba
 }
 
 #[test]
+fn real_migrations_one_through_five_upgrade_to_six_without_backfill_or_checksum_drift() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("version-five.sqlite3");
+    let mut connection = Connection::open(&path).unwrap();
+    configure_connection(&connection).unwrap();
+    apply_migrations(&mut connection, &FOUNDATION_MIGRATIONS[..5]).unwrap();
+    let checksums_before = connection
+        .prepare("SELECT version, sql_checksum FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let job = sample_job();
+    insert_version_three_job(&connection, &job);
+    drop(connection);
+
+    let database = Database::open(&path).unwrap();
+    let checksums_after = database
+        .connection()
+        .prepare(
+            "SELECT version, sql_checksum FROM schema_migrations WHERE version <= 5 ORDER BY version",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(checksums_after, checksums_before);
+    assert_eq!(
+        database.migration_versions().unwrap(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(database.get_job(&job.id).unwrap(), Some(job));
+    let outcome_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM job_completion_outcomes", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(outcome_count, 0);
+}
+
+#[test]
 fn migration_failure_rolls_back_the_entire_version() {
     let mut connection = Connection::open_in_memory().unwrap();
     configure_connection(&connection).unwrap();
@@ -394,7 +482,7 @@ fn checksum_mismatch_fails_closed() {
 
 #[test]
 fn schema_is_metadata_only_and_constraints_reject_invalid_state() {
-    let database = Database::open_in_memory().unwrap();
+    let mut database = Database::open_in_memory().unwrap();
     let mut statement = database
         .connection()
         .prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND sql IS NOT NULL")
@@ -418,6 +506,7 @@ fn schema_is_metadata_only_and_constraints_reject_invalid_state() {
             .unwrap();
         assert!(types.iter().all(|column_type| column_type != "BLOB"));
     }
+    drop(statement);
 
     let invalid = database.connection().execute(
         "INSERT INTO jobs (
@@ -428,6 +517,57 @@ fn schema_is_metadata_only_and_constraints_reject_invalid_state() {
         ("018f0f17-2f4a-7fb1-a247-101010101010", "2026-08-16T12:00:00Z"),
     );
     assert!(invalid.is_err());
+
+    let job = sample_job();
+    database.create_job(&job).unwrap();
+    for (kind, reason) in [
+        ("other", None),
+        ("no-benefit", None),
+        ("no-benefit", Some("candidate-grew")),
+        ("published", Some("savings-threshold-not-met")),
+    ] {
+        assert!(database
+            .connection()
+            .execute(
+                "INSERT INTO job_completion_outcomes
+                 (job_id, completion_kind, reason, created_at)
+                 VALUES (?1, ?2, ?3, '2026-08-25T12:00:00Z')",
+                params![job.id, kind, reason],
+            )
+            .is_err());
+    }
+
+    database
+        .connection()
+        .execute(
+            "INSERT INTO job_completion_outcomes
+             (job_id, completion_kind, reason, created_at)
+             VALUES (?1, 'published', NULL, '2026-08-25T12:00:00Z')",
+            [&job.id],
+        )
+        .unwrap();
+    assert!(database
+        .connection()
+        .execute(
+            "INSERT INTO job_completion_outcomes
+             (job_id, completion_kind, reason, created_at)
+             VALUES (?1, 'published', NULL, '2026-08-25T12:00:01Z')",
+            [&job.id],
+        )
+        .is_err());
+    database
+        .connection()
+        .execute("DELETE FROM jobs WHERE id = ?1", [&job.id])
+        .unwrap();
+    let outcome_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM job_completion_outcomes WHERE job_id = ?1",
+            [&job.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome_count, 0, "job deletion must cascade to its outcome");
 }
 
 #[test]
@@ -801,6 +941,108 @@ fn retention_deletes_only_old_terminal_metadata() {
     );
     assert!(database.get_job(&old_terminal.id).unwrap().is_none());
     assert!(database.get_job(&active.id).unwrap().is_some());
+}
+
+#[test]
+fn no_benefit_history_loads_deletes_and_retain_purges_metadata_without_output_work() {
+    let mut database = Database::open_in_memory().unwrap();
+    let history_job = sample_no_benefit_job(
+        "018f0f17-2f4a-7fb1-a247-606060606001",
+        "2026-06-01T00:00:00Z",
+    );
+    database.create_job(&history_job).unwrap();
+    database
+        .connection()
+        .execute(
+            "INSERT INTO job_completion_outcomes
+             (job_id, completion_kind, reason, created_at)
+             VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+            (&history_job.id, history_job.finished_at.as_deref().unwrap()),
+        )
+        .unwrap();
+    let loaded = database.get_job(&history_job.id).unwrap().unwrap();
+    assert_eq!(loaded.completion_kind, Some(JobCompletionKind::NoBenefit));
+    assert_eq!(
+        loaded.reason,
+        Some(JobCompletionReason::SavingsThresholdNotMet)
+    );
+    assert!(loaded.outputs.is_empty());
+    assert_eq!(database.list_jobs(10).unwrap(), vec![loaded]);
+    assert_eq!(
+        database
+            .delete_terminal_history(std::slice::from_ref(&history_job.id))
+            .unwrap(),
+        1
+    );
+    let outcome_count: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM job_completion_outcomes", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(outcome_count, 0);
+
+    let retained_job = sample_no_benefit_job(
+        "018f0f17-2f4a-7fb1-a247-606060606002",
+        "2026-06-02T00:00:00Z",
+    );
+    database.create_job(&retained_job).unwrap();
+    database
+        .connection()
+        .execute(
+            "INSERT INTO job_completion_outcomes
+             (job_id, completion_kind, reason, created_at)
+             VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+            (
+                &retained_job.id,
+                retained_job.finished_at.as_deref().unwrap(),
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        database
+            .purge_terminal_before("2026-07-17T00:00:00Z")
+            .unwrap(),
+        1
+    );
+    assert!(database.get_job(&retained_job.id).unwrap().is_none());
+}
+
+#[test]
+fn retention_and_history_fail_closed_for_invalid_outcome_metadata() {
+    let mut database = Database::open_in_memory().unwrap();
+    let mut invalid = sample_no_benefit_job(
+        "018f0f17-2f4a-7fb1-a247-606060606003",
+        "2026-06-01T00:00:00Z",
+    );
+    invalid.outputs.push(sample_job().outputs[0].clone());
+    database.create_job(&invalid).unwrap();
+    database
+        .connection()
+        .execute(
+            "INSERT INTO job_completion_outcomes
+             (job_id, completion_kind, reason, created_at)
+             VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+            (&invalid.id, invalid.finished_at.as_deref().unwrap()),
+        )
+        .unwrap();
+    assert!(matches!(
+        database.delete_terminal_history(std::slice::from_ref(&invalid.id)),
+        Err(DatabaseError::InvalidContractValue { .. })
+    ));
+    assert!(matches!(
+        database.purge_terminal_before("2026-07-17T00:00:00Z"),
+        Err(DatabaseError::InvalidContractValue { .. })
+    ));
+    let still_present: bool = database
+        .connection()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE id = ?1)",
+            [&invalid.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(still_present);
 }
 
 #[test]

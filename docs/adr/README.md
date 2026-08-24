@@ -16,5 +16,6 @@
 | [ADR-012](ADR-012-versioned-page-plans-and-multi-output-publication.md) | Persist typed page plans and represent partial publication truthfully | Accepted; implemented in G03 |
 | [ADR-013](ADR-013-g04b-image-pdf-conversion-dependencies.md) | Adopt bounded image/PDF conversion engines and reuse accepted PDF.js for authenticated sequential raster export | Images-to-PDF accepted; G04B2 decision approved |
 | [ADR-014](ADR-014-webview2-startup-environment-policy.md) | Remove inherited WebView2 controls before Tauri startup and retain only the app-owned profile/test builder boundaries | Accepted for SEC1C implementation |
+| [ADR-015](ADR-015-durable-successful-job-outcomes-without-publication.md) | Represent successful no-publication completion with strict durable outcome metadata | Accepted for G04C2A implementation |
 
 Create a new ADR for decisions that are expensive to reverse, affect security/privacy, change the operation contract, add a production dependency/model or alter the platform sequence. Never rewrite an accepted ADR to hide history; supersede it with a new record.

@@ -131,6 +131,94 @@ fn startup_fails_running_job_after_proven_cleanup() {
 }
 
 #[test]
+fn startup_leaves_valid_completed_no_benefit_metadata_and_unknown_files_untouched() {
+    let (_app_data, state, service) = setup();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let input = support::write_fixture(source.path(), "input.bin", b"no-benefit source");
+    let job = create_job(&service, &input, destination.path());
+    state.workspaces.cleanup_job(&job.id).unwrap();
+    let unknown = destination.path().join("recovery-copy.bin");
+    fs::write(&unknown, b"unknown neighboring file").unwrap();
+    {
+        let database = state.database();
+        database
+            .connection()
+            .execute("DELETE FROM job_outputs WHERE job_id = ?1", [&job.id])
+            .unwrap();
+        database
+            .connection()
+            .execute(
+                "UPDATE jobs
+                 SET state = 'completed', stage = NULL, completed_units = total_units,
+                     resolved_output_name = NULL, finished_at = ?2, updated_at = ?2
+                 WHERE id = ?1",
+                (&job.id, "2026-08-25T12:00:00Z"),
+            )
+            .unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO job_completion_outcomes
+                 (job_id, completion_kind, reason, created_at)
+                 VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+                (&job.id, "2026-08-25T12:00:00Z"),
+            )
+            .unwrap();
+    }
+
+    let report = reconcile_startup(&state).unwrap();
+    assert_eq!(report, Default::default());
+    let completed = state.database().get_job(&job.id).unwrap().unwrap();
+    assert_eq!(completed.state, JobState::Completed);
+    assert_eq!(
+        completed.completion_kind,
+        Some(document_studio_lib::contracts::JobCompletionKind::NoBenefit)
+    );
+    assert!(completed.outputs.is_empty());
+    assert_eq!(fs::read(&unknown).unwrap(), b"unknown neighboring file");
+}
+
+#[test]
+fn startup_rejects_no_benefit_with_output_evidence_without_deleting_any_file() {
+    let (_app_data, state, service) = setup();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let input = support::write_fixture(source.path(), "input.bin", b"invalid outcome source");
+    let job = create_job(&service, &input, destination.path());
+    let unknown = destination.path().join("unknown.pdf");
+    fs::write(&unknown, b"unknown neighboring file").unwrap();
+    {
+        let database = state.database();
+        database
+            .connection()
+            .execute(
+                "UPDATE jobs
+                 SET state = 'completed', stage = NULL, completed_units = total_units,
+                     resolved_output_name = NULL, finished_at = ?2, updated_at = ?2
+                 WHERE id = ?1",
+                (&job.id, "2026-08-25T12:00:00Z"),
+            )
+            .unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO job_completion_outcomes
+                 (job_id, completion_kind, reason, created_at)
+                 VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+                (&job.id, "2026-08-25T12:00:00Z"),
+            )
+            .unwrap();
+    }
+
+    assert!(matches!(
+        reconcile_startup(&state),
+        Err(DatabaseError::InvalidContractValue { .. })
+    ));
+    assert_eq!(fs::read(&unknown).unwrap(), b"unknown neighboring file");
+}
+
+#[test]
 fn startup_resolves_inspecting_preflight_and_ready_without_resuming() {
     for target in [JobState::Inspecting, JobState::Preflight, JobState::Ready] {
         let (_app_data, state, service) = setup();

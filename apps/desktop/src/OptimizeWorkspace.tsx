@@ -7,6 +7,7 @@ import type {
   SystemStatus,
 } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
+import { NoBenefitResult } from './JobCompletionOutcome';
 import {
   calculateSizeReport,
   formatBytes,
@@ -250,7 +251,8 @@ export function OptimizeWorkspace({
               <strong>{progress?.message ?? (job ? `Job ${job.state}` : 'Ready for local preflight')}</strong>
               {indeterminate ? <div className="indeterminate-bar" role="progressbar" aria-label="Compressing PDF" /> : <progress value={progressPercent} max={100} aria-label="Lossless PDF Compression progress" />}
               {busy && !cancellable && <p className="publishing-copy">Publishing safely—cancellation is no longer available.</p>}
-              {job?.state === 'completed' && sizeReport && <div ref={result} className="success-result compression-result" tabIndex={-1}><strong>Verified compressed PDF</strong><span>{job.outputs[0]?.finalPath}</span><div className="size-comparison" aria-label="Compression size comparison"><span><small>Before</small><strong>{source?.sizeBytes.toLocaleString()} bytes</strong></span><span><small>After</small><strong>{afterBytes?.toLocaleString()} bytes</strong></span><span><small>Delta</small><strong>{formatSignedBytes(sizeReport.deltaBytes)} · {formatSignedPercentage(sizeReport.percentageDelta)}</strong></span></div><p className={`size-outcome outcome-${sizeReport.outcome}`}>{sizeOutcomeLabel(sizeReport)}</p><div className="action-row"><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy saved path</button><button type="button" className="secondary compact" onClick={onOpenViewer}>Open PDF Viewer</button></div></div>}
+              {job?.state === 'completed' && job.completionKind === 'no-benefit' && <NoBenefitResult resultRef={result} />}
+              {job?.state === 'completed' && job.completionKind !== 'no-benefit' && sizeReport && <div ref={result} className="success-result compression-result" tabIndex={-1}><strong>Verified compressed PDF</strong><span>{job.outputs[0]?.finalPath}</span><div className="size-comparison" aria-label="Compression size comparison"><span><small>Before</small><strong>{source?.sizeBytes.toLocaleString()} bytes</strong></span><span><small>After</small><strong>{afterBytes?.toLocaleString()} bytes</strong></span><span><small>Delta</small><strong>{formatSignedBytes(sizeReport.deltaBytes)} · {formatSignedPercentage(sizeReport.percentageDelta)}</strong></span></div><p className={`size-outcome outcome-${sizeReport.outcome}`}>{sizeOutcomeLabel(sizeReport)}</p><div className="action-row"><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy saved path</button><button type="button" className="secondary compact" onClick={onOpenViewer}>Open PDF Viewer</button></div></div>}
               {(job?.state === 'failed' || job?.state === 'cancelled' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? `Compression ${job.state}`}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span>{job.state === 'interrupted' && <button type="button" className="secondary compact" onClick={resolveInterrupted}>Resolve safely</button>}</div>}
             </article>
           </aside>

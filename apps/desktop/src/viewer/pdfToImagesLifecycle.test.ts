@@ -29,6 +29,8 @@ function job(id: string, state: JobRecord['state']): JobRecord {
     updatedAt: '2026-08-23T00:00:00Z',
     finishedAt: state === 'cancelled' ? '2026-08-23T00:00:00Z' : null,
     version: state === 'cancelled' ? 4 : 3,
+    completionKind: null,
+    reason: null,
     inputs: [],
     outputs: [{
       ordinal: 0,

@@ -95,6 +95,8 @@ function job(id: string, state: JobRecord['state']): JobRecord {
     updatedAt: '2026-08-23T00:00:01Z',
     finishedAt: state === 'queued' ? null : '2026-08-23T00:00:01Z',
     version: state === 'queued' ? 3 : 4,
+    completionKind: null,
+    reason: null,
     inputs: [],
     outputs: [{
       ordinal: 0,
