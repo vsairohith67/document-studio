@@ -17,6 +17,7 @@ import type {
   SplitOutputRange,
   ViewerDocumentMetadata,
 } from '@document-studio/contracts';
+import { CORE_PDF_MAX_PAGES } from '@document-studio/contracts';
 import type { PDFDocumentProxy } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { api, operationErrorMessage } from '../api';
 import { PageSurface, PageThumbnail, type FitMode } from './PageSurface';
@@ -726,7 +727,7 @@ export function ViewerWorkspace() {
   };
 
   const plan = useMemo<OperationPlanEnvelope | null>(() => {
-    if (!pdf || encryptedForViewing || pdf.numPages > 4096) return null;
+    if (!pdf || encryptedForViewing || pdf.numPages > CORE_PDF_MAX_PAGES) return null;
     const selectedInOrder = pageOrder.filter((pageIndex) => selectedPages.has(pageIndex));
     const envelope = { schemaVersion: 1 as const, operationId, sourcePageCount: pdf.numPages };
     if (operationId === 'pdf.extract-pages') {
@@ -777,8 +778,8 @@ export function ViewerWorkspace() {
   const selectionCount = selectedPages.size;
   const planHelp = encryptedForViewing
     ? 'Encrypted PDFs may be viewed with an in-memory password, but G03 output operations are unavailable.'
-    : pdf && pdf.numPages > 4096
-    ? 'Viewing is available, but G03 output plans are limited to 4,096 pages.'
+    : pdf && pdf.numPages > CORE_PDF_MAX_PAGES
+    ? 'This PDF exceeds the 4,096-page safety boundary.'
     : !destination ? 'Choose a destination folder.'
       : !plan ? operationId === 'pdf.split'
         ? 'Split ranges must cover every page once, in order, with at most 128 outputs.'

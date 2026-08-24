@@ -26,6 +26,12 @@ rejected(lambda value: value.__setitem__('state', str(value['state']) + '\nAll v
 rejected(lambda value: value.__setitem__('session', str(value['session']).replace('16_777_216', '16_000_000')), 'canvas constant drift')
 rejected(lambda value: value.__setitem__('surface', str(value['surface']).replace('event.altKey', 'event.shiftKey')), 'missing Alt handler')
 rejected(lambda value: value.__setitem__('viewer', str(value['viewer']).replace('candidateDocumentRef', 'candidateRef')), 'missing transactional owner')
+rejected(lambda value: value.__setitem__('session', str(value['session']).replace('validatePdfPageCount(document.numPages);', '')), 'missing early page-count admission')
+rejected(lambda value: value.__setitem__('rust_contracts', str(value['rust_contracts']).replace('CORE_PDF_MAX_PAGES: u32 = 4096', 'CORE_PDF_MAX_PAGES: u32 = 8192')), 'cross-language page-count drift')
+rejected(lambda value: value.__setitem__('rust_pdf', str(value['rust_pdf']).replace('.try_reserve_exact(page_count)', '.reserve_exact(page_count)')), 'infallible page-sized allocation')
+rejected(lambda value: value.__setitem__('contracts', str(value['contracts']).replace('MAX_QUEUED_RANGE_COUNT = 64', 'MAX_QUEUED_RANGE_COUNT = 65')), 'range queue count drift')
+rejected(lambda value: value.__setitem__('rust_viewer', str(value['rust_viewer']).replace('VIEWER_RANGE_CHUNK_BYTES: u64 = 256 * 1024', 'VIEWER_RANGE_CHUNK_BYTES: u64 = 128 * 1024')), 'cross-language range chunk drift')
+rejected(lambda value: value.__setitem__('session', str(value['session']).replace('transportEpoch', 'transportGeneration')), 'stale range completion epoch removed')
 
 validate_g04b = namespace['validate_g04b_boundaries']
 g04b_baseline = namespace['G04B_VALIDATION_INPUTS']
@@ -67,4 +73,4 @@ rejected_g04b2(lambda value: value.__setitem__('backend', str(value['backend']).
 rejected_g04b2(lambda value: value.__setitem__('typed_contracts', str(value['typed_contracts']).replace('viewerGeneration: number;', 'viewerGeneration: number;\n  sourcePath: string;')), 'React source path exposure')
 rejected_g04b2(lambda value: value.__setitem__('capability', str(value['capability']).replace('"dialog:allow-open"', '"dialog:allow-open", "http:default"')), 'HTTP capability expansion')
 
-print('G03/G04B/G04B2 repository-validator negative probes passed (19 cases).')
+print('G03/G04B/G04B2 repository-validator negative probes passed (25 cases).')

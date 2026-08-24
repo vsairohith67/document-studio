@@ -596,6 +596,33 @@ test('reports damaged PDF data without retaining a canvas', async ({ page }) => 
   expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(1);
 });
 
+test('rejects 4097 pages at PDF.js session admission before viewer allocation or durable work', async ({ page }) => {
+  await installTransport(page, 4097);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Viewer', exact: true }).click();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+
+  await expect(page.getByRole('alert')).toContainText('The PDF has an unsupported page count.');
+  await expect(page.getByRole('alert')).toContainText('between 1 and 4,096 pages');
+  await expect(page.locator('.pdf-page-surface, .page-thumbnail')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  const evidence = await page.evaluate(() => window.__G03_TEST_EVIDENCE__);
+  expect(evidence.closeCount).toBe(1);
+  expect(evidence.plans).toEqual([]);
+  expect(evidence.rangeCalls.every((call) => !('path' in call))).toBe(true);
+});
+
+test('accepts exactly 4096 pages and releases the bounded viewer session normally', async ({ page }) => {
+  await installTransport(page, 4096);
+  await openViewer(page);
+
+  await expect(page.getByRole('button', { name: 'Page 1 of 4096' }).first()).toBeVisible();
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.plans)).toEqual([]);
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(1);
+});
+
 test('keeps active A through damaged B and commits valid C transactionally', async ({ page }) => {
   await installTransportSequence(page, [
     { pageCount: 2, bytes: syntheticPdf(2), displayName: 'active-a.pdf' },
