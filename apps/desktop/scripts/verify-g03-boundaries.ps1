@@ -154,6 +154,7 @@ if (($viewerSource -join "`n") -match '(?i)https?://|file://') {
 }
 $contractSource = Get-Content -Raw (Join-Path $repositoryRoot 'packages\contracts\src\index.ts')
 $rustContractSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\contracts.rs')
+$rustViewerSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\viewer_sessions.rs')
 $pdfSessionSource = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.ts')
 $pdfSessionTests = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.test.ts')
 $pdfMergeSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\pdf_merge.rs')
@@ -165,6 +166,21 @@ if ($contractSource -notmatch 'CORE_PDF_MAX_PAGES = 4096' -or
     $pdfMergeSource -notmatch 'page_count == 0 \|\| page_count > u64::from\(CORE_PDF_MAX_PAGES\)' -or
     $pdfMergeSource -notmatch '\.try_reserve_exact\(page_count\)') {
   throw 'PDF page counts are not rejected at the PDF.js/qpdf boundary before page-sized allocation.'
+}
+if ($contractSource -notmatch 'RANGE_CHUNK_BYTES = 256 \* 1024' -or
+    $contractSource -notmatch 'MAX_RANGE_READS = 4' -or
+    $contractSource -notmatch 'MAX_QUEUED_RANGE_COUNT = 64' -or
+    $contractSource -notmatch 'MAX_QUEUED_RANGE_BYTES = 16 \* 1024 \* 1024' -or
+    $rustViewerSource -notmatch 'VIEWER_RANGE_CHUNK_BYTES: u64 = 256 \* 1024' -or
+    $pdfSessionSource -notmatch 'PDF_RANGE_QUEUE_LIMIT_EXCEEDED' -or
+    $pdfSessionSource -notmatch 'checkedQueueTotal' -or
+    $pdfSessionSource -notmatch 'transportEpoch' -or
+    $pdfSessionSource -notmatch 'references \+= 1' -or
+    $pdfSessionTests -notmatch 'rejects count plus one' -or
+    $pdfSessionTests -notmatch 'rejects bytes plus one' -or
+    $pdfSessionTests -notmatch 'replacement document' -or
+    $pdfSessionTests -notmatch 'sanitizes native range failures') {
+  throw 'PDF range queue admission, deduplication, cancellation, or cross-language chunk limits drifted.'
 }
 
 $distAssets = Join-Path $desktopRoot 'dist\assets'

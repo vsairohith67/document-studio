@@ -285,6 +285,7 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
     contracts = str(inputs['contracts'])
     rust_contracts = str(inputs['rust_contracts'])
     rust_pdf = str(inputs['rust_pdf'])
+    rust_viewer = str(inputs['rust_viewer'])
     session_tests = str(inputs['session_tests'])
     for required in [
         'CORE_PDF_MAX_PAGES = 4096',
@@ -304,6 +305,35 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
     ]:
         if required not in rust_pdf:
             raise SystemExit(f'G03 qpdf page-count allocation boundary is missing {required}')
+    for required in [
+        'RANGE_CHUNK_BYTES = 256 * 1024',
+        'MAX_RANGE_READS = 4',
+        'MAX_QUEUED_RANGE_COUNT = 64',
+        'MAX_QUEUED_RANGE_BYTES = 16 * 1024 * 1024',
+    ]:
+        if required not in contracts:
+            raise SystemExit(f'G03 PDF range queue contract drifted: {required}')
+    if 'VIEWER_RANGE_CHUNK_BYTES: u64 = 256 * 1024' not in rust_viewer:
+        raise SystemExit('G03 Rust viewer range chunk differs from the TypeScript contract')
+    for required in [
+        'PDF_RANGE_QUEUE_LIMIT_EXCEEDED',
+        'checkedQueueTotal',
+        'transportEpoch',
+        'references += 1',
+        'flushCompletedLogicalRanges',
+    ]:
+        if required not in session:
+            raise SystemExit(f'G03 PDF range queue boundary is missing {required}')
+    for required in [
+        'rejects count plus one',
+        'rejects bytes plus one',
+        'replacement document',
+        'FIFO progress',
+        'releases logical count and byte accounting',
+        'sanitizes native range failures',
+    ]:
+        if required not in session_tests:
+            raise SystemExit(f'G03 PDF range queue regression is missing {required}')
 
 
 g03_state_paths = [
@@ -324,6 +354,7 @@ G03_VALIDATION_INPUTS = {
     'contracts': (ROOT / 'packages/contracts/src/index.ts').read_text(encoding='utf-8'),
     'rust_contracts': (ROOT / 'apps/desktop/src-tauri/src/contracts.rs').read_text(encoding='utf-8'),
     'rust_pdf': (ROOT / 'apps/desktop/src-tauri/src/pdf_merge.rs').read_text(encoding='utf-8'),
+    'rust_viewer': (ROOT / 'apps/desktop/src-tauri/src/viewer_sessions.rs').read_text(encoding='utf-8'),
     'session_tests': (ROOT / 'apps/desktop/src/viewer/pdfSession.test.ts').read_text(encoding='utf-8'),
 }
 validate_g03_acceptance_consistency(G03_VALIDATION_INPUTS)

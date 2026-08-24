@@ -28,6 +28,10 @@ export const OPERATION_STAGES = [
 ] as const;
 
 export const CORE_PDF_MAX_PAGES = 4096;
+export const RANGE_CHUNK_BYTES = 256 * 1024;
+export const MAX_RANGE_READS = 4;
+export const MAX_QUEUED_RANGE_COUNT = 64;
+export const MAX_QUEUED_RANGE_BYTES = 16 * 1024 * 1024;
 
 export type OperationStage = (typeof OPERATION_STAGES)[number];
 export type ProgressUnit = 'bytes' | 'items' | 'steps';
