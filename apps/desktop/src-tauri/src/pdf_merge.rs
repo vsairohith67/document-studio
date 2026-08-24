@@ -2122,7 +2122,7 @@ fn parse_qpdf_page_count(output: &[u8], stage: OperationStage) -> Result<u64, Op
     let page_count = trimmed
         .parse::<u64>()
         .map_err(|_| invalid_page_count_error(stage))?;
-    if page_count == 0 || page_count > u64::from(CORE_PDF_MAX_PAGES) {
+    if page_count > u64::from(CORE_PDF_MAX_PAGES) {
         return Err(unsupported_page_count_error(stage));
     }
     Ok(page_count)
@@ -2731,7 +2731,7 @@ mod page_count_tests {
 
     #[test]
     fn qpdf_page_count_rejects_unsupported_and_malicious_numbers() {
-        for page_count in [0, u64::from(CORE_PDF_MAX_PAGES) + 1, u64::MAX] {
+        for page_count in [u64::from(CORE_PDF_MAX_PAGES) + 1, u64::MAX] {
             let error =
                 parse_qpdf_page_count(page_count.to_string().as_bytes(), OperationStage::Preflight)
                     .expect_err("unsupported page count");
@@ -2748,6 +2748,15 @@ mod page_count_tests {
             assert_eq!(error.code, "PDF_PAGE_COUNT_INVALID");
             assert_eq!(error.stage, OperationStage::Verify);
         }
+    }
+
+    #[test]
+    fn qpdf_page_count_preserves_zero_for_the_zero_page_domain_error() {
+        assert_eq!(
+            parse_qpdf_page_count(b"0", OperationStage::Preflight)
+                .expect("zero must reach the existing domain-specific rejection"),
+            0
+        );
     }
 
     #[test]
