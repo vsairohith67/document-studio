@@ -2,171 +2,207 @@ param(
   [string]$Executable = ""
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$repositoryRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
+
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
 if ([string]::IsNullOrWhiteSpace($Executable)) {
   $Executable = Join-Path $repositoryRoot 'target\release\document-studio.exe'
 }
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
-$evidenceRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("document-studio-production-webview2-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $evidenceRoot | Out-Null
-$originalArguments = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
-$originalUserDataFolder = $env:WEBVIEW2_USER_DATA_FOLDER
-
-function Get-OwnedDescendants([int]$RootPid) {
-  $all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine)
-  $owned = @()
-  $parents = New-Object System.Collections.Generic.HashSet[int]
-  [void]$parents.Add($RootPid)
-  $changed = $true
-  while ($changed) {
-    $changed = $false
-    foreach ($process in $all) {
-      if ($parents.Contains([int]$process.ParentProcessId) -and !$parents.Contains([int]$process.ProcessId)) {
-        [void]$parents.Add([int]$process.ProcessId)
-        $owned += $process
-        $changed = $true
-      }
-    }
-  }
-  return $owned
+$evidenceRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
+  'document-studio-production-webview2-' + [guid]::NewGuid().ToString('N')
+)
+$hostileUserDataFolder = Join-Path $evidenceRoot 'hostile-inherited-user-data'
+$hostileRuntimeFolder = Join-Path $evidenceRoot 'missing-hostile-runtime'
+$expectedProductionWebViewData = Join-Path $env:LOCALAPPDATA 'studio.document.app\EBWebView'
+$environmentState = @{}
+$managedEnvironment = [ordered]@{
+  'webview2_browser_executable_folder' = $hostileRuntimeFolder
+  'WEBVIEW2_USER_DATA_FOLDER' = $hostileUserDataFolder
+  'WebView2_Additional_Browser_Arguments' = '--remote-debugging-pipe --remote-debugging-port=65535 --remote-allow-origins=* --document-studio-hostile-marker=sec1c'
+  'WEBVIEW2_CHANNEL_SEARCH_KIND' = '1'
+  'WEBVIEW2_RELEASE_CHANNELS' = '0'
+  'WEBVIEW2_RELEASE_CHANNEL_PREFERENCE' = '1'
+  'WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER' = '1'
+  'WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER' = 'document-studio-hostile-debugger-pipe'
+  'WEBVIEW2_DEFAULT_BACKGROUND_COLOR' = '00000000'
+  'WeBvIeW2_FuTuRe_HoStIlE_Override' = 'document-studio-hostile-future-value'
+  'CoReWeBvIeW2_MaX_InStAnCeS' = '1'
 }
 
-function Test-LoopbackPort([int]$Port) {
-  $client = [System.Net.Sockets.TcpClient]::new()
-  try {
-    $result = $client.BeginConnect([System.Net.IPAddress]::Loopback, $Port, $null, $null)
-    if (!$result.AsyncWaitHandle.WaitOne(250)) { return $false }
-    try { $client.EndConnect($result); return $true } catch { return $false }
-  } finally {
-    $client.Dispose()
-  }
+function Get-NormalizedPath([string]$Path) {
+  $fullPath = [System.IO.Path]::GetFullPath($Path)
+  if ($fullPath.StartsWith('\\?\')) { $fullPath = $fullPath.Substring(4) }
+  $fullPath.TrimEnd('\')
 }
 
-function Get-ProcessLog([string]$Path) {
-  if (!(Test-Path -LiteralPath $Path)) { return '<not created>' }
-  $content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
-  if ([string]::IsNullOrWhiteSpace($content)) { return '<empty>' }
-  if ($content.Length -le 4096) { return $content.Trim() }
-  return $content.Substring($content.Length - 4096).Trim()
-}
-
-function Get-UdfProcesses([string]$UserDataFolder) {
-  $escaped = [regex]::Escape($UserDataFolder)
-  return @(Get-CimInstance Win32_Process |
-    Where-Object {
-      $_.Name -ieq 'msedgewebview2.exe' -and
-      [string]$_.CommandLine -match $escaped
-    } |
+function Get-ProcessSnapshot {
+  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Select-Object ProcessId, ParentProcessId, Name, CommandLine)
 }
 
-function Write-CaseDiagnostics(
-  [string]$Name,
-  [System.Diagnostics.Process]$Process,
-  [System.Diagnostics.Stopwatch]$Stopwatch,
-  [string]$UserDataFolder,
-  [string]$StandardOutput,
-  [string]$StandardError,
-  [object[]]$ObservedProcesses
-) {
-  $exitCode = '<running>'
-  if ($Process.HasExited) {
-    $Process.WaitForExit()
-    $exitCode = [string]$Process.ExitCode
-  }
-  $profileEntries = @()
-  if (Test-Path -LiteralPath $UserDataFolder) {
-    $profileEntries = @(Get-ChildItem -LiteralPath $UserDataFolder -Force -ErrorAction SilentlyContinue |
-      Select-Object -First 20 -ExpandProperty Name)
-  }
-  Write-Output "Production WebView2 diagnostics: case=$Name; executable=$Executable; pid=$($Process.Id); exitCode=$exitCode; elapsedMs=$($Stopwatch.ElapsedMilliseconds); udf=$UserDataFolder; udfEntries=$($profileEntries -join ',')."
-  foreach ($observed in $ObservedProcesses) {
-    Write-Output "Observed process: pid=$($observed.ProcessId); parent=$($observed.ParentProcessId); name=$($observed.Name); command=$($observed.CommandLine)"
-  }
-  Write-Output "Process stdout: $(Get-ProcessLog $StandardOutput)"
-  Write-Output "Process stderr: $(Get-ProcessLog $StandardError)"
+function Get-OwnedDescendants([int]$RootPid, [object[]]$Snapshot = $(Get-ProcessSnapshot)) {
+  $ownedIds = [System.Collections.Generic.HashSet[int]]::new()
+  [void]$ownedIds.Add($RootPid)
+  do {
+    $added = $false
+    foreach ($candidate in $Snapshot) {
+      if ($ownedIds.Contains([int]$candidate.ParentProcessId) -and
+          $ownedIds.Add([int]$candidate.ProcessId)) {
+        $added = $true
+      }
+    }
+  } while ($added)
+  @($Snapshot | Where-Object {
+    [int]$_.ProcessId -ne $RootPid -and $ownedIds.Contains([int]$_.ProcessId)
+  })
 }
 
-function Invoke-Case([string]$Name, [string]$Arguments, [int]$ForbiddenPort) {
-  $caseRoot = Join-Path $evidenceRoot $Name
-  $userDataFolder = Join-Path $caseRoot 'webview2-user-data'
-  $standardOutput = Join-Path $caseRoot 'application.stdout.log'
-  $standardError = Join-Path $caseRoot 'application.stderr.log'
-  New-Item -ItemType Directory -Path $userDataFolder | Out-Null
-  $env:WEBVIEW2_USER_DATA_FOLDER = $userDataFolder
-  $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $Arguments
-  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-  $process = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden `
-    -RedirectStandardOutput $standardOutput -RedirectStandardError $standardError
-  $owned = @()
-  $observed = @()
-  $browser = @()
-  try {
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    do {
-      if ($process.HasExited) {
-        Write-CaseDiagnostics $Name $process $stopwatch $userDataFolder $standardOutput $standardError $observed
-        throw "Production application exited before WebView2 started in $Name."
+function Get-WebViewDataFolder([string]$CommandLine) {
+  $match = [regex]::Match($CommandLine, '(?i)--user-data-dir=(?:"([^"]+)"|([^\s]+))')
+  if (-not $match.Success) { return $null }
+  if ($match.Groups[1].Success) { return $match.Groups[1].Value }
+  $match.Groups[2].Value
+}
+
+function Stop-OwnedProcesses([System.Diagnostics.Process]$RootProcess, [object[]]$OwnedProcesses) {
+  if ($null -ne $RootProcess) {
+    try {
+      $RootProcess.Refresh()
+      if (-not $RootProcess.HasExited) {
+        Stop-Process -Id $RootProcess.Id -Force -ErrorAction SilentlyContinue
       }
-      $owned = @(Get-OwnedDescendants $process.Id)
-      $observed = @($owned)
-      $browser = @($owned | Where-Object { $_.Name -ieq 'msedgewebview2.exe' })
-      $profileReady = @(Get-ChildItem -LiteralPath $userDataFolder -Force -ErrorAction SilentlyContinue).Count -gt 0
-      if ($browser.Count -gt 0 -and $profileReady) { break }
-      Start-Sleep -Milliseconds 200
-    } while ([DateTime]::UtcNow -lt $deadline)
-    if ($browser.Count -eq 0 -or !$profileReady) {
-      Write-CaseDiagnostics $Name $process $stopwatch $userDataFolder $standardOutput $standardError $observed
-      throw "No ready owned WebView2 child and profile were created in $Name."
-    }
-    $userDataPattern = [regex]::Escape($userDataFolder)
-    $browserWithOwnedProfile = @($browser | Where-Object {
-      [string]$_.CommandLine -match $userDataPattern
+    } catch {}
+  }
+  foreach ($owned in @($OwnedProcesses | Sort-Object ProcessId -Descending)) {
+    Stop-Process -Id ([int]$owned.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  do {
+    $remaining = @($OwnedProcesses | Where-Object {
+      Get-Process -Id ([int]$_.ProcessId) -ErrorAction SilentlyContinue
     })
-    if ($browserWithOwnedProfile.Count -eq 0) {
-      Write-CaseDiagnostics $Name $process $stopwatch $userDataFolder $standardOutput $standardError $observed
-      throw "The owned WebView2 process did not use the isolated profile in $Name."
-    }
-    foreach ($child in $browser) {
-      $command = [string]$child.CommandLine
-      if ($command -match '(?i)--remote-debugging-|--remote-allow-origins') {
-        throw "Production WebView2 inherited a forbidden remote-debug argument in $Name."
-      }
-    }
-    if (Test-LoopbackPort $ForbiddenPort) { throw "A forbidden CDP listener appeared in $Name." }
-    Write-Output "Production WebView2 ready: case=$Name; elapsedMs=$($stopwatch.ElapsedMilliseconds); pid=$($process.Id); browserPid=$($browserWithOwnedProfile[0].ProcessId); udf=$userDataFolder."
-  } finally {
-    if (!$process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-    if (!$process.WaitForExit(10000)) {
-      throw "Production application cleanup did not complete in $Name."
-    }
-    $profileProcesses = @(Get-UdfProcesses $userDataFolder)
-    foreach ($child in @($owned + $profileProcesses) | Sort-Object ProcessId -Unique -Descending) {
-      Stop-Process -Id $child.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
-    do {
-      $profileProcesses = @(Get-UdfProcesses $userDataFolder)
-      if ($profileProcesses.Count -eq 0) { break }
-      Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $cleanupDeadline)
-    if ($profileProcesses.Count -ne 0) {
-      throw "Owned WebView2 cleanup did not complete in $Name."
-    }
+    if ($remaining.Count -eq 0) { return }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw "Owned WebView2 processes remained after cleanup: $($remaining.ProcessId -join ',')"
+}
+
+function Get-ProfileSnapshot([string]$Path) {
+  $item = Get-Item -LiteralPath $Path
+  [pscustomobject]@{
+    Path = Get-NormalizedPath $item.FullName
+    CreationTimeUtcTicks = $item.CreationTimeUtc.Ticks
+    EntryCount = @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction SilentlyContinue).Count
   }
 }
+
+function Invoke-ProductionLaunch([string]$Name) {
+  $stdoutPath = Join-Path $evidenceRoot "$Name.stdout.log"
+  $stderrPath = Join-Path $evidenceRoot "$Name.stderr.log"
+  $process = $null
+  $owned = @()
+  try {
+    $process = Start-Process -FilePath $Executable -PassThru -WindowStyle Hidden `
+      -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $browser = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+      $process.Refresh()
+      if ($process.HasExited) {
+        throw "Production application exited before WebView2 started in $Name (exit $($process.ExitCode))."
+      }
+      $owned = @(Get-OwnedDescendants -RootPid $process.Id)
+      $browser = @($owned | Where-Object {
+        $_.Name -ieq 'msedgewebview2.exe' -and
+        [string]$_.CommandLine -notmatch '(?i)(?:^|\s)--type='
+      } | Select-Object -First 1)
+      if ($browser.Count -eq 1) { break }
+      Start-Sleep -Milliseconds 200
+    }
+    if ($browser.Count -ne 1) {
+      throw "No owned production WebView2 browser process appeared in $Name."
+    }
+
+    $commandLine = [string]$browser[0].CommandLine
+    $actualDataFolder = Get-WebViewDataFolder -CommandLine $commandLine
+    if ([string]::IsNullOrWhiteSpace($actualDataFolder)) {
+      throw "The production WebView2 browser did not expose its user-data boundary in $Name."
+    }
+    $actualDataFolder = Get-NormalizedPath $actualDataFolder
+    if ($actualDataFolder -ne (Get-NormalizedPath $expectedProductionWebViewData)) {
+      throw "Production WebView2 did not use the application-owned persistent profile in $Name."
+    }
+    if ($actualDataFolder -eq (Get-NormalizedPath $hostileUserDataFolder) -or
+        $actualDataFolder.StartsWith((Get-NormalizedPath $evidenceRoot) + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Production WebView2 accepted the inherited hostile user-data folder in $Name."
+    }
+    foreach ($forbidden in @(
+      '(?i)--remote-debugging-',
+      '(?i)--remote-allow-origins',
+      '(?i)document-studio-hostile',
+      [regex]::Escape($hostileRuntimeFolder),
+      [regex]::Escape($hostileUserDataFolder)
+    )) {
+      if ($commandLine -match $forbidden) {
+        throw "Production WebView2 inherited a forbidden environment control in $Name."
+      }
+    }
+    $profile = Get-ProfileSnapshot -Path $actualDataFolder
+    if ($profile.EntryCount -eq 0) {
+      throw "The application-owned production WebView2 profile was not populated in $Name."
+    }
+    Write-Output "Production WebView2 ready: case=$Name; appPid=$($process.Id); browserPid=$($browser[0].ProcessId); profile=<APP_OWNED_WEBVIEW2_PROFILE>."
+    $profile
+  } finally {
+    if ($null -ne $process) {
+      $owned = @($owned + @(Get-OwnedDescendants -RootPid $process.Id) |
+        Sort-Object ProcessId -Unique)
+    }
+    Stop-OwnedProcesses -RootProcess $process -OwnedProcesses $owned
+  }
+}
+
+New-Item -ItemType Directory -Path $evidenceRoot | Out-Null
+New-Item -ItemType Directory -Path $hostileUserDataFolder | Out-Null
 
 try {
-  $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-  $listener.Start()
-  $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
-  $listener.Stop()
-  Invoke-Case 'malicious' "--disable-gpu --remote-debugging-pipe --remote-debugging-port=$port --remote-allow-origins=*" $port
-  Invoke-Case 'benign' '--disable-gpu --force-color-profile=srgb' $port
-  Write-Output 'Production WebView2 inherited-argument smoke passed (malicious family cleared; benign value created no CDP).'
+  foreach ($name in $managedEnvironment.Keys) {
+    $environmentState[$name] = [pscustomobject]@{
+      Exists = Test-Path -LiteralPath "Env:$name"
+      Value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+    [Environment]::SetEnvironmentVariable($name, $managedEnvironment[$name], 'Process')
+  }
+
+  $first = @(Invoke-ProductionLaunch -Name 'first') | Select-Object -Last 1
+  if (-not (Test-Path -LiteralPath $first.Path -PathType Container)) {
+    throw 'The persistent production profile disappeared after the first launch.'
+  }
+  $second = @(Invoke-ProductionLaunch -Name 'second') | Select-Object -Last 1
+  if ($first.Path -ne $second.Path -or
+      $first.CreationTimeUtcTicks -ne $second.CreationTimeUtcTicks) {
+    throw 'Repeated production launch did not retain the same application-owned WebView2 profile.'
+  }
+  if (-not (Test-Path -LiteralPath $second.Path -PathType Container)) {
+    throw 'The persistent production profile disappeared after the repeated launch.'
+  }
+  Write-Output 'Production WebView2 environment smoke passed: every inherited override was ignored, no CDP/debug switch survived, and two ordinary launches retained one application-owned persistent profile.'
 } finally {
-  $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $originalArguments
-  $env:WEBVIEW2_USER_DATA_FOLDER = $originalUserDataFolder
-  Remove-Item -LiteralPath $evidenceRoot -Recurse -Force -ErrorAction SilentlyContinue
+  foreach ($name in $managedEnvironment.Keys) {
+    $saved = $environmentState[$name]
+    if ($saved.Exists) {
+      [Environment]::SetEnvironmentVariable($name, $saved.Value, 'Process')
+    } else {
+      [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+    }
+  }
+  $resolvedEvidence = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $evidenceRoot).Path)
+  $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+  if (-not $resolvedEvidence.StartsWith($temporaryRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+      [System.IO.Path]::GetFileName($resolvedEvidence) -notlike 'document-studio-production-webview2-*') {
+    throw 'Refusing to remove production WebView2 evidence outside the owned temporary boundary.'
+  }
+  Remove-Item -LiteralPath $resolvedEvidence -Recurse -Force -ErrorAction SilentlyContinue
 }

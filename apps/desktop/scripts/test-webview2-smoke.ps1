@@ -152,6 +152,11 @@ function Wait-ForDesktop {
     $browser = @($owned | Where-Object { [string]$_.CommandLine -notmatch '(?:^| )--type=' }) |
       Select-Object -First 1
     if ((Test-Path -LiteralPath $runtimeMarker) -and $null -ne $browser) {
+      $runtimeEvidence = Get-Content -LiteralPath $runtimeMarker -Raw
+      if ($runtimeEvidence -notmatch '(?m)^WEBVIEW2_ENVIRONMENT=clean\r?$' -or
+          $runtimeEvidence -notmatch '(?m)^COREWEBVIEW2_MAX_INSTANCES=20\r?$') {
+        throw 'DESKTOP_NOT_READY: the test-runtime did not prove the exact post-policy environment.'
+      }
       if (-not (Test-ExactWebViewDataFolder -CommandLine ([string]$browser.CommandLine))) {
         throw 'DESKTOP_NOT_READY: WebView2 did not use the isolated test user-data folder.'
       }
@@ -162,6 +167,20 @@ function Wait-ForDesktop {
       if ($FailureInjection -ne 'CdpNotReady' -and
           [string]$browser.CommandLine -notmatch "--remote-allow-origins=http://127\.0\.0\.1:$cdpPort(?: |$)") {
         throw 'DESKTOP_NOT_READY: the exact loopback CDP allow-origin did not reach the WebView2 browser process.'
+      }
+      $expectedDebugSwitchCount = if ($FailureInjection -eq 'CdpNotReady') { 0 } else { 1 }
+      $debugSwitches = @([regex]::Matches(
+        [string]$browser.CommandLine,
+        '(?i)--remote-debugging-[^\s]+'
+      ))
+      $allowOriginSwitches = @([regex]::Matches(
+        [string]$browser.CommandLine,
+        '(?i)--remote-allow-origins=[^\s]+'
+      ))
+      if ($debugSwitches.Count -ne $expectedDebugSwitchCount -or
+          $allowOriginSwitches.Count -ne $expectedDebugSwitchCount -or
+          [string]$browser.CommandLine -match '(?i)document-studio-hostile|remote-debugging-pipe|remote-debugging-port=65535|remote-allow-origins=\*') {
+        throw 'DESKTOP_NOT_READY: inherited WebView2 environment switches survived beside the explicit test builder arguments.'
       }
       return
     }
@@ -321,7 +340,18 @@ foreach ($name in @(
   'DOCUMENT_STUDIO_TEST_VIEWER_PATH',
   'DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY',
   'DOCUMENT_STUDIO_TEST_CDP_PORT',
-  'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR'
+  'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
+  'WEBVIEW2_BROWSER_EXECUTABLE_FOLDER',
+  'WEBVIEW2_USER_DATA_FOLDER',
+  'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS',
+  'WEBVIEW2_CHANNEL_SEARCH_KIND',
+  'WEBVIEW2_RELEASE_CHANNELS',
+  'WEBVIEW2_RELEASE_CHANNEL_PREFERENCE',
+  'WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER',
+  'WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER',
+  'WEBVIEW2_DEFAULT_BACKGROUND_COLOR',
+  'WEBVIEW2_FUTURE_HOSTILE_OVERRIDE',
+  'COREWEBVIEW2_MAX_INSTANCES'
 )) {
   $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
@@ -386,6 +416,37 @@ try {
       'Process'
     )
   }
+  [Environment]::SetEnvironmentVariable(
+    'webview2_browser_executable_folder',
+    (Join-Path $evidenceRoot 'missing-hostile-runtime'),
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable(
+    'WEBVIEW2_USER_DATA_FOLDER',
+    (Join-Path $evidenceRoot 'hostile-inherited-user-data'),
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable(
+    'WebView2_Additional_Browser_Arguments',
+    '--remote-debugging-pipe --remote-debugging-port=65535 --remote-allow-origins=* --document-studio-hostile-marker=sec1c',
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable('WEBVIEW2_CHANNEL_SEARCH_KIND', '1', 'Process')
+  [Environment]::SetEnvironmentVariable('WEBVIEW2_RELEASE_CHANNELS', '0', 'Process')
+  [Environment]::SetEnvironmentVariable('WEBVIEW2_RELEASE_CHANNEL_PREFERENCE', '1', 'Process')
+  [Environment]::SetEnvironmentVariable('WEBVIEW2_WAIT_FOR_SCRIPT_DEBUGGER', '1', 'Process')
+  [Environment]::SetEnvironmentVariable(
+    'WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGER',
+    'document-studio-hostile-debugger-pipe',
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable('WEBVIEW2_DEFAULT_BACKGROUND_COLOR', '00000000', 'Process')
+  [Environment]::SetEnvironmentVariable(
+    'WeBvIeW2_FuTuRe_HoStIlE_Override',
+    'document-studio-hostile-future-value',
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable('CoReWeBvIeW2_MaX_InStAnCeS', '1', 'Process')
 
   $reservation.Stop()
   $reservation = $null
