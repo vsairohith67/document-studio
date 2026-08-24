@@ -9,33 +9,99 @@ import {
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import {
   CORE_PDF_MAX_PAGES,
+  MAX_QUEUED_RANGE_BYTES,
+  MAX_QUEUED_RANGE_COUNT,
+  MAX_RANGE_READS,
+  RANGE_CHUNK_BYTES,
   type OperationError,
   type ViewerDocumentMetadata,
 } from '@document-studio/contracts';
 import { api } from '../api';
 
 export const PDFJS_VERSION = '6.2.108';
-export const RANGE_CHUNK_BYTES = 256 * 1024;
 export const MAX_RANGE_BYTES = 1024 * 1024;
-export const MAX_RANGE_READS = 4;
 export const PAGE_DPR_CAP = 2;
 export const THUMBNAIL_DPR_CAP = 1.25;
 export const MAX_CANVAS_PIXELS = 16_777_216;
 export const MAX_CANVAS_WIDTH = 8_192;
 export const MAX_CANVAS_HEIGHT = 8_192;
 export const MAX_PAGE_CSS_DIMENSION = 32_767;
-export { CORE_PDF_MAX_PAGES };
+export {
+  CORE_PDF_MAX_PAGES,
+  MAX_QUEUED_RANGE_BYTES,
+  MAX_QUEUED_RANGE_COUNT,
+  MAX_RANGE_READS,
+  RANGE_CHUNK_BYTES,
+};
 
 GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.mjs';
 export { PasswordResponses };
 
-type RangeWork = { begin: number; end: number };
+type PhysicalRangeState = 'queued' | 'active' | 'complete';
+
+interface PhysicalRangeWork {
+  begin: number;
+  end: number;
+  epoch: number;
+  state: PhysicalRangeState;
+  data: Uint8Array | null;
+  references: number;
+}
+
+interface LogicalRangePiece {
+  range: PhysicalRangeWork;
+  offset: number;
+  length: number;
+}
+
+interface LogicalRangeRequest {
+  begin: number;
+  byteLength: number;
+  pieces: LogicalRangePiece[];
+}
+
+function checkedQueueTotal(current: number, delta: number, maximum: number): number | null {
+  if (!Number.isSafeInteger(current)
+      || !Number.isSafeInteger(delta)
+      || current < 0
+      || delta < 0
+      || current > maximum
+      || delta > maximum - current) {
+    return null;
+  }
+  return current + delta;
+}
+
+function rangeQueueLimitError(): OperationError {
+  return {
+    code: 'PDF_RANGE_QUEUE_LIMIT_EXCEEDED',
+    title: 'The PDF range request queue exceeded its safe limit',
+    detail: 'Document Studio stopped loading the PDF because its local range request queue exceeded a safe limit.',
+    stage: 'inspect',
+    retryable: false,
+  };
+}
+
+function rangeReadFailedError(): OperationError {
+  return {
+    code: 'PDF_RANGE_READ_FAILED',
+    title: 'The PDF range could not be read safely',
+    detail: 'Document Studio stopped loading the PDF because a local range read did not complete safely.',
+    stage: 'inspect',
+    retryable: false,
+  };
+}
 
 export class SessionRangeTransport extends PDFDataRangeTransport {
   readonly session: ViewerDocumentMetadata;
-  private readonly queue: RangeWork[] = [];
+  private readonly physicalQueue: PhysicalRangeWork[] = [];
+  private readonly logicalQueue: LogicalRangeRequest[] = [];
   private readonly onFatal: (error: unknown) => void;
+  private ranges: PhysicalRangeWork[] = [];
   private activeReads = 0;
+  private admittedRangeCount = 0;
+  private admittedRangeBytes = 0;
+  private transportEpoch = 0;
   private stopped = false;
 
   constructor(
@@ -53,21 +119,160 @@ export class SessionRangeTransport extends PDFDataRangeTransport {
     const safeBegin = Math.max(0, begin);
     const safeEnd = Math.min(this.session.sizeBytes, end);
     if (safeEnd <= safeBegin) return;
-    for (let offset = safeBegin; offset < safeEnd; offset += RANGE_CHUNK_BYTES) {
-      this.queue.push({ begin: offset, end: Math.min(safeEnd, offset + RANGE_CHUNK_BYTES) });
+
+    const byteLength = safeEnd - safeBegin;
+    const nextCount = checkedQueueTotal(
+      this.admittedRangeCount,
+      1,
+      MAX_QUEUED_RANGE_COUNT,
+    );
+    const nextBytes = checkedQueueTotal(
+      this.admittedRangeBytes,
+      byteLength,
+      MAX_QUEUED_RANGE_BYTES,
+    );
+    if (nextCount === null || nextBytes === null) {
+      this.fail(rangeQueueLimitError());
+      return;
+    }
+
+    const newRanges = this.createUncoveredRanges(safeBegin, safeEnd);
+    const coverage = [...this.ranges, ...newRanges]
+      .sort((left, right) => left.begin - right.begin || left.end - right.end);
+    const pieces = this.buildLogicalPieces(coverage, safeBegin, safeEnd);
+    if (!pieces) {
+      this.fail(rangeReadFailedError());
+      return;
+    }
+
+    for (const piece of pieces) piece.range.references += 1;
+    this.ranges.push(...newRanges);
+    this.ranges.sort((left, right) => left.begin - right.begin || left.end - right.end);
+    this.physicalQueue.push(...newRanges);
+    this.logicalQueue.push({ begin: safeBegin, byteLength, pieces });
+    this.admittedRangeCount = nextCount;
+    this.admittedRangeBytes = nextBytes;
+
+    try {
+      this.flushCompletedLogicalRanges();
+    } catch {
+      this.fail(rangeReadFailedError());
+      return;
     }
     this.pump();
   }
 
   override abort(): void {
+    this.stop();
+  }
+
+  destroy(): void {
+    this.stop();
+  }
+
+  private stop(): void {
+    if (this.stopped) return;
     this.stopped = true;
-    this.queue.length = 0;
+    this.transportEpoch += 1;
+    this.physicalQueue.length = 0;
+    this.logicalQueue.length = 0;
+    this.ranges.length = 0;
+    this.activeReads = 0;
+    this.admittedRangeCount = 0;
+    this.admittedRangeBytes = 0;
+  }
+
+  private fail(error: unknown): void {
+    if (this.stopped) return;
+    this.stop();
+    this.onFatal(error);
+  }
+
+  private createUncoveredRanges(begin: number, end: number): PhysicalRangeWork[] {
+    const uncovered: PhysicalRangeWork[] = [];
+    let cursor = begin;
+    const append = (uncoveredEnd: number) => {
+      while (cursor < uncoveredEnd) {
+        const chunkEnd = cursor + Math.min(RANGE_CHUNK_BYTES, uncoveredEnd - cursor);
+        uncovered.push({
+          begin: cursor,
+          end: chunkEnd,
+          epoch: this.transportEpoch,
+          state: 'queued',
+          data: null,
+          references: 0,
+        });
+        cursor = chunkEnd;
+      }
+    };
+
+    for (const range of this.ranges) {
+      if (range.end <= cursor) continue;
+      if (range.begin >= end) break;
+      append(Math.min(range.begin, end));
+      if (cursor >= end) break;
+      if (range.begin <= cursor) cursor = Math.min(end, Math.max(cursor, range.end));
+    }
+    append(end);
+    return uncovered;
+  }
+
+  private buildLogicalPieces(
+    coverage: PhysicalRangeWork[],
+    begin: number,
+    end: number,
+  ): LogicalRangePiece[] | null {
+    const pieces: LogicalRangePiece[] = [];
+    let cursor = begin;
+    for (const range of coverage) {
+      if (range.end <= cursor) continue;
+      if (range.begin > cursor || range.begin >= end) break;
+      const pieceEnd = Math.min(range.end, end);
+      pieces.push({
+        range,
+        offset: cursor - range.begin,
+        length: pieceEnd - cursor,
+      });
+      cursor = pieceEnd;
+      if (cursor === end) break;
+    }
+    return cursor === end ? pieces : null;
+  }
+
+  private flushCompletedLogicalRanges(): void {
+    while (!this.stopped && this.logicalQueue.length > 0) {
+      const request = this.logicalQueue[0];
+      if (!request || request.pieces.some((piece) => piece.range.data === null)) return;
+
+      const bytes = new Uint8Array(request.byteLength);
+      let outputOffset = 0;
+      for (const piece of request.pieces) {
+        const data = piece.range.data;
+        if (!data) return;
+        bytes.set(data.subarray(piece.offset, piece.offset + piece.length), outputOffset);
+        outputOffset += piece.length;
+      }
+
+      this.logicalQueue.shift();
+      this.admittedRangeCount -= 1;
+      this.admittedRangeBytes -= request.byteLength;
+      for (const piece of request.pieces) piece.range.references -= 1;
+      this.ranges = this.ranges.filter(
+        (range) => range.references > 0 || range.state !== 'complete',
+      );
+      this.onDataRange(request.begin, bytes);
+    }
   }
 
   private pump(): void {
-    while (!this.stopped && this.activeReads < MAX_RANGE_READS && this.queue.length > 0) {
-      const work = this.queue.shift();
+    while (!this.stopped
+        && this.activeReads < MAX_RANGE_READS
+        && this.physicalQueue.length > 0) {
+      const work = this.physicalQueue.shift();
       if (!work) return;
+      const epoch = this.transportEpoch;
+      work.epoch = epoch;
+      work.state = 'active';
       this.activeReads += 1;
       void api.viewer.readRange({
         sessionId: this.session.sessionId,
@@ -75,17 +280,23 @@ export class SessionRangeTransport extends PDFDataRangeTransport {
         begin: work.begin,
         end: work.end,
       }).then((bytes) => {
-        if (!this.stopped) this.onDataRange(work.begin, bytes);
-      }).catch((error: unknown) => {
-        if (!this.stopped) {
-          this.abort();
-          this.onFatal(error);
-        }
+        if (!this.isCurrent(work, epoch)) return;
+        if (bytes.byteLength !== work.end - work.begin) throw rangeReadFailedError();
+        work.data = bytes;
+        work.state = 'complete';
+        this.flushCompletedLogicalRanges();
+      }).catch(() => {
+        if (this.isCurrent(work, epoch)) this.fail(rangeReadFailedError());
       }).finally(() => {
+        if (this.stopped || this.transportEpoch !== epoch) return;
         this.activeReads -= 1;
         this.pump();
       });
     }
+  }
+
+  private isCurrent(work: PhysicalRangeWork, epoch: number): boolean {
+    return !this.stopped && work.epoch === epoch && this.transportEpoch === epoch;
   }
 }
 

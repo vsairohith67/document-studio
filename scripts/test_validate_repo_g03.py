@@ -29,6 +29,9 @@ rejected(lambda value: value.__setitem__('viewer', str(value['viewer']).replace(
 rejected(lambda value: value.__setitem__('session', str(value['session']).replace('validatePdfPageCount(document.numPages);', '')), 'missing early page-count admission')
 rejected(lambda value: value.__setitem__('rust_contracts', str(value['rust_contracts']).replace('CORE_PDF_MAX_PAGES: u32 = 4096', 'CORE_PDF_MAX_PAGES: u32 = 8192')), 'cross-language page-count drift')
 rejected(lambda value: value.__setitem__('rust_pdf', str(value['rust_pdf']).replace('.try_reserve_exact(page_count)', '.reserve_exact(page_count)')), 'infallible page-sized allocation')
+rejected(lambda value: value.__setitem__('contracts', str(value['contracts']).replace('MAX_QUEUED_RANGE_COUNT = 64', 'MAX_QUEUED_RANGE_COUNT = 65')), 'range queue count drift')
+rejected(lambda value: value.__setitem__('rust_viewer', str(value['rust_viewer']).replace('VIEWER_RANGE_CHUNK_BYTES: u64 = 256 * 1024', 'VIEWER_RANGE_CHUNK_BYTES: u64 = 128 * 1024')), 'cross-language range chunk drift')
+rejected(lambda value: value.__setitem__('session', str(value['session']).replace('transportEpoch', 'transportGeneration')), 'stale range completion epoch removed')
 
 validate_g04b = namespace['validate_g04b_boundaries']
 g04b_baseline = namespace['G04B_VALIDATION_INPUTS']
@@ -49,4 +52,4 @@ rejected_g04b(lambda value: value.__setitem__('contracts', str(value['contracts'
 rejected_g04b(lambda value: value.__setitem__('writer', str(value['writer']).replace('source_hashes', 'unchecked_sources')), 'source proof removed')
 rejected_g04b(lambda value: value.__setitem__('rust_production', str(value['rust_production']) + '\npdf.to-images'), 'renderer path introduced')
 
-print('G03/G04B repository-validator negative probes passed (16 cases).')
+print('G03/G04B repository-validator negative probes passed (19 cases).')
