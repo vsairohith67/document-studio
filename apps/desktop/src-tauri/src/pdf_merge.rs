@@ -19,9 +19,9 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_SEQUENTIAL_SCAN, FILE_SH
 use crate::app_state::{AppState, CancellationToken};
 use crate::contracts::{
     JobInput, JobOutput, JobProgress, JobRecord, JobState, JobsCreateRequest, OperationError,
-    OperationStage, OutputStatus, ProgressEvent, ProgressUnit, PDF_COMPRESS_LOSSLESS_OPERATION_ID,
-    PDF_COMPRESS_LOSSLESS_VERSION, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS,
-    PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION,
+    OperationStage, OutputStatus, ProgressEvent, ProgressUnit, CORE_PDF_MAX_PAGES,
+    PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION, PDF_MERGE_MAX_INPUTS,
+    PDF_MERGE_MIN_INPUTS, PDF_MERGE_OPERATION_ID, PDF_MERGE_VERSION,
 };
 use crate::path_policy::{
     canonical_directory, canonical_regular_file, ensure_different_files, validate_output_name,
@@ -729,8 +729,9 @@ impl PdfMergeService {
                 pages_by_identity
                     .get(&input.file_identity)
                     .and_then(|pages| sum.checked_add(*pages))
+                    .filter(|pages| *pages <= u64::from(CORE_PDF_MAX_PAGES))
             })
-            .ok_or_else(|| verify_error("PAGE_COUNT_INVALID"))?;
+            .ok_or_else(|| unsupported_page_count_error(OperationStage::Preflight))?;
         let source_inventory = if mode == PdfLifecycleMode::CompressLossless {
             Some(qpdf_structural_inventory(
                 &runtime,
@@ -1663,8 +1664,7 @@ fn qpdf_annotation_inventory(
     token: &CancellationToken,
     stage: OperationStage,
 ) -> Result<JsonValue, OperationError> {
-    let expected_pages = usize::try_from(expected_pages)
-        .map_err(|_| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
+    let expected_pages = checked_page_capacity(expected_pages, stage)?;
     let pages_result = run_qpdf_with_capture_limit(
         runtime,
         workspace,
@@ -1681,12 +1681,15 @@ fn qpdf_annotation_inventory(
     if pages_result.exit_code != 0 {
         return Err(process_error(stage));
     }
-    let page_references = parse_page_object_references(&pages_result.stdout, expected_pages)?;
+    let page_references =
+        parse_page_object_references(&pages_result.stdout, expected_pages, stage)?;
     let page_objects =
         qpdf_json_objects(runtime, workspace, relative, &page_references, token, stage)?;
 
-    let mut annotation_references = vec![Vec::<String>::new(); expected_pages];
-    let mut direct_annotations = vec![Vec::<JsonValue>::new(); expected_pages];
+    let mut annotation_references = bounded_page_vector(expected_pages, stage)?;
+    annotation_references.resize_with(expected_pages, Vec::<String>::new);
+    let mut direct_annotations = bounded_page_vector(expected_pages, stage)?;
+    direct_annotations.resize_with(expected_pages, Vec::<JsonValue>::new);
     let mut containers = Vec::<(usize, String)>::new();
     for (page_index, reference) in page_references.iter().enumerate() {
         let page = page_objects
@@ -1739,7 +1742,7 @@ fn qpdf_annotation_inventory(
         .collect::<Vec<_>>();
     let annotation_objects =
         qpdf_json_objects(runtime, workspace, relative, &all_references, token, stage)?;
-    let mut pages = Vec::with_capacity(expected_pages);
+    let mut pages = bounded_page_vector(expected_pages, stage)?;
     for page_index in 0..expected_pages {
         let mut annotations = direct_annotations[page_index]
             .iter()
@@ -1759,10 +1762,11 @@ fn qpdf_annotation_inventory(
 fn parse_page_object_references(
     output: &[u8],
     expected_count: usize,
+    stage: OperationStage,
 ) -> Result<Vec<String>, OperationError> {
     let text =
         std::str::from_utf8(output).map_err(|_| verify_error("STRUCTURAL_INVENTORY_INVALID"))?;
-    let mut references = Vec::with_capacity(expected_count);
+    let mut references = bounded_page_vector(expected_count, stage)?;
     for line in text.lines() {
         let Some((page, reference)) = line
             .strip_prefix("page ")
@@ -1770,7 +1774,8 @@ fn parse_page_object_references(
         else {
             continue;
         };
-        if page.parse::<usize>().ok() != Some(references.len() + 1)
+        if references.len() >= expected_count
+            || page.parse::<usize>().ok() != Some(references.len() + 1)
             || !is_object_reference(reference)
         {
             return Err(verify_error("STRUCTURAL_INVENTORY_INVALID"));
@@ -2102,15 +2107,48 @@ pub(crate) fn qpdf_page_count(
     if execution.exit_code != 0 {
         return Err(process_error(stage));
     }
-    let output = std::str::from_utf8(&execution.stdout).map_err(|_| process_error(stage))?;
+    parse_qpdf_page_count(&execution.stdout, stage)
+}
+
+fn parse_qpdf_page_count(output: &[u8], stage: OperationStage) -> Result<u64, OperationError> {
+    let output = std::str::from_utf8(output).map_err(|_| invalid_page_count_error(stage))?;
     let trimmed = output.trim();
     if trimmed.is_empty()
         || trimmed.len() > 20
         || !trimmed.bytes().all(|byte| byte.is_ascii_digit())
     {
-        return Err(process_error(stage));
+        return Err(invalid_page_count_error(stage));
     }
-    trimmed.parse().map_err(|_| process_error(stage))
+    let page_count = trimmed
+        .parse::<u64>()
+        .map_err(|_| invalid_page_count_error(stage))?;
+    if page_count > u64::from(CORE_PDF_MAX_PAGES) {
+        return Err(unsupported_page_count_error(stage));
+    }
+    Ok(page_count)
+}
+
+fn checked_page_capacity(page_count: u64, stage: OperationStage) -> Result<usize, OperationError> {
+    if page_count == 0 || page_count > u64::from(CORE_PDF_MAX_PAGES) {
+        return Err(unsupported_page_count_error(stage));
+    }
+    usize::try_from(page_count).map_err(|_| invalid_page_count_error(stage))
+}
+
+fn bounded_page_vector<T>(
+    page_count: usize,
+    stage: OperationStage,
+) -> Result<Vec<T>, OperationError> {
+    let maximum =
+        usize::try_from(CORE_PDF_MAX_PAGES).map_err(|_| invalid_page_count_error(stage))?;
+    if page_count == 0 || page_count > maximum {
+        return Err(unsupported_page_count_error(stage));
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(page_count)
+        .map_err(|_| page_allocation_error(stage))?;
+    Ok(values)
 }
 
 pub(crate) fn verify_qpdf_version(
@@ -2585,6 +2623,36 @@ fn process_error(stage: OperationStage) -> OperationError {
     )
 }
 
+fn invalid_page_count_error(stage: OperationStage) -> OperationError {
+    OperationError::safe(
+        "PDF_PAGE_COUNT_INVALID",
+        "The PDF page count is invalid",
+        "Document Studio could not validate this PDF within its supported page-count boundary.",
+        stage,
+        false,
+    )
+}
+
+fn unsupported_page_count_error(stage: OperationStage) -> OperationError {
+    OperationError::safe(
+        "PDF_PAGE_COUNT_UNSUPPORTED",
+        "The PDF has an unsupported page count",
+        format!("Document Studio supports PDFs with between 1 and {CORE_PDF_MAX_PAGES} pages."),
+        stage,
+        false,
+    )
+}
+
+fn page_allocation_error(stage: OperationStage) -> OperationError {
+    OperationError::safe(
+        "PDF_PAGE_ALLOCATION_FAILED",
+        "The PDF page inventory could not be prepared safely",
+        "No output was published. Close other applications and retry the original local PDF.",
+        stage,
+        true,
+    )
+}
+
 fn verify_error(code: &str) -> OperationError {
     OperationError::safe(
         code,
@@ -2637,4 +2705,87 @@ fn metadata_error() -> OperationError {
         OperationStage::Audit,
         true,
     )
+}
+
+#[cfg(test)]
+mod page_count_tests {
+    use super::{
+        bounded_page_vector, checked_page_capacity, parse_page_object_references,
+        parse_qpdf_page_count,
+    };
+    use crate::contracts::{OperationStage, CORE_PDF_MAX_PAGES};
+
+    #[test]
+    fn qpdf_page_count_accepts_supported_boundaries() {
+        for page_count in [1_u64, 128, 1000, u64::from(CORE_PDF_MAX_PAGES)] {
+            assert_eq!(
+                parse_qpdf_page_count(
+                    page_count.to_string().as_bytes(),
+                    OperationStage::Preflight,
+                )
+                .expect("supported page count"),
+                page_count,
+            );
+        }
+    }
+
+    #[test]
+    fn qpdf_page_count_rejects_unsupported_and_malicious_numbers() {
+        for page_count in [u64::from(CORE_PDF_MAX_PAGES) + 1, u64::MAX] {
+            let error =
+                parse_qpdf_page_count(page_count.to_string().as_bytes(), OperationStage::Preflight)
+                    .expect_err("unsupported page count");
+            assert_eq!(error.code, "PDF_PAGE_COUNT_UNSUPPORTED");
+            assert_eq!(error.stage, OperationStage::Preflight);
+            assert!(!error.retryable);
+            assert!(!error.title.contains('\\'));
+            assert!(!error.detail.contains('\\'));
+        }
+
+        for output in [b"18446744073709551616".as_slice(), b"1.5", b"NaN", b""] {
+            let error = parse_qpdf_page_count(output, OperationStage::Verify)
+                .expect_err("invalid numeric page count");
+            assert_eq!(error.code, "PDF_PAGE_COUNT_INVALID");
+            assert_eq!(error.stage, OperationStage::Verify);
+        }
+    }
+
+    #[test]
+    fn qpdf_page_count_preserves_zero_for_the_zero_page_domain_error() {
+        assert_eq!(
+            parse_qpdf_page_count(b"0", OperationStage::Preflight)
+                .expect("zero must reach the existing domain-specific rejection"),
+            0
+        );
+    }
+
+    #[test]
+    fn page_sized_allocations_are_bounded_and_fallible() {
+        assert_eq!(
+            checked_page_capacity(u64::from(CORE_PDF_MAX_PAGES), OperationStage::Preflight)
+                .expect("maximum supported capacity"),
+            usize::try_from(CORE_PDF_MAX_PAGES).expect("supported usize"),
+        );
+        let error =
+            checked_page_capacity(u64::from(CORE_PDF_MAX_PAGES) + 1, OperationStage::Preflight)
+                .expect_err("capacity must reject before allocation");
+        assert_eq!(error.code, "PDF_PAGE_COUNT_UNSUPPORTED");
+
+        let zero_error = checked_page_capacity(0, OperationStage::Preflight)
+            .expect_err("zero pages must reject before allocation");
+        assert_eq!(zero_error.code, "PDF_PAGE_COUNT_UNSUPPORTED");
+
+        let maximum = usize::try_from(CORE_PDF_MAX_PAGES).expect("supported usize");
+        let vector = bounded_page_vector::<u8>(maximum, OperationStage::Preflight)
+            .expect("fallible maximum allocation");
+        assert_eq!(vector.capacity(), maximum);
+    }
+
+    #[test]
+    fn page_reference_inventory_cannot_grow_past_the_bounded_count() {
+        let output = b"page 1: 10 0 R\npage 2: 11 0 R\n";
+        let error = parse_page_object_references(output, 1, OperationStage::Preflight)
+            .expect_err("extra qpdf page line");
+        assert_eq!(error.code, "STRUCTURAL_INVENTORY_INVALID");
+    }
 }

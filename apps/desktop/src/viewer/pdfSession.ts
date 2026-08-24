@@ -7,7 +7,11 @@ import {
   type PDFDocumentLoadingTask,
   type PDFDocumentProxy,
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
-import type { ViewerDocumentMetadata } from '@document-studio/contracts';
+import {
+  CORE_PDF_MAX_PAGES,
+  type OperationError,
+  type ViewerDocumentMetadata,
+} from '@document-studio/contracts';
 import { api } from '../api';
 
 export const PDFJS_VERSION = '6.2.108';
@@ -20,6 +24,7 @@ export const MAX_CANVAS_PIXELS = 16_777_216;
 export const MAX_CANVAS_WIDTH = 8_192;
 export const MAX_CANVAS_HEIGHT = 8_192;
 export const MAX_PAGE_CSS_DIMENSION = 32_767;
+export { CORE_PDF_MAX_PAGES };
 
 GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.mjs';
 export { PasswordResponses };
@@ -102,6 +107,26 @@ export interface PdfLoadingResources {
   close(): Promise<void>;
 }
 
+function unsupportedPageCountError(): OperationError {
+  return {
+    code: 'PDF_PAGE_COUNT_UNSUPPORTED',
+    title: 'The PDF has an unsupported page count',
+    detail: `Document Studio supports PDFs with between 1 and ${CORE_PDF_MAX_PAGES.toLocaleString('en-US')} pages.`,
+    stage: 'inspect',
+    retryable: false,
+  };
+}
+
+export function validatePdfPageCount(pageCount: number): number {
+  if (!Number.isFinite(pageCount)
+      || !Number.isInteger(pageCount)
+      || pageCount < 1
+      || pageCount > CORE_PDF_MAX_PAGES) {
+    throw unsupportedPageCountError();
+  }
+  return pageCount;
+}
+
 export async function loadPdfSession(
   session: ViewerDocumentMetadata,
   onPassword: (challenge: PdfPasswordChallenge) => void,
@@ -175,6 +200,7 @@ export async function loadPdfSession(
   try {
     document = await loadingTask.promise;
     if (signal?.aborted) throw new DOMException('Loading cancelled', 'AbortError');
+    validatePdfPageCount(document.numPages);
   } catch (error) {
     await closeLoadingResources();
     throw error;

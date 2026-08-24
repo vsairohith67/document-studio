@@ -9,6 +9,7 @@ vi.mock('pdfjs-dist/legacy/build/pdf.mjs', async (importOriginal) => {
 });
 
 import {
+  CORE_PDF_MAX_PAGES,
   MAX_RANGE_READS,
   RANGE_CHUNK_BYTES,
   SessionRangeTransport,
@@ -112,4 +113,51 @@ describe('PDF.js opaque range transport', () => {
     await loaded.close();
     expect(task.destroy).toHaveBeenCalledTimes(1);
   });
+
+  it.each([1, 1000, CORE_PDF_MAX_PAGES])(
+    'accepts a finite supported %i-page document before returning the session',
+    async (pageCount) => {
+      mocks.readRange.mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+      const document = { numPages: pageCount };
+      const task = {
+        promise: Promise.resolve(document),
+        destroy: vi.fn(async () => undefined),
+        onPassword: vi.fn(),
+      };
+      mocks.getDocument.mockReturnValue(task);
+
+      const loaded = await loadPdfSession(session, vi.fn(), vi.fn());
+
+      expect(loaded.document.numPages).toBe(pageCount);
+      expect(task.destroy).not.toHaveBeenCalled();
+      await loaded.close();
+      expect(task.destroy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([0, 1.5, Number.NaN, Number.POSITIVE_INFINITY, CORE_PDF_MAX_PAGES + 1, Number.MAX_SAFE_INTEGER])(
+    'rejects unsupported page count %s and destroys the candidate before it can reach consumers',
+    async (pageCount) => {
+      mocks.readRange.mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+      const document = { numPages: pageCount, getPage: vi.fn() };
+      const task = {
+        promise: Promise.resolve(document),
+        destroy: vi.fn(async () => undefined),
+        onPassword: vi.fn(),
+      };
+      mocks.getDocument.mockReturnValue(task);
+      const owned = vi.fn();
+
+      await expect(loadPdfSession(session, vi.fn(), vi.fn(), undefined, owned)).rejects.toMatchObject({
+        code: 'PDF_PAGE_COUNT_UNSUPPORTED',
+        stage: 'inspect',
+        retryable: false,
+      });
+
+      expect(owned).toHaveBeenCalledTimes(1);
+      expect(task.destroy).toHaveBeenCalledTimes(1);
+      expect(document.getPage).not.toHaveBeenCalled();
+      expect(document).not.toHaveProperty('path');
+    },
+  );
 });

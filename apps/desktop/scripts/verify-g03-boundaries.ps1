@@ -152,6 +152,20 @@ $viewerSource = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src\viewer')
 if (($viewerSource -join "`n") -match '(?i)https?://|file://') {
   throw 'Viewer production source contains a network or file URL.'
 }
+$contractSource = Get-Content -Raw (Join-Path $repositoryRoot 'packages\contracts\src\index.ts')
+$rustContractSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\contracts.rs')
+$pdfSessionSource = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.ts')
+$pdfSessionTests = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.test.ts')
+$pdfMergeSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\pdf_merge.rs')
+if ($contractSource -notmatch 'CORE_PDF_MAX_PAGES = 4096' -or
+    $rustContractSource -notmatch 'CORE_PDF_MAX_PAGES: u32 = 4096' -or
+    $pdfSessionSource -notmatch 'validatePdfPageCount\(document\.numPages\);' -or
+    $pdfSessionSource -notmatch 'PDF_PAGE_COUNT_UNSUPPORTED' -or
+    $pdfSessionTests -notmatch 'CORE_PDF_MAX_PAGES \+ 1' -or
+    $pdfMergeSource -notmatch 'page_count == 0 \|\| page_count > u64::from\(CORE_PDF_MAX_PAGES\)' -or
+    $pdfMergeSource -notmatch '\.try_reserve_exact\(page_count\)') {
+  throw 'PDF page counts are not rejected at the PDF.js/qpdf boundary before page-sized allocation.'
+}
 
 $distAssets = Join-Path $desktopRoot 'dist\assets'
 if (Test-Path -LiteralPath $distAssets) {
@@ -193,4 +207,4 @@ if ($browserTransportSource -notmatch "import\.meta\.env\.MODE === 'test-browser
   throw 'The browser test transport is not compile-time gated to test-browser mode.'
 }
 
-Write-Output 'G03 dependency pins, exact PDF.js assets, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug arguments fail closed.'
+Write-Output 'G03 dependency pins, exact PDF.js assets, 4,096-page admission bound, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug arguments fail closed.'
