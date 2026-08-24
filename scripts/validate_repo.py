@@ -283,6 +283,7 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
         raise SystemExit('G03 form/annotation rendering boundary is not explicit')
     session = str(inputs['session'])
     contracts = str(inputs['contracts'])
+    rust_contracts = str(inputs['rust_contracts'])
     rust_pdf = str(inputs['rust_pdf'])
     session_tests = str(inputs['session_tests'])
     for required in [
@@ -292,10 +293,12 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
     ]:
         if required not in contracts + session:
             raise SystemExit(f'G03 PDF.js page-count admission boundary is missing {required}')
+    if 'CORE_PDF_MAX_PAGES: u32 = 4096' not in rust_contracts:
+        raise SystemExit('G03 Rust page-count constant differs from the TypeScript contract')
     if 'CORE_PDF_MAX_PAGES + 1' not in session_tests:
         raise SystemExit('G03 PDF.js page-count rejection regression is missing')
     for required in [
-        'page_count > u64::from(CORE_PDF_MAX_PAGES)',
+        'page_count == 0 || page_count > u64::from(CORE_PDF_MAX_PAGES)',
         '.try_reserve_exact(page_count)',
         'qpdf_page_count_rejects_unsupported_and_malicious_numbers',
     ]:
@@ -319,6 +322,7 @@ G03_VALIDATION_INPUTS = {
     'viewer_tests': (ROOT / 'apps/desktop/e2e/viewer.spec.ts').read_text(encoding='utf-8'),
     'runtime': (ROOT / 'apps/desktop/src-tauri/src/lib.rs').read_text(encoding='utf-8'),
     'contracts': (ROOT / 'packages/contracts/src/index.ts').read_text(encoding='utf-8'),
+    'rust_contracts': (ROOT / 'apps/desktop/src-tauri/src/contracts.rs').read_text(encoding='utf-8'),
     'rust_pdf': (ROOT / 'apps/desktop/src-tauri/src/pdf_merge.rs').read_text(encoding='utf-8'),
     'session_tests': (ROOT / 'apps/desktop/src/viewer/pdfSession.test.ts').read_text(encoding='utf-8'),
 }

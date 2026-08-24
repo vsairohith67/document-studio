@@ -27,6 +27,7 @@ rejected(lambda value: value.__setitem__('session', str(value['session']).replac
 rejected(lambda value: value.__setitem__('surface', str(value['surface']).replace('event.altKey', 'event.shiftKey')), 'missing Alt handler')
 rejected(lambda value: value.__setitem__('viewer', str(value['viewer']).replace('candidateDocumentRef', 'candidateRef')), 'missing transactional owner')
 rejected(lambda value: value.__setitem__('session', str(value['session']).replace('validatePdfPageCount(document.numPages);', '')), 'missing early page-count admission')
+rejected(lambda value: value.__setitem__('rust_contracts', str(value['rust_contracts']).replace('CORE_PDF_MAX_PAGES: u32 = 4096', 'CORE_PDF_MAX_PAGES: u32 = 8192')), 'cross-language page-count drift')
 rejected(lambda value: value.__setitem__('rust_pdf', str(value['rust_pdf']).replace('.try_reserve_exact(page_count)', '.reserve_exact(page_count)')), 'infallible page-sized allocation')
 
 validate_g04b = namespace['validate_g04b_boundaries']
@@ -48,4 +49,4 @@ rejected_g04b(lambda value: value.__setitem__('contracts', str(value['contracts'
 rejected_g04b(lambda value: value.__setitem__('writer', str(value['writer']).replace('source_hashes', 'unchecked_sources')), 'source proof removed')
 rejected_g04b(lambda value: value.__setitem__('rust_production', str(value['rust_production']) + '\npdf.to-images'), 'renderer path introduced')
 
-print('G03/G04B repository-validator negative probes passed (15 cases).')
+print('G03/G04B repository-validator negative probes passed (16 cases).')

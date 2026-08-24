@@ -2122,14 +2122,14 @@ fn parse_qpdf_page_count(output: &[u8], stage: OperationStage) -> Result<u64, Op
     let page_count = trimmed
         .parse::<u64>()
         .map_err(|_| invalid_page_count_error(stage))?;
-    if page_count > u64::from(CORE_PDF_MAX_PAGES) {
+    if page_count == 0 || page_count > u64::from(CORE_PDF_MAX_PAGES) {
         return Err(unsupported_page_count_error(stage));
     }
     Ok(page_count)
 }
 
 fn checked_page_capacity(page_count: u64, stage: OperationStage) -> Result<usize, OperationError> {
-    if page_count > u64::from(CORE_PDF_MAX_PAGES) {
+    if page_count == 0 || page_count > u64::from(CORE_PDF_MAX_PAGES) {
         return Err(unsupported_page_count_error(stage));
     }
     usize::try_from(page_count).map_err(|_| invalid_page_count_error(stage))
@@ -2141,7 +2141,7 @@ fn bounded_page_vector<T>(
 ) -> Result<Vec<T>, OperationError> {
     let maximum =
         usize::try_from(CORE_PDF_MAX_PAGES).map_err(|_| invalid_page_count_error(stage))?;
-    if page_count > maximum {
+    if page_count == 0 || page_count > maximum {
         return Err(unsupported_page_count_error(stage));
     }
     let mut values = Vec::new();
@@ -2637,7 +2637,7 @@ fn unsupported_page_count_error(stage: OperationStage) -> OperationError {
     OperationError::safe(
         "PDF_PAGE_COUNT_UNSUPPORTED",
         "The PDF has an unsupported page count",
-        "Document Studio supports PDFs with between 1 and 4,096 pages.",
+        format!("Document Studio supports PDFs with between 1 and {CORE_PDF_MAX_PAGES} pages."),
         stage,
         false,
     )
@@ -2731,7 +2731,7 @@ mod page_count_tests {
 
     #[test]
     fn qpdf_page_count_rejects_unsupported_and_malicious_numbers() {
-        for page_count in [u64::from(CORE_PDF_MAX_PAGES) + 1, u64::MAX] {
+        for page_count in [0, u64::from(CORE_PDF_MAX_PAGES) + 1, u64::MAX] {
             let error =
                 parse_qpdf_page_count(page_count.to_string().as_bytes(), OperationStage::Preflight)
                     .expect_err("unsupported page count");
@@ -2761,6 +2761,10 @@ mod page_count_tests {
             checked_page_capacity(u64::from(CORE_PDF_MAX_PAGES) + 1, OperationStage::Preflight)
                 .expect_err("capacity must reject before allocation");
         assert_eq!(error.code, "PDF_PAGE_COUNT_UNSUPPORTED");
+
+        let zero_error = checked_page_capacity(0, OperationStage::Preflight)
+            .expect_err("zero pages must reject before allocation");
+        assert_eq!(zero_error.code, "PDF_PAGE_COUNT_UNSUPPORTED");
 
         let maximum = usize::try_from(CORE_PDF_MAX_PAGES).expect("supported usize");
         let vector = bounded_page_vector::<u8>(maximum, OperationStage::Preflight)
