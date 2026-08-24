@@ -2,13 +2,22 @@
 
 All notable planning-package and software releases are recorded here.
 
-## 0.5.0-g04b-image-pdf-conversion - unreleased
+## 0.5.1-g04b2-pdf-to-images - unreleased
+
+- Added `pdf.to-images@1.0.0` using the accepted local PDF.js 6.2.108 renderer and existing `image` 0.25.10 encoder; no new native renderer, runtime download, network or capability was introduced.
+- Added ordered 1-128 page export to PNG, fixed-quality JPEG and lossless WebP at exactly 72, 150 or 300 DPI, with per-page 8,192-axis/16,777,216-pixel caps and a 67,108,864-pixel aggregate budget.
+- Added sequential private-canvas rendering, authenticated one-use binary RGBA IPC, strict Rust size/alpha/sequence/ownership checks, exact/tolerant visual verification and durable collision-safe multi-output publication.
+- Enabled the accessible PDF-to-images Convert flow with shared viewer thumbnails, output-name preview, keyboard ordering, per-output progress, cancellation and truthful partial-publication reporting.
+- Superseded the ADR-013 renderer blocker, added a G04B2 boundary verifier and focused contract, native, frontend and existing-framework PDF.js browser evidence. G04C and G05 remain excluded.
+
+## 0.5.0-g04b-image-pdf-conversion - 2026-08-22
 
 - Added the independently gated `image.to-pdf@1.0.0` implementation for ordered, content-sniffed JPEG/PNG/WebP inputs with fixed axis, pixel, selected-total, byte and decoder-allocation limits.
 - Added deterministic EXIF-orientation, alpha soft-mask and ICC-warning behavior; one image per zero-margin PDF page; source immutability proof; qpdf structural/page/encryption verification; and durable no-overwrite publication.
 - Added migration 5 for canonical hashed operation settings and sanitized job warnings without changing accepted G03 page plans or storing document content/raw paths.
-- Added the accessible two-direction Convert workspace. PDF-to-images remains visibly dependency-blocked because no renderer has passed provenance, licence, redistribution and sandbox review.
+- Added the accessible two-direction Convert workspace with the PDF-to-images direction reserved for its separately gated implementation.
 - Added ADR-013, native/frontend/database tests and an exact G04B boundary verifier. G04C-G04F production work is excluded.
+- Accepted and merged G04B to main at `6940a1381822a5872f4c345cc0e5cd15b2e6294c`.
 
 ## 0.4.0-g04a-lossless-compression - 2026-08-22
 

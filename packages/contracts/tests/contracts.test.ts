@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import fixtures from '../fixtures/foundation-contracts.json';
 import pdfMergeFixtures from '../fixtures/pdf-merge-contracts.json';
 import pdfCompressLosslessFixtures from '../fixtures/pdf-compress-lossless-contracts.json';
+import pdfToImagesFixtures from '../fixtures/pdf-to-images-contracts.json';
 import ipcSchema from '../ipc.schema.json';
 import jobSchema from '../job.schema.json';
 import operationSchema from '../operation.schema.json';
@@ -21,6 +22,10 @@ const validateProgress = ajv.compile({
 const validateJobsCreateRequest = ajv.compile({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $ref: `${ipcSchema.$id}#/$defs/jobsCreateRequest`,
+});
+const validatePdfToImagesRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${ipcSchema.$id}#/$defs/pdfToImagesJobCreateRequest`,
 });
 describe('foundation contracts', () => {
   it('accepts the shared golden job, operation, and event', () => {
@@ -118,5 +123,24 @@ describe('pdf.compress-lossless contracts', () => {
     ]) {
       expect(validateJobsCreateRequest(candidate)).toBe(false);
     }
+  });
+});
+
+describe('pdf.to-images contracts', () => {
+  it('accepts exactly version 1 with ordered pages, fixed format, and enumerated DPI', () => {
+    expect(pdfToImagesFixtures.operationManifest.id).toBe('pdf.to-images');
+    expect(pdfToImagesFixtures.operationManifest.version).toBe('1.0.0');
+    expect(validateOperation(pdfToImagesFixtures.operationManifest), JSON.stringify(validateOperation.errors)).toBe(true);
+    expect(validatePdfToImagesRequest(pdfToImagesFixtures.request), JSON.stringify(validatePdfToImagesRequest.errors)).toBe(true);
+  });
+
+  it.each([
+    ['free-form DPI', { ...pdfToImagesFixtures.request, dpi: 96 }],
+    ['lossy WebP setting', { ...pdfToImagesFixtures.request, webpQuality: 80 }],
+    ['129 outputs', { ...pdfToImagesFixtures.request, pages: Array.from({ length: 129 }, (_, sourcePageIndex) => ({ sourcePageIndex, width: 1, height: 1 })), sourcePageCount: 129 }],
+    ['duplicate page plan', { ...pdfToImagesFixtures.request, pages: [pdfToImagesFixtures.request.pages[0], pdfToImagesFixtures.request.pages[0]] }],
+    ['oversized width', { ...pdfToImagesFixtures.request, pages: [{ sourcePageIndex: 0, width: 8193, height: 1 }] }],
+  ])('rejects %s', (_label, candidate) => {
+    expect(validatePdfToImagesRequest(candidate)).toBe(false);
   });
 });

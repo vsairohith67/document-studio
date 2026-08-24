@@ -17,10 +17,10 @@ No CDN or runtime fallback is allowed. Main API and worker versions must match. 
 The application CSP is:
 
 ```text
-default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';
+default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';
 ```
 
-Rust blocks navigation and new windows outside the application origin. There is no `unsafe-eval`, network capability, custom protocol or general filesystem permission.
+Rust blocks navigation and new windows outside the application origin. `ipc:` and `http://ipc.localhost` are Tauri's built-in authenticated command transport origins; G04B2 permits them narrowly so raw RGBA stays binary instead of falling back to JSON `postMessage`. They are not an app-defined custom protocol, remote-network route or HTTP capability. There is no `unsafe-eval`, runtime document network, custom application protocol or general filesystem permission.
 
 The official Mozilla advisory GHSA-wgrm-67xf-hhpq/CVE-2024-4367 affected `pdfjs-dist <=4.1.392` and was fixed in 4.2.67; G03 keeps the documented defense-in-depth setting `isEvalSupported: false`. No separate 2026 advisory is claimed because no official Mozilla/GitHub advisory establishing one was retrieved.
 

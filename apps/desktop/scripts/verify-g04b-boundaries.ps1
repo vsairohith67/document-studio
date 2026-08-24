@@ -112,8 +112,7 @@ if ($migration -match '(?im)^\s*[A-Za-z_][A-Za-z0-9_]*\s+BLOB\b') {
 foreach ($required in @(
   'role="tablist"',
   'Images to PDF',
-  'PDF to images · dependency blocked',
-  'No accepted production renderer passed the provenance and license gate',
+  'PDF to images',
   'event.altKey',
   "event.key === 'Delete'",
   'api.jobs.warnings'
@@ -121,10 +120,4 @@ foreach ($required in @(
   if (!$convert.Contains($required)) { throw "G04B truthful/accessibility UI boundary is missing: $required" }
 }
 
-$rustProduction = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src-tauri\src') -Filter '*.rs' -File -Recurse |
-  ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }
-if (($rustProduction -join "`n") -match 'pdf\.to-images') {
-  throw 'G04B contains an unauthorized production PDF-to-images renderer path.'
-}
-
-Write-Output 'G04B exact dependency hashes/features, metadata-only settings/warnings, bounded image writer, accepted verifier/publication reuse, browser-backed visual evidence, minimum capability set, truthful blocked renderer, and accessible two-direction UI verified.'
+Write-Output 'G04B exact dependency hashes/features, metadata-only settings/warnings, bounded image writer, accepted verifier/publication reuse, browser-backed visual evidence, minimum capability set, and accessible two-direction UI verified.'

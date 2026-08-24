@@ -32,7 +32,7 @@ Convert to PDF,Text to PDF,Convert TXT/CSV/JSON/XML to formatted PDF,2,native re
 Convert to PDF,Email to PDF,Convert EML/MSG with headers and attachments index,5,Docling/mail parser,"Desktop, Web",Could
 Convert to PDF,SVG to PDF,Preserve vector content when possible,3,resvg/Cairo,"Desktop, Web",Should
 Convert to PDF,Archive package to PDF,Combine mixed supported inputs into an ordered PDF binder,4,workflow engine,"Desktop, Web",Could
-Convert from PDF,PDF to JPG/PNG/WebP,Render selected pages at configurable DPI,1,PDFium/MuPDF/libvips,"Desktop, Web",Must
+Convert from PDF,PDF to JPG/PNG/WebP,Render selected pages at fixed approved DPI,1,PDF.js + image,"Desktop, Web",Must
 Convert from PDF,PDF to TIFF,Export single/multipage TIFF,2,PDFium + libvips,"Desktop, Web",Should
 Convert from PDF,PDF to text,Reading-order text extraction with OCR fallback,1,PDF.js/Docling/Tesseract,"Desktop, Web",Must
 Convert from PDF,PDF to Markdown,"Structured headings, lists, tables, images and links",4,Docling/Granite Docling,"Desktop, Web",Should

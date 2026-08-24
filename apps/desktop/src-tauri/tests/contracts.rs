@@ -11,6 +11,8 @@ const PDF_MERGE_GOLDEN: &str =
     include_str!("../../../../packages/contracts/fixtures/pdf-merge-contracts.json");
 const PDF_COMPRESS_LOSSLESS_GOLDEN: &str =
     include_str!("../../../../packages/contracts/fixtures/pdf-compress-lossless-contracts.json");
+const PDF_TO_IMAGES_GOLDEN: &str =
+    include_str!("../../../../packages/contracts/fixtures/pdf-to-images-contracts.json");
 
 #[test]
 fn rust_deserializes_and_round_trips_shared_golden_payloads() {
@@ -72,6 +74,23 @@ fn rust_deserializes_the_lossless_compression_manifest_and_single_request() {
     assert_eq!(operation.inputs.maximum, 1);
     assert_eq!(request.operation_id, "pdf.compress-lossless");
     assert_eq!(request.input_paths.len(), 1);
+}
+
+#[test]
+fn rust_deserializes_the_pdf_to_images_manifest_and_opaque_request() {
+    let fixture: Value =
+        serde_json::from_str(PDF_TO_IMAGES_GOLDEN).expect("golden JSON must parse");
+    let operation: OperationManifest = serde_json::from_value(fixture["operationManifest"].clone())
+        .expect("PDF-to-images operation must deserialize");
+    let request: document_studio_lib::contracts::PdfToImagesJobCreateRequest =
+        serde_json::from_value(fixture["request"].clone())
+            .expect("PDF-to-images request must deserialize");
+    assert_eq!(operation.id, "pdf.to-images");
+    assert_eq!(operation.version, "1.0.0");
+    assert_eq!(operation.outputs.multiplicity, "multiple");
+    assert_eq!(request.pages.len(), 2);
+    assert_eq!(request.pages[0].source_page_index, 2);
+    assert_eq!(request.dpi, 150);
 }
 
 #[test]

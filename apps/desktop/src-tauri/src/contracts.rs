@@ -12,6 +12,12 @@ pub const PDF_COMPRESS_LOSSLESS_VERSION: &str = "1.0.0";
 pub const IMAGE_TO_PDF_OPERATION_ID: &str = "image.to-pdf";
 pub const IMAGE_TO_PDF_VERSION: &str = "1.0.0";
 pub const IMAGE_TO_PDF_MAX_INPUTS: usize = 128;
+pub const PDF_TO_IMAGES_OPERATION_ID: &str = "pdf.to-images";
+pub const PDF_TO_IMAGES_VERSION: &str = "1.0.0";
+pub const PDF_TO_IMAGES_MAX_OUTPUTS: usize = 128;
+pub const PDF_TO_IMAGES_MAX_TOTAL_PIXELS: u64 = 67_108_864;
+pub const PDF_TO_IMAGES_JPEG_QUALITY: u8 = 92;
+pub const PDFJS_VERSION: &str = "6.2.108";
 pub const IMAGE_MAX_DIMENSION: u32 = 8_192;
 pub const IMAGE_MAX_PIXELS: u64 = 16_777_216;
 pub const IMAGE_TO_PDF_MAX_TOTAL_PIXELS: u64 = 67_108_864;
@@ -647,12 +653,78 @@ pub struct SystemStatus {
     pub phase: String,
     pub offline_by_default: bool,
     pub database_schema_version: u32,
+    pub webview2_runtime_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelResponse {
     pub outcome: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PdfImageFormat {
+    Jpeg,
+    Png,
+    Webp,
+}
+
+impl PdfImageFormat {
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+        }
+    }
+
+    pub const fn mime_type(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Webp => "image/webp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfToImagesPagePlan {
+    pub source_page_index: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfToImagesJobCreateRequest {
+    pub viewer_session_id: String,
+    pub viewer_generation: u64,
+    pub destination_grant_id: String,
+    pub source_page_count: u32,
+    pub pages: Vec<PdfToImagesPagePlan>,
+    pub format: PdfImageFormat,
+    pub dpi: u16,
+    pub output_stem: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfPixelTransferTicket {
+    pub page_ordinal: u32,
+    pub source_page_index: u32,
+    pub nonce: String,
+    pub expected_width: u32,
+    pub expected_height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfToImagesJobSession {
+    pub job: JobRecord,
+    pub render_session_id: String,
+    pub pages: Vec<PdfPixelTransferTicket>,
 }
 
 pub const JOB_PROGRESS_EVENT_NAME: &str = "document-studio-job-progress-v1";

@@ -20,6 +20,19 @@ declare global {
       candidateSessions: number;
       maxActiveSessions: number;
       closedSessionIds: string[];
+      pdfImageCreateRequests: unknown[];
+      pdfImageTransfers: Array<{
+        pageOrdinal: number;
+        sourcePageIndex: number;
+        width: number;
+        height: number;
+        byteLength: number;
+        alphaOpaque: boolean;
+        nonWhitePixels: number;
+        sha256: string;
+      }>;
+      activePdfImageTransfers: number;
+      peakPdfImageTransfers: number;
     };
     __G03_PRINT_CALLED__: boolean;
   }
@@ -64,6 +77,51 @@ function syntheticPdf(
   return encoder.encode(chunks.join(''));
 }
 
+function advancedRasterPdf(iccProfile: Uint8Array): Uint8Array {
+  const encoder = new TextEncoder();
+  const stream = (dictionary: string, body: string) =>
+    `<< ${dictionary} /Length ${encoder.encode(body).length} >>\nstream\n${body}endstream`;
+  const iccHex = `${[...iccProfile].map((byte) => byte.toString(16).padStart(2, '0')).join('')}>\n`;
+  const imageHex = 'ff000000ff000000ffffffff00>\n';
+  const mask = '0.6 g 0 0 200 100 re f\n';
+  const pageOne = [
+    'q /GS1 gs 0 1 1 0 k 20 10 50 50 re f Q',
+    'BT /T3 30 Tf 80 20 Td (A) Tj ET',
+    '/LabCS cs 50 20 20 sc 130 20 30 30 re f',
+  ].join('\n') + '\n';
+  const pageTwo = 'q 60 0 0 60 10 10 cm /Im1 Do Q\n';
+  const glyph = '100 0 0 0 100 100 d1 0 0 1 rg 0 0 100 100 re f\n';
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /CropBox [20 10 180 90] /Rotate 90 /Resources << /Font << /T3 5 0 R >> /ColorSpace << /LabCS 7 0 R >> /ExtGState << /GS1 8 0 R >> >> /Contents 9 0 R >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Resources << /XObject << /Im1 11 0 R >> >> /Contents 10 0 R >>',
+    '<< /Type /Font /Subtype /Type3 /FontBBox [0 0 100 100] /FontMatrix [0.01 0 0 0.01 0 0] /CharProcs << /A 6 0 R >> /Encoding << /Type /Encoding /Differences [65 /A] >> /FirstChar 65 /LastChar 65 /Widths [100] /Resources << >> >>',
+    stream('', glyph),
+    '[/Lab << /WhitePoint [0.9505 1 1.089] /Range [-128 127 -128 127] >>]',
+    '<< /Type /ExtGState /SMask << /S /Luminosity /G 12 0 R >> >>',
+    stream('', pageOne),
+    stream('', pageTwo),
+    stream('/Type /XObject /Subtype /Image /Width 2 /Height 2 /BitsPerComponent 8 /ColorSpace [/ICCBased 13 0 R] /Filter /ASCIIHexDecode', imageHex),
+    stream('/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceGray >> /Resources << >>', mask),
+    stream('/N 3 /Alternate /DeviceRGB /Filter /ASCIIHexDecode', iccHex),
+  ];
+  const chunks = ['%PDF-1.7\n%G04B2\n'];
+  const offsets: number[] = [];
+  let length = encoder.encode(chunks[0]).length;
+  objects.forEach((object, index) => {
+    offsets.push(length);
+    const chunk = `${index + 1} 0 obj\n${object}\nendobj\n`;
+    chunks.push(chunk);
+    length += encoder.encode(chunk).length;
+  });
+  const xref = length;
+  chunks.push(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`);
+  for (const offset of offsets) chunks.push(`${String(offset).padStart(10, '0')} 00000 n \n`);
+  chunks.push(`trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+  return encoder.encode(chunks.join(''));
+}
+
 async function installTransport(page: Page, pageCount: number, suppliedBytes = syntheticPdf(pageCount)) {
   await installTransportSequence(page, [{
     pageCount,
@@ -90,6 +148,8 @@ async function installTransportSequence(page: Page, suppliedFixtures: BrowserFix
       dropEnabled: false, plans: [], pageCount: fixtures[0].pageCount,
       fixtureBytes: fixtures[0].bytes.byteLength, openCount: 0, closeCount: 0,
       activeSessions: 0, candidateSessions: 0, maxActiveSessions: 0, closedSessionIds: [],
+      pdfImageCreateRequests: [], pdfImageTransfers: [], activePdfImageTransfers: 0,
+      peakPdfImageTransfers: 0,
     };
     const sessions = new Map<string, { bytes: Uint8Array; generation: number; delay: number }>();
     let fixtureIndex = 0;
@@ -102,6 +162,27 @@ async function installTransportSequence(page: Page, suppliedFixtures: BrowserFix
       createdAt: '2026-08-17T00:00:00Z', updatedAt: '2026-08-17T00:00:00Z',
       finishedAt: null, version: 0, inputs: [], outputs: [], errors: [],
     });
+    const makePdfImageJob = (request: {
+      pages: Array<{ sourcePageIndex: number; width: number; height: number }>;
+      format: 'jpeg' | 'png' | 'webp';
+      outputStem: string;
+    }) => ({
+      id: 'browser-pdf-images-job', operationId: 'pdf.to-images', operationVersion: '1.0.0',
+      state: 'running', stage: 'render', sequence: 1,
+      progress: { completedUnits: 0, totalUnits: request.pages.length, unit: 'items' },
+      destinationDirectory: '', requestedOutputName: '', resolvedOutputName: null,
+      cancellationRequestedAt: null, createdAt: '2026-08-22T00:00:00Z',
+      updatedAt: '2026-08-22T00:00:00Z', finishedAt: null, version: 1,
+      inputs: [], errors: [],
+      outputs: request.pages.map((_, ordinal) => ({
+        ordinal,
+        requestedName: `${request.outputStem}-page-${String(ordinal + 1).padStart(4, '0')}.${request.format === 'jpeg' ? 'jpg' : request.format}`,
+        resolvedName: null, stagingPath: null, partialPath: null, finalPath: null,
+        sizeBytes: null, mimeType: `image/${request.format}`, sha256: null,
+        status: 'planned', verifiedAt: null, publishedAt: null,
+      })),
+    });
+    let pdfImageJob: ReturnType<typeof makePdfImageJob> | null = null;
     globalThis.__DOCUMENT_STUDIO_G03_TEST_TRANSPORT__ = {
       async open() {
         const fixture = fixtures[Math.min(fixtureIndex, fixtures.length - 1)];
@@ -147,6 +228,92 @@ async function installTransportSequence(page: Page, suppliedFixtures: BrowserFix
       async chooseDestination() { return { grantId: 'opaque-destination-grant', displayName: 'Test outputs' }; },
       async revokeDestination() {},
       async createCorePdf(request: unknown) { evidence.plans.push(request); return makeJob(request as never); },
+      async createPdfToImages(request: {
+        pages: Array<{ sourcePageIndex: number; width: number; height: number }>;
+        format: 'jpeg' | 'png' | 'webp';
+        outputStem: string;
+      }) {
+        evidence.pdfImageCreateRequests.push(request);
+        pdfImageJob = makePdfImageJob(request);
+        return {
+          job: pdfImageJob,
+          renderSessionId: 'browser-render-session',
+          pages: request.pages.map((planned, pageOrdinal) => ({
+            pageOrdinal,
+            sourcePageIndex: planned.sourcePageIndex,
+            nonce: `browser-page-nonce-${pageOrdinal}`,
+            expectedWidth: planned.width,
+            expectedHeight: planned.height,
+          })),
+        };
+      },
+      async submitPdfPixels(
+        session: { job: { id: string }; renderSessionId: string },
+        ticket: {
+          pageOrdinal: number; sourcePageIndex: number; nonce: string;
+          expectedWidth: number; expectedHeight: number;
+        },
+        rgba: Uint8Array,
+      ) {
+        if (!pdfImageJob || session.job.id !== pdfImageJob.id
+          || session.renderSessionId !== 'browser-render-session'
+          || ticket.pageOrdinal !== evidence.pdfImageTransfers.length
+          || ticket.nonce !== `browser-page-nonce-${ticket.pageOrdinal}`
+          || rgba.byteLength !== ticket.expectedWidth * ticket.expectedHeight * 4) {
+          throw new Error('Browser raw-pixel authentication failed.');
+        }
+        evidence.activePdfImageTransfers += 1;
+        evidence.peakPdfImageTransfers = Math.max(
+          evidence.peakPdfImageTransfers,
+          evidence.activePdfImageTransfers,
+        );
+        let alphaOpaque = true;
+        let nonWhitePixels = 0;
+        for (let offset = 0; offset < rgba.byteLength; offset += 4) {
+          if (rgba[offset + 3] !== 255) alphaOpaque = false;
+          if (rgba[offset] !== 255 || rgba[offset + 1] !== 255 || rgba[offset + 2] !== 255) {
+            nonWhitePixels += 1;
+          }
+        }
+        const digest = await crypto.subtle.digest('SHA-256', rgba);
+        const sha256 = [...new Uint8Array(digest)]
+          .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        evidence.pdfImageTransfers.push({
+          pageOrdinal: ticket.pageOrdinal,
+          sourcePageIndex: ticket.sourcePageIndex,
+          width: ticket.expectedWidth,
+          height: ticket.expectedHeight,
+          byteLength: rgba.byteLength,
+          alphaOpaque,
+          nonWhitePixels,
+          sha256,
+        });
+        evidence.activePdfImageTransfers -= 1;
+        const complete = evidence.pdfImageTransfers.length === pdfImageJob.outputs.length;
+        pdfImageJob = {
+          ...pdfImageJob,
+          state: complete ? 'completed' : 'running',
+          stage: complete ? 'cleanup' : 'render',
+          sequence: pdfImageJob.sequence + 1,
+          version: pdfImageJob.version + 1,
+          finishedAt: complete ? '2026-08-22T00:00:01Z' : null,
+          progress: {
+            completedUnits: evidence.pdfImageTransfers.length,
+            totalUnits: pdfImageJob.outputs.length,
+            unit: 'items',
+          },
+          outputs: pdfImageJob.outputs.map((output, ordinal) => ordinal <= ticket.pageOrdinal ? {
+            ...output,
+            resolvedName: output.requestedName,
+            sizeBytes: rgba.byteLength,
+            sha256,
+            status: 'published',
+            verifiedAt: '2026-08-22T00:00:01Z',
+            publishedAt: '2026-08-22T00:00:01Z',
+          } : output),
+        };
+        return pdfImageJob;
+      },
       async onProgress() { return () => undefined; },
     };
   }, suppliedFixtures.map((fixture) => ({ ...fixture, bytes: Array.from(fixture.bytes) })));
@@ -273,6 +440,90 @@ test('G04B images-to-PDF output matches its source pixels through the accepted P
   expect(pixels.renderedPixel).toEqual(pixels.sourcePixel);
 });
 
+test('G04B2 PDF-to-images renders ordered opaque pages sequentially through authenticated binary transfer', async ({ page }) => {
+  const bytes = syntheticPdf(2, false, [
+    { width: 72, height: 48 },
+    { width: 36, height: 72 },
+  ]);
+  await installTransport(page, 2, bytes);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Convert', exact: true }).first().click();
+  await page.getByRole('tab', { name: 'PDF to images' }).click();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).click();
+  const secondPage = page.getByRole('button', { name: 'Page 2 of 2' }).first();
+  await secondPage.click({ modifiers: ['Control'] });
+  await page.getByRole('button', { name: 'Move source page 2 up' }).click();
+  await page.getByLabel('WebP · lossless').check();
+  await page.getByRole('button', { name: 'Choose', exact: true }).click();
+  await page.getByRole('button', { name: 'Convert pages' }).click();
+
+  await expect(page.getByText('2 of 2 pages encoded and verified')).toBeVisible();
+  await expect(page.locator('.output-status-row')).toHaveCount(2);
+  await expect(page.locator('.output-status-row').first()).toContainText('published');
+  const evidence = await page.evaluate(() => window.__G03_TEST_EVIDENCE__);
+  expect(evidence.pdfImageCreateRequests).toHaveLength(1);
+  expect(evidence.pdfImageCreateRequests[0]).toMatchObject({
+    viewerSessionId: 'browser-opaque-session',
+    viewerGeneration: 41,
+    destinationGrantId: 'opaque-destination-grant',
+    sourcePageCount: 2,
+    format: 'webp',
+    dpi: 150,
+    pages: [
+      { sourcePageIndex: 1, width: 75, height: 150 },
+      { sourcePageIndex: 0, width: 150, height: 100 },
+    ],
+  });
+  expect(evidence.pdfImageTransfers.map((transfer) => ({
+    ordinal: transfer.pageOrdinal,
+    sourcePage: transfer.sourcePageIndex,
+    dimensions: [transfer.width, transfer.height],
+    bytes: transfer.byteLength,
+  }))).toEqual([
+    { ordinal: 0, sourcePage: 1, dimensions: [75, 150], bytes: 75 * 150 * 4 },
+    { ordinal: 1, sourcePage: 0, dimensions: [150, 100], bytes: 150 * 100 * 4 },
+  ]);
+  expect(evidence.pdfImageTransfers.every((transfer) => transfer.alphaOpaque)).toBe(true);
+  expect(evidence.pdfImageTransfers.every((transfer) => transfer.nonWhitePixels > 0)).toBe(true);
+  expect(new Set(evidence.pdfImageTransfers.map((transfer) => transfer.sha256)).size).toBe(2);
+  expect(evidence.peakPdfImageTransfers).toBe(1);
+  expect(JSON.stringify(evidence.pdfImageCreateRequests)).not.toContain('sourcePath');
+  expect(JSON.stringify(evidence.pdfImageCreateRequests)).not.toContain('destinationDirectory');
+  expect(await page.locator('canvas').count()).toBe(0);
+  expect(evidence.activeSessions).toBe(0);
+});
+
+test('G04B2 PDF-to-images covers rotated crop boxes, embedded Type 3, soft masks, and ICC CMYK Lab rendering', async ({ page }) => {
+  const iccProfile = await readFile(resolve(
+    import.meta.dirname,
+    '..', '..', '..', 'node_modules', 'pdfjs-dist', 'iccs', 'CGATS001Compat-v2-micro.icc',
+  ));
+  await installTransport(page, 2, advancedRasterPdf(iccProfile));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Convert', exact: true }).first().click();
+  await page.getByRole('tab', { name: 'PDF to images' }).click();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).click();
+  await page.getByRole('button', { name: 'Page 2 of 2' }).first().click({ modifiers: ['Control'] });
+  await page.getByLabel('72').check();
+  await page.getByRole('button', { name: 'Choose', exact: true }).click();
+  await page.getByRole('button', { name: 'Convert pages' }).click();
+
+  await expect(page.getByText('2 of 2 pages encoded and verified')).toBeVisible();
+  const evidence = await page.evaluate(() => window.__G03_TEST_EVIDENCE__);
+  expect(evidence.pdfImageCreateRequests[0]).toMatchObject({
+    dpi: 72,
+    format: 'png',
+    pages: [
+      { sourcePageIndex: 0, width: 80, height: 160 },
+      { sourcePageIndex: 1, width: 120, height: 80 },
+    ],
+  });
+  expect(evidence.pdfImageTransfers).toHaveLength(2);
+  expect(evidence.pdfImageTransfers.every((transfer) => transfer.alphaOpaque)).toBe(true);
+  expect(evidence.pdfImageTransfers.every((transfer) => transfer.nonWhitePixels > 100)).toBe(true);
+  expect(evidence.peakPdfImageTransfers).toBe(1);
+});
+
 test('unlocks an encrypted PDF only in memory and keeps structural operations disabled', async ({ page }, testInfo) => {
   const clearPath = testInfo.outputPath('clear.pdf');
   const encryptedPath = testInfo.outputPath('encrypted.pdf');
@@ -341,6 +592,33 @@ test('reports damaged PDF data without retaining a canvas', async ({ page }) => 
   await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
   await expect(page.getByRole('alert')).toContainText('Document Studio could not complete that request.');
   await expect(page.locator('.pdf-page-surface canvas')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(1);
+});
+
+test('rejects 4097 pages at PDF.js session admission before viewer allocation or durable work', async ({ page }) => {
+  await installTransport(page, 4097);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Viewer', exact: true }).click();
+  await page.getByRole('button', { name: 'Open PDF', exact: true }).first().click();
+
+  await expect(page.getByRole('alert')).toContainText('The PDF has an unsupported page count.');
+  await expect(page.getByRole('alert')).toContainText('between 1 and 4,096 pages');
+  await expect(page.locator('.pdf-page-surface, .page-thumbnail')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
+  const evidence = await page.evaluate(() => window.__G03_TEST_EVIDENCE__);
+  expect(evidence.closeCount).toBe(1);
+  expect(evidence.plans).toEqual([]);
+  expect(evidence.rangeCalls.every((call) => !('path' in call))).toBe(true);
+});
+
+test('accepts exactly 4096 pages and releases the bounded viewer session normally', async ({ page }) => {
+  await installTransport(page, 4096);
+  await openViewer(page);
+
+  await expect(page.getByRole('button', { name: 'Page 1 of 4096' }).first()).toBeVisible();
+  expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.plans)).toEqual([]);
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
   await expect.poll(() => page.evaluate(() => window.__G03_TEST_EVIDENCE__.activeSessions)).toBe(0);
   expect(await page.evaluate(() => window.__G03_TEST_EVIDENCE__.closeCount)).toBe(1);
 });

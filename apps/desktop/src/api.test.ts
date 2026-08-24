@@ -111,6 +111,35 @@ describe('typed Tauri API', () => {
     })).rejects.toThrow('not raw byte data');
   });
 
+  it('uploads RGBA only as a raw body with authenticated identity headers', async () => {
+    const pixels = new Uint8Array([255, 255, 255, 255]);
+    const session = {
+      job: { ...job, id: '9e515769-e47b-40dd-a334-ddc661a78d45' },
+      renderSessionId: 'c118bb0d-bada-4f44-b5ef-4fcf12bb7512',
+      pages: [{
+        pageOrdinal: 0,
+        sourcePageIndex: 2,
+        nonce: '9503134c-4071-4485-a753-e956dd8858e6',
+        expectedWidth: 1,
+        expectedHeight: 1,
+      }],
+    };
+    await api.jobs.submitPdfPixels(session as never, session.pages[0], pixels);
+    expect(native.invoke).toHaveBeenLastCalledWith(
+      'pdf_to_images_submit_page',
+      pixels,
+      { headers: {
+        'x-document-studio-job-id': session.job.id,
+        'x-document-studio-render-session-id': session.renderSessionId,
+        'x-document-studio-page-ordinal': '0',
+        'x-document-studio-page-nonce': session.pages[0].nonce,
+        'x-document-studio-expected-width': '1',
+        'x-document-studio-expected-height': '1',
+      } },
+    );
+    expect(JSON.stringify(native.invoke.mock.calls.at(-1))).not.toContain('destination');
+  });
+
   it('reconciles a sequence gap and ignores stale events', async () => {
     const fetchJob = vi.fn().mockResolvedValue(job);
     const onSnapshot = vi.fn();

@@ -27,6 +27,12 @@ export const OPERATION_STAGES = [
   'recovery',
 ] as const;
 
+export const CORE_PDF_MAX_PAGES = 4096;
+export const RANGE_CHUNK_BYTES = 256 * 1024;
+export const MAX_RANGE_READS = 4;
+export const MAX_QUEUED_RANGE_COUNT = 64;
+export const MAX_QUEUED_RANGE_BYTES = 16 * 1024 * 1024;
+
 export type OperationStage = (typeof OPERATION_STAGES)[number];
 export type ProgressUnit = 'bytes' | 'items' | 'steps';
 export type OperationRisk = 'normal' | 'sensitive' | 'irreversible';
@@ -139,10 +145,44 @@ export interface SystemStatus {
   phase: string;
   offlineByDefault: boolean;
   databaseSchemaVersion: number;
+  webview2RuntimeVersion: string | null;
 }
 
 export interface CancelResponse {
   outcome: 'requested' | 'cancelled';
+}
+
+export type PdfImageFormat = 'jpeg' | 'png' | 'webp';
+
+export interface PdfToImagesPagePlan {
+  sourcePageIndex: number;
+  width: number;
+  height: number;
+}
+
+export interface PdfToImagesJobCreateRequest {
+  viewerSessionId: string;
+  viewerGeneration: number;
+  destinationGrantId: string;
+  sourcePageCount: number;
+  pages: PdfToImagesPagePlan[];
+  format: PdfImageFormat;
+  dpi: 72 | 150 | 300;
+  outputStem: string;
+}
+
+export interface PdfPixelTransferTicket {
+  pageOrdinal: number;
+  sourcePageIndex: number;
+  nonce: string;
+  expectedWidth: number;
+  expectedHeight: number;
+}
+
+export interface PdfToImagesJobSession {
+  job: JobRecord;
+  renderSessionId: string;
+  pages: PdfPixelTransferTicket[];
 }
 
 export interface SettingRecord<T = unknown> {

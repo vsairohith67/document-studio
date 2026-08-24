@@ -9,6 +9,7 @@ import type {
 } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
 import { formatBytes } from './sizeReporting';
+import { PdfToImagesWorkspace } from './PdfToImagesWorkspace';
 
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const acceptedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -48,6 +49,7 @@ export function ConvertWorkspace({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
+  const [direction, setDirection] = useState<'images-to-pdf' | 'pdf-to-images'>('images-to-pdf');
   const nextSelectionId = useRef(0);
   const jobId = useRef<string | null>(null);
   const busyRef = useRef(false);
@@ -224,10 +226,10 @@ export function ConvertWorkspace({
           <div className="privacy-badge"><span aria-hidden="true">●</span>{system?.offlineByDefault ? 'Offline by default' : 'Checking local status'}</div>
         </header>
         <div className="conversion-tabs" role="tablist" aria-label="Conversion direction">
-          <button type="button" role="tab" aria-selected="true" className="active">Images to PDF</button>
-          <button type="button" role="tab" aria-selected="false" aria-disabled="true" disabled>PDF to images · dependency blocked</button>
+          <button type="button" role="tab" aria-selected={direction === 'images-to-pdf'} className={direction === 'images-to-pdf' ? 'active' : ''} onClick={() => setDirection('images-to-pdf')} disabled={busy}>Images to PDF</button>
+          <button type="button" role="tab" aria-selected={direction === 'pdf-to-images'} className={direction === 'pdf-to-images' ? 'active' : ''} onClick={() => setDirection('pdf-to-images')} disabled={busy}>PDF to images</button>
         </div>
-        <div className="dependency-blocker" role="note"><strong>PDF to images is unavailable</strong><span>No accepted production renderer passed the provenance and license gate. The image-to-PDF writer remains independently available.</span></div>
+        {direction === 'pdf-to-images' ? <PdfToImagesWorkspace /> : <>
         {error && <div className="error-banner" role="alert">{error}</div>}
         <div className="sr-announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
         <section className="convert-layout" aria-label="Images to PDF workspace">
@@ -249,6 +251,7 @@ export function ConvertWorkspace({
             <article className="card job-card" aria-live="polite" aria-atomic="true"><div className="card-heading"><h2>Conversion status</h2>{job && <span className={`job-state state-${job.state}`}>{job.state}</span>}</div><strong>{progress?.message ?? (job ? `Job ${job.state}` : 'Ready for local image preflight')}</strong><progress value={progressPercent} max={100} aria-label="Images to PDF progress" />{busy && !cancellable && <p className="publishing-copy">Publishing safely—cancellation is no longer available.</p>}{job?.state === 'completed' && <div className="success-result"><strong>Verified image PDF</strong><span>{job.outputs[0]?.finalPath}</span><small>{job.outputs[0]?.sizeBytes == null ? '' : formatBytes(job.outputs[0].sizeBytes)}</small><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy path</button></div>}{warnings.length > 0 && <div className="job-warnings" role="status"><strong>Conversion warnings</strong><ul>{warnings.map((warning) => <li key={`${warning.code}-${warning.inputIndex ?? 'job'}-${warning.createdAt}`}>{warning.sanitizedDetail}</li>)}</ul></div>}{(job?.state === 'failed' || job?.state === 'cancelled' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? `Conversion ${job.state}`}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span></div>}</article>
           </aside>
         </section>
+        </>}
       </main>
     </div>
   );

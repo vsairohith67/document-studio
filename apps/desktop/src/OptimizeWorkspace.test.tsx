@@ -44,7 +44,7 @@ import { OptimizeWorkspace } from './OptimizeWorkspace';
 
 const system: SystemStatus = {
   product: 'Document Studio', phase: 'g04a-lossless-pdf-compression',
-  offlineByDefault: true, databaseSchemaVersion: 3,
+  offlineByDefault: true, databaseSchemaVersion: 3, webview2RuntimeVersion: '151.0.7922.34',
 };
 const dependencies: DependencyDiagnostic[] = [{
   id: 'qpdf', kind: 'external', status: 'available', version: '12.3.2',

@@ -3,8 +3,8 @@ use chrono::{SecondsFormat, Utc};
 use crate::app_state::AppState;
 use crate::contracts::{
     DependencyDiagnostic, DependencyKind, DependencyStatus, OperationError, OperationStage,
-    IMAGE_TO_PDF_OPERATION_ID, PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_MERGE_OPERATION_ID,
-    QPDF_DEPENDENCY_ID,
+    IMAGE_TO_PDF_OPERATION_ID, PDFJS_VERSION, PDF_COMPRESS_LOSSLESS_OPERATION_ID,
+    PDF_MERGE_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID, QPDF_DEPENDENCY_ID,
 };
 use crate::process_sandbox::{
     authorize_qpdf_paths, ensure_production_profile, run_sandboxed_capture, SandboxLaunchSpec,
@@ -24,6 +24,7 @@ pub fn scan_dependencies(state: &AppState) -> Result<Vec<DependencyDiagnostic>, 
             capabilities: vec![
                 "diagnostic.copy".to_owned(),
                 IMAGE_TO_PDF_OPERATION_ID.to_owned(),
+                PDF_TO_IMAGES_OPERATION_ID.to_owned(),
                 "sha256".to_owned(),
             ],
             checked_at: checked_at.clone(),
@@ -39,7 +40,15 @@ pub fn scan_dependencies(state: &AppState) -> Result<Vec<DependencyDiagnostic>, 
             error_code: None,
         },
         qpdf_diagnostic(state, &checked_at),
-        deferred("pdfjs", &checked_at),
+        DependencyDiagnostic {
+            id: "pdfjs".to_owned(),
+            kind: DependencyKind::BuiltIn,
+            status: DependencyStatus::Available,
+            version: Some(PDFJS_VERSION.to_owned()),
+            capabilities: vec![PDF_TO_IMAGES_OPERATION_ID.to_owned()],
+            checked_at: checked_at.clone(),
+            error_code: None,
+        },
         deferred("libreoffice", &checked_at),
         deferred("ocrmypdf", &checked_at),
         deferred("tesseract", &checked_at),
@@ -107,6 +116,7 @@ fn qpdf_diagnostic(state: &AppState, checked_at: &str) -> DependencyDiagnostic {
             PDF_MERGE_OPERATION_ID.to_owned(),
             PDF_COMPRESS_LOSSLESS_OPERATION_ID.to_owned(),
             IMAGE_TO_PDF_OPERATION_ID.to_owned(),
+            PDF_TO_IMAGES_OPERATION_ID.to_owned(),
         ],
         checked_at: checked_at.to_owned(),
         error_code: result.err().map(|_| "QPDF_RUNTIME_UNAVAILABLE".to_owned()),

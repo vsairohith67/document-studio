@@ -5,7 +5,7 @@
 - Unit tests: schemas, range parsing, naming, path validation, job transitions, settings migrations.
 - Adapter integration: known input -> operation -> verified output.
 - Golden visual tests: render selected outputs and compare with tolerance.
-- Cross-renderer tests: PDF.js plus at least one independent desktop/PDFium renderer.
+- Renderer tests: accepted local PDF.js browser/WebView evidence plus independent output decoding and visual/pixel verification; add another renderer only through a separately approved dependency decision.
 - Security tests: malformed files, traversal, command injection, archive bombs, cancellation and secret logging.
 - Recovery tests: kill the process during every stage and relaunch.
 - Performance tests: named fixtures and thresholds by stage.

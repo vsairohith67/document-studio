@@ -369,9 +369,13 @@ impl ViewerSession {
         let metadata = self.file.metadata().map_err(|_| source_changed())?;
         let modified_at = modified_timestamp(&metadata).map_err(|_| source_changed())?;
         let identity = identity_from_file(&self.file).map_err(|_| source_changed())?;
+        let (current_path, current_identity) =
+            canonical_regular_file(&self.source_path).map_err(|_| source_changed())?;
         if metadata.len() != self.size_bytes
             || modified_at != self.modified_at
             || identity != self.identity
+            || current_identity != self.identity
+            || current_path != self.source_path
         {
             return Err(source_changed());
         }
@@ -417,6 +421,39 @@ impl ViewerJobSource {
         output.sync_all().map_err(|_| snapshot_failed())?;
         self.session.validate_unchanged()?;
         Ok((offset, hex_digest(&digest.finalize())))
+    }
+
+    pub fn verify_unchanged_hash(
+        &self,
+        expected_sha256: &str,
+        token: &CancellationToken,
+    ) -> Result<(), OperationError> {
+        self.session.validate_unchanged()?;
+        let mut offset = 0_u64;
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; SNAPSHOT_BUFFER_BYTES];
+        while offset < self.size_bytes {
+            if token.is_cancelled() {
+                return Err(OperationError::safe(
+                    "CANCELLED",
+                    "The PDF operation was cancelled",
+                    "Private snapshots and unpublished outputs will be removed safely.",
+                    OperationStage::Verify,
+                    false,
+                ));
+            }
+            let remaining = usize::try_from((self.size_bytes - offset).min(buffer.len() as u64))
+                .map_err(|_| source_changed())?;
+            read_exact_at(&self.session.file, &mut buffer[..remaining], offset)
+                .map_err(|_| source_changed())?;
+            digest.update(&buffer[..remaining]);
+            offset += u64::try_from(remaining).map_err(|_| source_changed())?;
+        }
+        self.session.validate_unchanged()?;
+        if hex_digest(&digest.finalize()) != expected_sha256 {
+            return Err(source_changed());
+        }
+        Ok(())
     }
 }
 

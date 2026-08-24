@@ -13,6 +13,7 @@ $repositoryRootForward = $repositoryRoot.Replace('\', '/')
 $cacheRoot = Join-Path $repositoryRoot '.cache'
 $evidenceRoot = Join-Path $cacheRoot ('g03-webview2-' + [guid]::NewGuid().ToString('N'))
 $appData = Join-Path $evidenceRoot 'app-data'
+$g04b2Output = Join-Path $appData 'g04b2-output'
 $webViewData = Join-Path $appData 'webview2-user-data'
 $webViewCommandData = Join-Path $webViewData 'EBWebView'
 $fixture = (Resolve-Path (Join-Path $repositoryRoot 'report\Document_Studio_Master_Blueprint.pdf')).Path
@@ -309,6 +310,7 @@ function Remove-EvidenceRoot {
 }
 
 New-Item -ItemType Directory -Path $appData -Force | Out-Null
+New-Item -ItemType Directory -Path $g04b2Output | Out-Null
 New-Item -ItemType Directory -Path $webViewData | Out-Null
 if (@(Get-ChildItem -LiteralPath $webViewData -Force).Count -ne 0) {
   throw 'The isolated WebView2 user-data folder was not empty before launch.'
@@ -317,6 +319,7 @@ if (@(Get-ChildItem -LiteralPath $webViewData -Force).Count -ne 0) {
 foreach ($name in @(
   'DOCUMENT_STUDIO_TEST_APP_DATA',
   'DOCUMENT_STUDIO_TEST_VIEWER_PATH',
+  'DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY',
   'DOCUMENT_STUDIO_TEST_CDP_PORT',
   'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR'
 )) {
@@ -364,6 +367,11 @@ try {
 
   [Environment]::SetEnvironmentVariable('DOCUMENT_STUDIO_TEST_APP_DATA', $appData, 'Process')
   [Environment]::SetEnvironmentVariable('DOCUMENT_STUDIO_TEST_VIEWER_PATH', $fixture, 'Process')
+  [Environment]::SetEnvironmentVariable(
+    'DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY',
+    $g04b2Output,
+    'Process'
+  )
   [Environment]::SetEnvironmentVariable(
     'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
     $webViewData,
@@ -428,4 +436,4 @@ if ($failure) {
   [Console]::Error.WriteLine([string]$failure.Exception.Message)
   exit 1
 }
-Write-Output 'WebView2 smoke passed: dynamic loopback CDP, isolated user data, raw IPC, and owned cleanup verified.'
+Write-Output 'WebView2 smoke passed: dynamic loopback CDP, isolated user data, G03 range IPC, G04B2 authenticated raw pixel IPC/encoding/publication, runtime diagnostics, and owned cleanup verified.'

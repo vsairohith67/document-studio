@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = Resolve-Path (Join-Path $desktopRoot '..\..')
-$expectedCsp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';"
+$expectedCsp = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data: blob:; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none';"
 
 function Get-Sha256File([string]$Path) {
   $stream = [System.IO.File]::OpenRead($Path)
@@ -82,12 +82,12 @@ if ($worker.Count -ne 1 -or $worker[0].sha256 -ne 'b4e582882f5e811f4d1b7b511f68d
 
 $tauriConfigurationPath = Join-Path $desktopRoot 'src-tauri\tauri.conf.json'
 $tauriConfigurationHash = Get-Sha256File $tauriConfigurationPath
-if ($tauriConfigurationHash -ne 'b97a850398a47fb391bae2f076ea7e37775c5fc88b6de264cadd5f38638e4217') {
-  throw 'tauri.conf.json changed from the manually tested G03 production configuration.'
+if ($tauriConfigurationHash -ne '28ffc1d8a8b2b54c05312726a38fb8a83986fcd120404087a83c31fe912c87ca') {
+  throw 'tauri.conf.json changed from the natively tested G04B2 production configuration.'
 }
 $tauri = Get-Content -Raw $tauriConfigurationPath | ConvertFrom-Json
 if ($tauri.app.security.csp -ne $expectedCsp) {
-  throw 'The reviewed G03 CSP changed.'
+  throw 'The reviewed G04B2 CSP changed.'
 }
 if (@($tauri.app.windows).Count -ne 1 -or
     $tauri.app.windows[0].label -and $tauri.app.windows[0].label -ne 'main' -or
@@ -152,6 +152,36 @@ $viewerSource = Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src\viewer')
 if (($viewerSource -join "`n") -match '(?i)https?://|file://') {
   throw 'Viewer production source contains a network or file URL.'
 }
+$contractSource = Get-Content -Raw (Join-Path $repositoryRoot 'packages\contracts\src\index.ts')
+$rustContractSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\contracts.rs')
+$rustViewerSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\viewer_sessions.rs')
+$pdfSessionSource = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.ts')
+$pdfSessionTests = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.test.ts')
+$pdfMergeSource = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\pdf_merge.rs')
+if ($contractSource -notmatch 'CORE_PDF_MAX_PAGES = 4096' -or
+    $rustContractSource -notmatch 'CORE_PDF_MAX_PAGES: u32 = 4096' -or
+    $pdfSessionSource -notmatch 'validatePdfPageCount\(document\.numPages\);' -or
+    $pdfSessionSource -notmatch 'PDF_PAGE_COUNT_UNSUPPORTED' -or
+    $pdfSessionTests -notmatch 'CORE_PDF_MAX_PAGES \+ 1' -or
+    $pdfMergeSource -notmatch 'page_count == 0 \|\| page_count > u64::from\(CORE_PDF_MAX_PAGES\)' -or
+    $pdfMergeSource -notmatch '\.try_reserve_exact\(page_count\)') {
+  throw 'PDF page counts are not rejected at the PDF.js/qpdf boundary before page-sized allocation.'
+}
+if ($contractSource -notmatch 'RANGE_CHUNK_BYTES = 256 \* 1024' -or
+    $contractSource -notmatch 'MAX_RANGE_READS = 4' -or
+    $contractSource -notmatch 'MAX_QUEUED_RANGE_COUNT = 64' -or
+    $contractSource -notmatch 'MAX_QUEUED_RANGE_BYTES = 16 \* 1024 \* 1024' -or
+    $rustViewerSource -notmatch 'VIEWER_RANGE_CHUNK_BYTES: u64 = 256 \* 1024' -or
+    $pdfSessionSource -notmatch 'PDF_RANGE_QUEUE_LIMIT_EXCEEDED' -or
+    $pdfSessionSource -notmatch 'checkedQueueTotal' -or
+    $pdfSessionSource -notmatch 'transportEpoch' -or
+    $pdfSessionSource -notmatch 'references \+= 1' -or
+    $pdfSessionTests -notmatch 'rejects count plus one' -or
+    $pdfSessionTests -notmatch 'rejects bytes plus one' -or
+    $pdfSessionTests -notmatch 'replacement document' -or
+    $pdfSessionTests -notmatch 'sanitizes native range failures') {
+  throw 'PDF range queue admission, deduplication, cancellation, or cross-language chunk limits drifted.'
+}
 
 $distAssets = Join-Path $desktopRoot 'dist\assets'
 if (Test-Path -LiteralPath $distAssets) {
@@ -171,11 +201,13 @@ if (Test-Path -LiteralPath $releaseBinary) {
     'DOCUMENT_STUDIO_TEST_CDP_PORT',
     'DOCUMENT_STUDIO_TEST_WEBVIEW2_DATA_DIR',
     'DOCUMENT_STUDIO_TEST_APP_DATA',
+    'DOCUMENT_STUDIO_TEST_OUTPUT_DIRECTORY',
     'WEBVIEW2_USER_DATA_FOLDER',
     'VITE_NOT_READY',
     'WEBVIEW2_CDP_NOT_READY',
     'g03-webview2-',
     'viewer_open_test_fixture',
+    'viewer_grant_test_destination',
     'browserTestTransport',
     'playwright'
   )) {
@@ -193,4 +225,4 @@ if ($browserTransportSource -notmatch "import\.meta\.env\.MODE === 'test-browser
   throw 'The browser test transport is not compile-time gated to test-browser mode.'
 }
 
-Write-Output 'G03 dependency pins, exact PDF.js assets, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug arguments fail closed.'
+Write-Output 'G03 dependency pins, exact PDF.js assets, 4,096-page admission bound, CSP, capability, raw IPC and production/test boundaries verified; production remote-debug arguments fail closed.'

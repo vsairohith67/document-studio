@@ -1,0 +1,50 @@
+{
+  "operationManifest": {
+    "id": "pdf.to-images",
+    "version": "1.0.0",
+    "name": "PDF to Images",
+    "category": "convert",
+    "description": "Renders 1–128 selected PDF pages in exact order to verified local JPEG, PNG, or lossless WebP images.",
+    "risk": "normal",
+    "locality": "local",
+    "inputs": {
+      "acceptedMimeTypes": ["application/pdf"],
+      "minimum": 1,
+      "maximum": 1,
+      "allowDirectories": false
+    },
+    "settingsSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pages", "format", "dpi", "outputStem"],
+      "properties": {
+        "pages": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "type": "integer", "minimum": 0, "maximum": 4095 } },
+        "format": { "enum": ["jpeg", "png", "webp"] },
+        "dpi": { "enum": [72, 150, 300] },
+        "outputStem": { "type": "string", "minLength": 1, "maxLength": 96 }
+      }
+    },
+    "outputs": { "mimeType": "image/*", "multiplicity": "multiple" },
+    "dependencies": ["document-studio-core", "pdfjs", "qpdf"],
+    "verification": [
+      "regular-file", "pdf-magic", "sha256", "qpdf-strict-check", "unencrypted",
+      "page-plan", "dimension-cap", "pixel-cap", "aggregate-pixel-budget",
+      "authenticated-binary-ipc", "content-codec", "decoded-dimensions", "opaque-white",
+      "publication-hash", "source-immutability"
+    ],
+    "stages": ["inspect", "preflight", "estimate", "plan", "execute", "verify", "publish", "audit", "cleanup"]
+  },
+  "request": {
+    "viewerSessionId": "c118bb0d-bada-4f44-b5ef-4fcf12bb7512",
+    "viewerGeneration": 7,
+    "destinationGrantId": "9503134c-4071-4485-a753-e956dd8858e6",
+    "sourcePageCount": 3,
+    "pages": [
+      { "sourcePageIndex": 2, "width": 1275, "height": 1650 },
+      { "sourcePageIndex": 0, "width": 1275, "height": 1650 }
+    ],
+    "format": "png",
+    "dpi": 150,
+    "outputStem": "report"
+  }
+}
