@@ -110,6 +110,7 @@ mod tests {
     fn lifecycle_cannot_skip_forward_or_move_backward() {
         assert!(!can_transition(JobState::Queued, JobState::Running));
         assert!(!can_transition(JobState::Running, JobState::Ready));
+        assert!(!can_transition(JobState::Verifying, JobState::Completed));
         assert!(!can_transition(JobState::Publishing, JobState::Cancelled));
         assert!(!can_transition(JobState::Interrupted, JobState::Preflight));
         assert!(can_transition(JobState::Interrupted, JobState::Failed));

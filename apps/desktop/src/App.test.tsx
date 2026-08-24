@@ -46,8 +46,21 @@ function makeJob(state: JobRecord['state'] = 'queued'): JobRecord {
     progress: { completedUnits: state === 'completed' ? 12288 : 0, totalUnits: 12288, unit: 'bytes' },
     destinationDirectory: 'C:\\output', requestedOutputName: 'merged.pdf', resolvedOutputName: state === 'completed' ? 'merged.pdf' : null,
     cancellationRequestedAt: null, createdAt: '2026-08-17T12:00:00Z', updatedAt: '2026-08-17T12:00:01Z', finishedAt: state === 'completed' ? '2026-08-17T12:00:01Z' : null, version: 1,
+    completionKind: null, reason: null,
     inputs: [inputOne, inputTwo].map((input, ordinal) => ({ ordinal, displayName: input.displayName, sourcePath: input.path, canonicalPath: input.path, fileIdentity: input.fileIdentity, sizeBytes: input.sizeBytes, modifiedAt: input.modifiedAt, mimeType: input.mimeType, sha256: null, passwordReference: null })),
     outputs: [{ ordinal: 0, requestedName: 'merged.pdf', resolvedName: state === 'completed' ? 'merged.pdf' : null, stagingPath: null, partialPath: null, finalPath: state === 'completed' ? 'C:\\output\\merged.pdf' : null, sizeBytes: state === 'completed' ? 10000 : null, mimeType: 'application/pdf', sha256: state === 'completed' ? 'a'.repeat(64) : null, status: state === 'completed' ? 'published' : 'planned', verifiedAt: null, publishedAt: null }], errors: [],
+  };
+}
+
+function noBenefitJob(): JobRecord {
+  return {
+    ...makeJob('completed'),
+    stage: null,
+    completionKind: 'no-benefit',
+    reason: 'savings-threshold-not-met',
+    resolvedOutputName: null,
+    outputs: [],
+    errors: [],
   };
 }
 
@@ -198,6 +211,24 @@ describe('G02 PDF Merge screen', () => {
     const user = userEvent.setup(); const interrupted = makeJob('interrupted'); mocks.list.mockResolvedValue([interrupted]);
     render(<App />); await user.click(await screen.findByRole('button', { name: 'Resolve safely' }));
     expect(mocks.resolveInterrupted).toHaveBeenCalledWith({ jobId: interrupted.id });
+  });
+
+  it('renders a successful no-benefit outcome without output actions or failure styling', async () => {
+    const user = userEvent.setup();
+    mocks.list.mockResolvedValue([noBenefitJob()]);
+    mocks.get.mockResolvedValue(noBenefitJob());
+    render(<App />);
+    expect((await screen.findByLabelText('Completed — no benefit')).textContent).toBe('No benefit');
+    expect(screen.getByText('No output created')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /Add PDFs/ }));
+    await user.click(screen.getByRole('button', { name: 'Choose' }));
+    await user.click(screen.getByRole('button', { name: 'Merge PDFs' }));
+    await act(async () => mocks.progressHandler?.(progress('COMPRESSION_NO_BENEFIT', 'completed')));
+    expect(await screen.findByText('No worthwhile size reduction')).toBeTruthy();
+    expect(screen.getByText('The private candidate did not meet both requirements: at least 5% and 64 KiB smaller. No file was created, and your original stayed unchanged.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Copy path|Open output|Reveal output/i })).toBeNull();
+    expect(screen.queryByText(/Saved successfully/i)).toBeNull();
+    expect(screen.getByText('No worthwhile size reduction').parentElement?.classList.contains('failure-result')).toBe(false);
   });
 
   it('supports pointer drag reorder without making it the only reorder path', async () => {

@@ -35,6 +35,8 @@ The verified bundled qpdf 12.3.2 executable runs through direct `CreateProcessW`
 
 Output stays in the owned workspace until Rust file checks, a new SHA-256/size read, strict qpdf reopen, encryption check, and exact page-count sum pass. G01 then performs destination-local no-overwrite publication and final hash/size equality. Restart recovery never resumes a merge.
 
+G04C2A preserves that publication path while adding a distinct successful no-publication outcome. The generic state graph continues to reject `Verifying → Completed`; an internal immediate CAS transaction may take that edge only after marker-owned cleanup and zero-output/error/name checks. Startup recovery validates all explicit outcomes, leaves valid completed no-benefit metadata untouched and never treats it as a path or deletion instruction.
+
 ## G03 viewer and organizer path
 
 The Viewer is a second workbench mode; it does not replace PDF Merge or any IPC v1 command. A backend native dialog or Rust-side Tauri drop opens one validated PDF through a retained read-only Windows handle that denies write/delete sharing. An opaque session/generation maps to that handle and identity record. PDF.js receives only raw bounded range responses and same-origin packaged assets; neither PDF.js nor React receives the source path.

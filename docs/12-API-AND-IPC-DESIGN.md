@@ -25,6 +25,10 @@ G01 emits one advisory event, `document-studio-job-progress-v1`. It contains sch
 
 SQLite-backed `jobs_get` and `history_list` are authoritative. The client ignores duplicate/stale sequences and calls `jobs_get` after a sequence gap or reload.
 
+Migration 6 extends every `JobRecord` response with required nullable `completionKind` and `reason` fields. Accepted wire combinations are `null`/`null`, `published`/`null`, and `no-benefit`/`savings-threshold-not-met`. The fields are serialized even when null. `jobs_get`, `history_list`, recovery resolution and frontend polling all use the same repository loader and therefore the same fail-closed cross-table validation.
+
+G04C2A adds no command. In particular, React cannot invoke the specialized no-benefit or published completion transactions and cannot create terminal evidence. Existing IPC names, capabilities, path redaction and local-only boundaries remain unchanged.
+
 `jobs_resolve_interrupted` performs one evidence-based, non-resuming reconciliation. It completes only already-published output with matching durable evidence, otherwise fails after exact cleanup, and remains interrupted on cleanup failure. It rejects ambiguous `1.0.0` records with `LEGACY_CLEANUP_UNPROVEN`. `history_delete` exposes the same safe error instead of deleting a mixed request partially. Settings IPC permits retention only at `application/history.retention_days`.
 
 ## Future cloud API

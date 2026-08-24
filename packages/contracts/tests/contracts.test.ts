@@ -45,6 +45,23 @@ describe('foundation contracts', () => {
     expect(validateJob(candidate)).toBe(false);
   });
 
+  it.each([
+    ['legacy null outcome', { completionKind: null, reason: null }],
+    ['published outcome', { completionKind: 'published', reason: null }],
+    ['no-benefit outcome', { completionKind: 'no-benefit', reason: 'savings-threshold-not-met' }],
+  ])('accepts %s', (_label, outcome) => {
+    expect(validateJob({ ...fixtures.job, ...outcome }), JSON.stringify(validateJob.errors)).toBe(true);
+  });
+
+  it.each([
+    ['null kind with reason', { completionKind: null, reason: 'savings-threshold-not-met' }],
+    ['published with reason', { completionKind: 'published', reason: 'savings-threshold-not-met' }],
+    ['no-benefit without reason', { completionKind: 'no-benefit', reason: null }],
+    ['no-benefit with another reason', { completionKind: 'no-benefit', reason: 'candidate-grew' }],
+  ])('rejects invalid completion outcome: %s', (_label, outcome) => {
+    expect(validateJob({ ...fixtures.job, ...outcome })).toBe(false);
+  });
+
   it('rejects an operation that skips a lifecycle stage', () => {
     const candidate = {
       ...fixtures.operationManifest,

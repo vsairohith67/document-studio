@@ -1,5 +1,6 @@
 use document_studio_lib::contracts::{
-    FilesInspectRequest, JobRecord, JobState, OperationManifest, ProgressEvent,
+    FilesInspectRequest, JobCompletionKind, JobCompletionReason, JobRecord, JobState,
+    OperationManifest, ProgressEvent,
 };
 use document_studio_lib::ipc::files_inspect;
 use document_studio_lib::job_engine::{apply_transition, can_transition, TransitionError};
@@ -29,6 +30,8 @@ fn rust_deserializes_and_round_trips_shared_golden_payloads() {
     assert_eq!(event.job_id, job.id);
     assert_eq!(operation.id, "diagnostic.copy");
     assert_eq!(operation.version, "1.0.1");
+    assert_eq!(job.completion_kind, None);
+    assert_eq!(job.reason, None);
     assert_eq!(serde_json::to_value(&job).unwrap(), fixture["job"]);
     assert_eq!(
         serde_json::to_value(&event).unwrap(),
@@ -37,6 +40,22 @@ fn rust_deserializes_and_round_trips_shared_golden_payloads() {
     assert_eq!(
         serde_json::to_value(&operation).unwrap(),
         fixture["operationManifest"]
+    );
+}
+
+#[test]
+fn rust_completion_outcome_enums_match_the_wire_contract() {
+    assert_eq!(
+        serde_json::to_value(JobCompletionKind::Published).unwrap(),
+        "published"
+    );
+    assert_eq!(
+        serde_json::to_value(JobCompletionKind::NoBenefit).unwrap(),
+        "no-benefit"
+    );
+    assert_eq!(
+        serde_json::to_value(JobCompletionReason::SavingsThresholdNotMet).unwrap(),
+        "savings-threshold-not-met"
     );
 }
 

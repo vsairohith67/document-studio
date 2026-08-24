@@ -27,6 +27,7 @@ The G01 database is opened by one blocking Rust repository worker. It enables fo
 - `presets`: operation-scoped metadata and settings only.
 - `jobs`, `job_inputs`, `job_outputs`, `job_stage_runs`, `job_errors`: durable lifecycle, progress, paths, identities, hashes, publication evidence and sanitized errors.
 - `workflows`, `workflow_steps`, `workflow_runs`, `workflow_run_jobs`: metadata foundation only; G01 does not execute workflows.
+- `job_completion_outcomes`: optional strict completion-kind metadata added by migration 6; one row per job at most, with cascade deletion.
 
 Constraints restrict states, stages, statuses, non-negative units and ordinals, JSON validity and SHA-256 length. Indexed fields include state/update time, operation/create time, retention time, dependency status and workflow-run status. No migration contains a BLOB column.
 
@@ -65,3 +66,13 @@ Rust independently validates the exact UTF-8 byte length, operation/payload matc
 All expected `job_outputs` rows, with stable ordinals and requested names, are inserted in the same job-creation transaction before processing. Completion is legal only when every expected output is `published` with final path/hash/size evidence. A later publication failure leaves earlier published rows intact, records `PARTIAL_PUBLICATION`, and terminates the job as failed. Recovery preserves published user files and never infers all-or-nothing publication.
 
 Older `diagnostic.copy` and `pdf.merge` jobs have no plan row and remain valid. Migration checksums are append-only; an older binary must not open schema 4. Rollback uses a pre-migration backup rather than an in-place table drop.
+
+## G04C2A migration 6 and successful no-publication outcomes
+
+`0006_job_completion_outcomes.sql` adds one optional strict row keyed to `jobs.id`. `completion_kind` is only `published` or `no-benefit`; `reason` is null for published and exactly `savings-threshold-not-met` for no-benefit. The null-safe SQLite constraint rejects missing and arbitrary no-benefit reasons. The table stores only the job ID, enum values and creation time—no path, generic JSON, document content, candidate bytes or backfill.
+
+Loading an explicit outcome validates the full cross-table contract. Published requires completed state, a finish time, a resolved output name, at least one fully published output, accepted final evidence and no staging/partial ownership. No-benefit requires completed state, a finish time, zero outputs, zero errors, no resolved output name and no temporary output ownership. Existing rows without an outcome load as `null`/`null` and keep their prior evidence rules.
+
+No-benefit completion is one `IMMEDIATE` transaction: exact state/version/cancellation/output/error/outcome/name preconditions, exact outcome insertion, and the terminal state/progress/time/sequence update. A failed insert or update rolls back both. The internal published helper likewise records the published outcome in the same transaction as the future operation's truthful terminal update. Neither helper is exposed through IPC.
+
+Retention and `history_delete` validate explicit outcomes before deletion; a valid no-benefit row cascades with its job without a filesystem operation. Startup recovery includes every job with an explicit outcome so invalid combinations fail closed. Valid completed no-benefit metadata is left untouched and has no final path to reconcile.

@@ -66,8 +66,21 @@ function job(state: JobRecord['state'], afterBytes: number | null = null): JobRe
     resolvedOutputName: state === 'completed' ? 'signed-report-compressed.pdf' : null,
     cancellationRequestedAt: null, createdAt: '2026-08-21T12:00:00Z', updatedAt: '2026-08-21T12:00:01Z',
     finishedAt: state === 'completed' ? '2026-08-21T12:00:01Z' : null, version: 1,
+    completionKind: null, reason: null,
     inputs: [{ ordinal: 0, displayName: source.displayName, sourcePath: source.path, canonicalPath: source.path, fileIdentity: source.fileIdentity, sizeBytes: source.sizeBytes, modifiedAt: source.modifiedAt, mimeType: source.mimeType, sha256: 'a'.repeat(64), passwordReference: null }],
     outputs: [{ ordinal: 0, requestedName: 'signed-report-compressed.pdf', resolvedName: state === 'completed' ? 'signed-report-compressed.pdf' : null, stagingPath: null, partialPath: null, finalPath: state === 'completed' ? 'C:\\output\\signed-report-compressed.pdf' : null, sizeBytes: afterBytes, mimeType: 'application/pdf', sha256: state === 'completed' ? 'b'.repeat(64) : null, status: state === 'completed' ? 'published' : 'planned', verifiedAt: state === 'completed' ? '2026-08-21T12:00:01Z' : null, publishedAt: state === 'completed' ? '2026-08-21T12:00:01Z' : null }],
+    errors: [],
+  };
+}
+
+function noBenefitJob(): JobRecord {
+  return {
+    ...job('completed'),
+    stage: null,
+    completionKind: 'no-benefit',
+    reason: 'savings-threshold-not-met',
+    resolvedOutputName: null,
+    outputs: [],
     errors: [],
   };
 }
@@ -128,6 +141,19 @@ describe('G04A Optimize workspace', () => {
     expect(screen.getByText('+250 B · +25.00%')).toBeTruthy();
     expect(screen.queryByText(/Saved/)).toBeNull();
     expect(document.activeElement).toBe(screen.getByText('Verified compressed PDF').parentElement);
+  });
+
+  it('shows the exact no-benefit result and exposes no output action', async () => {
+    const user = userEvent.setup();
+    mocks.get.mockResolvedValue(noBenefitJob());
+    renderWorkspace();
+    await user.click(screen.getByRole('button', { name: /Open PDF/ }));
+    await user.click(screen.getByRole('button', { name: 'Choose' }));
+    await user.click(screen.getByRole('button', { name: 'Compress' }));
+    await act(async () => { mocks.progressHandler?.(completedEvent()); });
+    expect(await screen.findByText('No worthwhile size reduction')).toBeTruthy();
+    expect(screen.getByText('No output created')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Copy saved path|Open PDF Viewer/i })).toBeNull();
   });
 
   it('rejects multiple selections and restores focus after removing a source', async () => {

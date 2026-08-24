@@ -2,13 +2,22 @@
 
 All notable planning-package and software releases are recorded here.
 
-## 0.5.1-g04b2-pdf-to-images - unreleased
+## 0.6.0-g04c2a-completion-outcomes - unreleased
+
+- Added migration 6 with a strict metadata-only `job_completion_outcomes` table and no backfill or changes to migration checksums 1–5.
+- Added required nullable Rust, TypeScript and JSON Schema `completionKind`/`reason` fields with fail-closed cross-table evidence validation.
+- Added internal immediate-CAS transactions for truthful no-benefit and future published completion while keeping generic `Verifying → Completed` illegal and adding no IPC command.
+- Added recovery, retention, history and accessible neutral no-output rendering without a fake output, file action, failure state or balanced-compression control.
+- Added ADR-015 and focused migration/contract/repository/recovery/UI/privacy evidence. G04C2 balanced compression remains unimplemented until G04C2B.
+
+## 0.5.1-g04b2-pdf-to-images - 2026-08-23
 
 - Added `pdf.to-images@1.0.0` using the accepted local PDF.js 6.2.108 renderer and existing `image` 0.25.10 encoder; no new native renderer, runtime download, network or capability was introduced.
 - Added ordered 1-128 page export to PNG, fixed-quality JPEG and lossless WebP at exactly 72, 150 or 300 DPI, with per-page 8,192-axis/16,777,216-pixel caps and a 67,108,864-pixel aggregate budget.
 - Added sequential private-canvas rendering, authenticated one-use binary RGBA IPC, strict Rust size/alpha/sequence/ownership checks, exact/tolerant visual verification and durable collision-safe multi-output publication.
 - Enabled the accessible PDF-to-images Convert flow with shared viewer thumbnails, output-name preview, keyboard ordering, per-output progress, cancellation and truthful partial-publication reporting.
 - Superseded the ADR-013 renderer blocker, added a G04B2 boundary verifier and focused contract, native, frontend and existing-framework PDF.js browser evidence. G04C and G05 remain excluded.
+- Accepted and merged G04B2 to main at `b5901a7baca58b3acb1ee00027e42b0059c59fd4`.
 
 ## 0.5.0-g04b-image-pdf-conversion - 2026-08-22
 

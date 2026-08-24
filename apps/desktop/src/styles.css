@@ -160,9 +160,10 @@ h2 { margin-bottom: var(--ds-core-space-2); font-size: 1.15rem; letter-spacing: 
 .indeterminate-bar::after { content: ''; position: absolute; inset-block: 0; width: 35%; background: var(--ds-core-color-accent); animation: merge-progress 1.2s ease-in-out infinite alternate; }
 @keyframes merge-progress { from { transform: translateX(-10%); } to { transform: translateX(210%); } }
 .publishing-copy { margin: 0; color: var(--ds-core-color-warning); font-size: .84rem; }
-.success-result, .failure-result { display: grid; gap: var(--ds-core-space-2); padding: var(--ds-core-space-3); border-left: var(--ds-core-space-1) solid var(--ds-core-color-success); background: var(--ds-light-background); }
+.success-result, .failure-result, .no-benefit-result { display: grid; gap: var(--ds-core-space-2); padding: var(--ds-core-space-3); border-left: var(--ds-core-space-1) solid var(--ds-core-color-success); background: var(--ds-light-background); }
 .failure-result { border-left-color: var(--ds-core-color-danger); }
-.success-result span, .failure-result span { font-size: .84rem; color: var(--ds-core-color-muted); }
+.no-benefit-result { border-left-color: var(--ds-core-color-accent); }
+.success-result span, .failure-result span, .no-benefit-result span, .no-benefit-result small { font-size: .84rem; color: var(--ds-core-color-muted); }
 .job-warnings { padding: var(--ds-core-space-3); border-left: var(--ds-core-space-1) solid var(--ds-core-color-warning); background: var(--ds-light-background); }
 .job-warnings ul { margin: var(--ds-core-space-2) 0 0; padding-left: var(--ds-core-space-5); color: var(--ds-core-color-muted); font-size: .84rem; }
 .selection-row {
@@ -217,6 +218,7 @@ progress { width: 100%; height: var(--ds-core-space-2); accent-color: var(--ds-c
 .history-row .cleanup-warning { color: var(--ds-core-color-danger); max-width: 70ch; }
 .job-state { justify-content: center; background: var(--ds-light-background); color: var(--ds-core-color-muted); text-transform: capitalize; }
 .state-completed { color: var(--ds-core-color-success); }
+.state-no-benefit { color: var(--ds-core-color-accent); }
 .state-failed { color: var(--ds-core-color-danger); }
 .state-interrupted { color: var(--ds-core-color-warning); }
 .empty-state { margin: 0; padding: var(--ds-core-space-6); color: var(--ds-core-color-muted); }

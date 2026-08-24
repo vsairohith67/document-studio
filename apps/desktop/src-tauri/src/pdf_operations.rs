@@ -128,6 +128,8 @@ impl PdfPageOperationService {
             updated_at: timestamp,
             finished_at: None,
             version: 0,
+            completion_kind: None,
+            reason: None,
             inputs: vec![JobInput {
                 ordinal: 0,
                 display_name: source.display_name.clone(),

@@ -9,13 +9,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::contracts::{
-    DependencyDiagnostic, JobInput, JobOutput, JobProgress, JobRecord, JobState, JobWarning,
-    OperationError, OperationSpecEnvelope, OperationStage, OutputStatus, ProgressUnit,
-    SettingRecord, StoredOperationPlan, StoredOperationSpec, DEFAULT_HISTORY_RETENTION_DAYS,
-    DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY, HISTORY_RETENTION_SCOPE,
-    LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN, LEGACY_DIAGNOSTIC_COPY_VERSION,
-    MAX_HISTORY_PURGE, OPERATION_PLAN_MAX_BYTES, OPERATION_PLAN_SCHEMA_VERSION,
-    OPERATION_SPEC_MAX_BYTES, OPERATION_SPEC_SCHEMA_VERSION,
+    DependencyDiagnostic, JobCompletionKind, JobCompletionReason, JobInput, JobOutput, JobProgress,
+    JobRecord, JobState, JobWarning, OperationError, OperationSpecEnvelope, OperationStage,
+    OutputStatus, ProgressUnit, SettingRecord, StoredOperationPlan, StoredOperationSpec,
+    DEFAULT_HISTORY_RETENTION_DAYS, DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY,
+    HISTORY_RETENTION_SCOPE, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
+    LEGACY_DIAGNOSTIC_COPY_VERSION, MAX_HISTORY_PURGE, OPERATION_PLAN_MAX_BYTES,
+    OPERATION_PLAN_SCHEMA_VERSION, OPERATION_SPEC_MAX_BYTES, OPERATION_SPEC_SCHEMA_VERSION,
 };
 use crate::job_engine::can_transition;
 
@@ -60,6 +60,11 @@ pub const FOUNDATION_MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "job_operation_specs_and_warnings",
         sql: include_str!("../migrations/0005_job_operation_specs_and_warnings.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "job_completion_outcomes",
+        sql: include_str!("../migrations/0006_job_completion_outcomes.sql"),
     },
 ];
 
@@ -170,6 +175,11 @@ impl Database {
         plan: Option<&StoredOperationPlan>,
         spec: Option<&StoredOperationSpec>,
     ) -> Result<(), DatabaseError> {
+        if job.completion_kind.is_some() || job.reason.is_some() {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "new job completion outcome",
+            });
+        }
         let sequence = metadata_i64(job.sequence, "job sequence")?;
         let completed_units = metadata_i64(job.progress.completed_units, "completed units")?;
         let total_units = metadata_i64(job.progress.total_units, "total units")?;
@@ -543,6 +553,7 @@ impl Database {
         let inputs = self.load_inputs(id)?;
         let outputs = self.load_outputs(id)?;
         let errors = self.load_errors(id)?;
+        let (completion_kind, reason) = self.load_completion_outcome(id)?;
         let stage = match stage {
             Some(value) => Some(
                 OperationStage::from_contract(&value)
@@ -551,7 +562,7 @@ impl Database {
             None => None,
         };
 
-        Ok(Some(JobRecord {
+        let job = JobRecord {
             id: id.to_owned(),
             operation_id,
             operation_version,
@@ -576,10 +587,14 @@ impl Database {
             updated_at,
             finished_at,
             version,
+            completion_kind,
+            reason,
             inputs,
             outputs,
             errors,
-        }))
+        };
+        validate_loaded_completion_outcome(&job)?;
+        Ok(Some(job))
     }
 
     pub fn list_jobs(&self, limit: u32) -> Result<Vec<JobRecord>, DatabaseError> {
@@ -636,6 +651,174 @@ impl Database {
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
         }
+        Ok(expected_version + 1)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn complete_no_benefit(
+        &mut self,
+        id: &str,
+        expected_version: u64,
+        reason: JobCompletionReason,
+        timestamp: &str,
+    ) -> Result<u64, DatabaseError> {
+        validate_completion_timestamp(timestamp)?;
+        let expected_version_i64 = metadata_i64(expected_version, "job version")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let header = transaction
+            .query_row(
+                "SELECT state, version, cancellation_requested_at, resolved_output_name
+                 FROM jobs WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row_u64(row, 1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, version, cancellation_requested_at, resolved_output_name)) = header else {
+            return Err(DatabaseError::JobConflict);
+        };
+        if state != JobState::Verifying.as_str()
+            || version != expected_version
+            || cancellation_requested_at.is_some()
+        {
+            return Err(DatabaseError::JobConflict);
+        }
+        if resolved_output_name.is_some() {
+            return Err(DatabaseError::TerminalEvidenceMissing);
+        }
+        let output_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM job_outputs WHERE job_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let error_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM job_errors WHERE job_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let outcome_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM job_completion_outcomes WHERE job_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if output_count != 0 || error_count != 0 {
+            return Err(DatabaseError::TerminalEvidenceMissing);
+        }
+        if outcome_count != 0 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.execute(
+            "INSERT INTO job_completion_outcomes (
+                job_id, completion_kind, reason, created_at
+             ) VALUES (?1, 'no-benefit', ?2, ?3)",
+            params![id, reason.as_str(), timestamp],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs
+             SET state = 'completed', stage = NULL, completed_units = total_units,
+                 finished_at = ?1, updated_at = ?1,
+                 version = version + 1, sequence = sequence + 1
+             WHERE id = ?2 AND state = 'verifying' AND version = ?3
+               AND cancellation_requested_at IS NULL AND resolved_output_name IS NULL",
+            params![timestamp, id, expected_version_i64],
+        )?;
+        if changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.commit()?;
+        Ok(expected_version + 1)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn complete_published(
+        &mut self,
+        id: &str,
+        expected_version: u64,
+        timestamp: &str,
+    ) -> Result<u64, DatabaseError> {
+        validate_completion_timestamp(timestamp)?;
+        let expected_version_i64 = metadata_i64(expected_version, "job version")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let header = transaction
+            .query_row(
+                "SELECT state, version, cancellation_requested_at, resolved_output_name
+                 FROM jobs WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row_u64(row, 1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((state, version, cancellation_requested_at, resolved_output_name)) = header else {
+            return Err(DatabaseError::JobConflict);
+        };
+        if state != JobState::Publishing.as_str()
+            || version != expected_version
+            || cancellation_requested_at.is_some()
+        {
+            return Err(DatabaseError::JobConflict);
+        }
+        if resolved_output_name.is_none() {
+            return Err(DatabaseError::TerminalEvidenceMissing);
+        }
+        let (expected_outputs, published_outputs): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN status = 'published'
+                                      AND resolved_name IS NOT NULL
+                                      AND staging_path IS NULL AND partial_path IS NULL
+                                      AND final_path IS NOT NULL AND size_bytes IS NOT NULL
+                                      AND sha256 IS NOT NULL AND verified_at IS NOT NULL
+                                      AND published_at IS NOT NULL
+                                     THEN 1 ELSE 0 END), 0)
+             FROM job_outputs WHERE job_id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let outcome_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM job_completion_outcomes WHERE job_id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if expected_outputs == 0 || published_outputs != expected_outputs {
+            return Err(DatabaseError::TerminalEvidenceMissing);
+        }
+        if outcome_count != 0 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.execute(
+            "INSERT INTO job_completion_outcomes (
+                job_id, completion_kind, reason, created_at
+             ) VALUES (?1, 'published', NULL, ?2)",
+            params![id, timestamp],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs
+             SET state = 'completed', stage = NULL, completed_units = total_units,
+                 finished_at = ?1, updated_at = ?1,
+                 version = version + 1, sequence = sequence + 1
+             WHERE id = ?2 AND state = 'publishing' AND version = ?3
+               AND cancellation_requested_at IS NULL AND resolved_output_name IS NOT NULL",
+            params![timestamp, id, expected_version_i64],
+        )?;
+        if changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.commit()?;
         Ok(expected_version + 1)
     }
 
@@ -1246,12 +1429,14 @@ impl Database {
                 "SELECT DISTINCT jobs.id
                  FROM jobs
                  LEFT JOIN job_outputs ON job_outputs.job_id = jobs.id
+                 LEFT JOIN job_completion_outcomes ON job_completion_outcomes.job_id = jobs.id
                  WHERE jobs.state IN (
                     'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying',
                     'publishing', 'interrupted'
                  )
                  OR (jobs.operation_id = ?1 AND jobs.operation_version = ?2)
                  OR job_outputs.staging_path IS NOT NULL OR job_outputs.partial_path IS NOT NULL
+                 OR job_completion_outcomes.job_id IS NOT NULL
                  ORDER BY jobs.created_at",
             )?;
             let ids = statement
@@ -1385,6 +1570,9 @@ impl Database {
     }
 
     pub fn delete_terminal_history(&mut self, ids: &[String]) -> Result<usize, DatabaseError> {
+        for id in ids.iter().take(200) {
+            let _ = self.get_job(id)?;
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1426,40 +1614,58 @@ impl Database {
     }
 
     pub fn purge_terminal_before(&mut self, cutoff: &str) -> Result<usize, DatabaseError> {
-        self.connection
-            .execute(
-                "DELETE FROM jobs
-                 WHERE id IN (
-                    SELECT jobs.id FROM jobs
-                    WHERE jobs.state IN ('completed', 'failed', 'cancelled')
-                      AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?1
-                      AND NOT (
-                        jobs.operation_id = ?2 AND jobs.operation_version = ?3
-                        AND (
-                            EXISTS(
-                                SELECT 1 FROM job_errors
-                                WHERE job_id = jobs.id AND code = ?4
-                            )
-                            OR NOT EXISTS(
-                                SELECT 1 FROM job_stage_runs
-                                WHERE job_id = jobs.id AND stage = 'recovery'
-                                  AND safe_result_code = ?5
-                            )
-                        )
-                      )
-                    ORDER BY jobs.finished_at, jobs.id
-                    LIMIT ?6
-                 )",
-                params![
-                    cutoff,
-                    DIAGNOSTIC_COPY_OPERATION_ID,
-                    LEGACY_DIAGNOSTIC_COPY_VERSION,
-                    LEGACY_CLEANUP_UNPROVEN,
-                    LEGACY_CLEANUP_PROVEN,
-                    MAX_HISTORY_PURGE as i64,
-                ],
-            )
-            .map_err(Into::into)
+        let ids = {
+            let mut statement = self.connection.prepare(
+                "SELECT jobs.id FROM jobs
+                 WHERE jobs.state IN ('completed', 'failed', 'cancelled')
+                   AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?1
+                   AND NOT (
+                     jobs.operation_id = ?2 AND jobs.operation_version = ?3
+                     AND (
+                       EXISTS(
+                         SELECT 1 FROM job_errors
+                         WHERE job_id = jobs.id AND code = ?4
+                       )
+                       OR NOT EXISTS(
+                         SELECT 1 FROM job_stage_runs
+                         WHERE job_id = jobs.id AND stage = 'recovery'
+                           AND safe_result_code = ?5
+                       )
+                     )
+                   )
+                 ORDER BY jobs.finished_at, jobs.id
+                 LIMIT ?6",
+            )?;
+            let ids = statement
+                .query_map(
+                    params![
+                        cutoff,
+                        DIAGNOSTIC_COPY_OPERATION_ID,
+                        LEGACY_DIAGNOSTIC_COPY_VERSION,
+                        LEGACY_CLEANUP_UNPROVEN,
+                        LEGACY_CLEANUP_PROVEN,
+                        MAX_HISTORY_PURGE as i64,
+                    ],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        for id in &ids {
+            let _ = self.get_job(id)?;
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut deleted = 0;
+        for id in ids {
+            deleted += transaction.execute(
+                "DELETE FROM jobs WHERE id = ?1 AND state IN ('completed', 'failed', 'cancelled')",
+                [id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     pub fn ensure_application_retention_setting(&mut self) -> Result<SettingRecord, DatabaseError> {
@@ -1648,6 +1854,38 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    fn load_completion_outcome(
+        &self,
+        id: &str,
+    ) -> Result<(Option<JobCompletionKind>, Option<JobCompletionReason>), DatabaseError> {
+        let stored = self
+            .connection
+            .query_row(
+                "SELECT completion_kind, reason
+                 FROM job_completion_outcomes WHERE job_id = ?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((kind, reason)) = stored else {
+            return Ok((None, None));
+        };
+        let kind =
+            JobCompletionKind::from_contract(&kind).ok_or(DatabaseError::InvalidContractValue {
+                field: "completion kind",
+            })?;
+        let reason = reason
+            .map(|value| {
+                JobCompletionReason::from_contract(&value).ok_or(
+                    DatabaseError::InvalidContractValue {
+                        field: "completion reason",
+                    },
+                )
+            })
+            .transpose()?;
+        Ok((Some(kind), reason))
+    }
+
     fn load_errors(&self, id: &str) -> Result<Vec<OperationError>, DatabaseError> {
         let mut statement = self.connection.prepare(
             "SELECT code, title, sanitized_detail, stage, retryable, input_index, help_id
@@ -1674,6 +1912,71 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+}
+
+fn validate_completion_timestamp(timestamp: &str) -> Result<(), DatabaseError> {
+    DateTime::parse_from_rfc3339(timestamp).map_err(|_| DatabaseError::InvalidContractValue {
+        field: "completion timestamp",
+    })?;
+    Ok(())
+}
+
+fn validate_loaded_completion_outcome(job: &JobRecord) -> Result<(), DatabaseError> {
+    let Some(kind) = job.completion_kind else {
+        return if job.reason.is_none() {
+            Ok(())
+        } else {
+            Err(DatabaseError::InvalidContractValue {
+                field: "completion outcome",
+            })
+        };
+    };
+    if job.state != JobState::Completed || job.finished_at.is_none() {
+        return Err(DatabaseError::InvalidContractValue {
+            field: "completion outcome state",
+        });
+    }
+    if job.cancellation_requested_at.is_some() {
+        return Err(DatabaseError::InvalidContractValue {
+            field: "completion outcome cancellation",
+        });
+    }
+    match kind {
+        JobCompletionKind::Published => {
+            let every_output_is_fully_published = !job.outputs.is_empty()
+                && job.outputs.iter().all(|output| {
+                    output.status == OutputStatus::Published
+                        && output.resolved_name.is_some()
+                        && output.staging_path.is_none()
+                        && output.partial_path.is_none()
+                        && output.final_path.is_some()
+                        && output.size_bytes.is_some()
+                        && output.sha256.is_some()
+                        && output.verified_at.is_some()
+                        && output.published_at.is_some()
+                });
+            if job.reason.is_some()
+                || job.resolved_output_name.is_none()
+                || !every_output_is_fully_published
+            {
+                return Err(DatabaseError::InvalidContractValue {
+                    field: "published completion evidence",
+                });
+            }
+        }
+        JobCompletionKind::NoBenefit => {
+            if job.reason != Some(JobCompletionReason::SavingsThresholdNotMet)
+                || !job.outputs.is_empty()
+                || !job.errors.is_empty()
+                || job.resolved_output_name.is_some()
+            {
+                return Err(DatabaseError::InvalidContractValue {
+                    field: "no-benefit completion evidence",
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn configure_connection(connection: &Connection) -> Result<(), DatabaseError> {
@@ -1800,4 +2103,496 @@ fn validate_setting(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod completion_outcome_tests {
+    use super::{Database, DatabaseError};
+    use crate::contracts::{
+        JobCompletionKind, JobCompletionReason, JobInput, JobOutput, JobProgress, JobRecord,
+        JobState, OperationError, OperationStage, OutputStatus, ProgressUnit,
+    };
+    use std::sync::{Arc, Barrier};
+
+    const COMPLETED_AT: &str = "2026-08-25T12:00:00Z";
+
+    fn outcome_job(id: &str) -> JobRecord {
+        JobRecord {
+            id: id.to_owned(),
+            operation_id: "pdf.compress-balanced".to_owned(),
+            operation_version: "1.0.0".to_owned(),
+            state: JobState::Verifying,
+            stage: Some(OperationStage::Verify),
+            sequence: 7,
+            progress: JobProgress {
+                completed_units: 4,
+                total_units: 5,
+                unit: ProgressUnit::Steps,
+            },
+            destination_directory: r"C:\output".to_owned(),
+            requested_output_name: "balanced.pdf".to_owned(),
+            resolved_output_name: None,
+            cancellation_requested_at: None,
+            created_at: "2026-08-25T11:59:00Z".to_owned(),
+            updated_at: "2026-08-25T11:59:30Z".to_owned(),
+            finished_at: None,
+            version: 3,
+            completion_kind: None,
+            reason: None,
+            inputs: vec![JobInput {
+                ordinal: 0,
+                display_name: "source.pdf".to_owned(),
+                source_path: r"C:\input\source.pdf".to_owned(),
+                canonical_path: r"C:\input\source.pdf".to_owned(),
+                file_identity: "volume:file".to_owned(),
+                size_bytes: 200_000,
+                modified_at: "2026-08-25T11:58:00Z".to_owned(),
+                mime_type: "application/pdf".to_owned(),
+                sha256: Some("a".repeat(64)),
+                password_reference: None,
+            }],
+            outputs: vec![],
+            errors: vec![],
+        }
+    }
+
+    fn planned_output() -> JobOutput {
+        JobOutput {
+            ordinal: 0,
+            requested_name: "balanced.pdf".to_owned(),
+            resolved_name: None,
+            staging_path: None,
+            partial_path: None,
+            final_path: None,
+            size_bytes: None,
+            mime_type: "application/pdf".to_owned(),
+            sha256: None,
+            status: OutputStatus::Planned,
+            verified_at: None,
+            published_at: None,
+        }
+    }
+
+    #[test]
+    fn no_benefit_completion_is_atomic_and_loads_as_success_without_output() {
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000001");
+        database.create_job(&job).unwrap();
+
+        let next_version = database
+            .complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT,
+            )
+            .unwrap();
+        let completed = database.get_job(&job.id).unwrap().unwrap();
+        assert_eq!(next_version, 4);
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(completed.stage, None);
+        assert_eq!(completed.version, 4);
+        assert_eq!(completed.sequence, 8);
+        assert_eq!(completed.progress.completed_units, 5);
+        assert_eq!(completed.finished_at.as_deref(), Some(COMPLETED_AT));
+        assert_eq!(
+            completed.completion_kind,
+            Some(JobCompletionKind::NoBenefit)
+        );
+        assert_eq!(
+            completed.reason,
+            Some(JobCompletionReason::SavingsThresholdNotMet)
+        );
+        assert!(completed.outputs.is_empty());
+        assert!(completed.errors.is_empty());
+    }
+
+    #[test]
+    fn no_benefit_completion_rejects_every_precondition_failure() {
+        let mut wrong_state = outcome_job("018f0f17-2f4a-7fb1-a247-600000000002");
+        wrong_state.state = JobState::Running;
+        let mut database = Database::open_in_memory().unwrap();
+        database.create_job(&wrong_state).unwrap();
+        assert!(matches!(
+            database.complete_no_benefit(
+                &wrong_state.id,
+                wrong_state.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::JobConflict)
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000003");
+        database.create_job(&job).unwrap();
+        assert!(matches!(
+            database.complete_no_benefit(
+                &job.id,
+                job.version + 1,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::JobConflict)
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000004");
+        database.create_job(&job).unwrap();
+        assert!(database.request_cancellation(&job.id).unwrap());
+        assert!(matches!(
+            database.complete_no_benefit(
+                &job.id,
+                job.version + 1,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::JobConflict)
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let mut job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000005");
+        job.outputs.push(planned_output());
+        database.create_job(&job).unwrap();
+        assert!(matches!(
+            database.complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::TerminalEvidenceMissing)
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000006");
+        database.create_job(&job).unwrap();
+        database
+            .record_error(
+                &job.id,
+                &OperationError::safe(
+                    "TEST_ERROR",
+                    "Test error",
+                    "Sanitized test error.",
+                    OperationStage::Verify,
+                    false,
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            database.complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::TerminalEvidenceMissing)
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000007");
+        database.create_job(&job).unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO job_completion_outcomes
+                 (job_id, completion_kind, reason, created_at)
+                 VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+                (&job.id, COMPLETED_AT),
+            )
+            .unwrap();
+        assert!(matches!(
+            database.complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::JobConflict)
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000008");
+        database.create_job(&job).unwrap();
+        database
+            .connection()
+            .execute(
+                "UPDATE jobs SET resolved_output_name = 'balanced.pdf' WHERE id = ?1",
+                [&job.id],
+            )
+            .unwrap();
+        assert!(matches!(
+            database.complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::TerminalEvidenceMissing)
+        ));
+    }
+
+    #[test]
+    fn no_benefit_transaction_rolls_back_insert_and_update_faults() {
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000009");
+        database.create_job(&job).unwrap();
+        database
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_outcome_insert
+                 BEFORE INSERT ON job_completion_outcomes
+                 BEGIN SELECT RAISE(ABORT, 'injected outcome insert failure'); END;",
+            )
+            .unwrap();
+        assert!(database
+            .complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            )
+            .is_err());
+        assert_eq!(
+            database.get_job(&job.id).unwrap().unwrap().state,
+            JobState::Verifying
+        );
+        database
+            .connection()
+            .execute_batch("DROP TRIGGER fail_outcome_insert;")
+            .unwrap();
+
+        database
+            .connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_outcome_state_update
+                 BEFORE UPDATE OF state ON jobs WHEN NEW.state = 'completed'
+                 BEGIN SELECT RAISE(ABORT, 'injected outcome update failure'); END;",
+            )
+            .unwrap();
+        assert!(database
+            .complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            )
+            .is_err());
+        let outcome_count: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM job_completion_outcomes WHERE job_id = ?1",
+                [&job.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outcome_count, 0);
+        assert_eq!(
+            database.get_job(&job.id).unwrap().unwrap().state,
+            JobState::Verifying
+        );
+    }
+
+    #[test]
+    fn concurrent_no_benefit_calls_have_exactly_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent.sqlite3");
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000010");
+        let mut setup = Database::open(&path).unwrap();
+        setup.create_job(&job).unwrap();
+        drop(setup);
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                let id = job.id.clone();
+                std::thread::spawn(move || {
+                    let mut database = Database::open(&path).unwrap();
+                    barrier.wait();
+                    database.complete_no_benefit(
+                        &id,
+                        3,
+                        JobCompletionReason::SavingsThresholdNotMet,
+                        COMPLETED_AT,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(DatabaseError::JobConflict)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn cancellation_and_no_benefit_completion_have_one_truthful_winner() {
+        let mut cancelled_first = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000011");
+        cancelled_first.create_job(&job).unwrap();
+        assert!(cancelled_first.request_cancellation(&job.id).unwrap());
+        assert!(cancelled_first
+            .complete_no_benefit(
+                &job.id,
+                job.version + 1,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT
+            )
+            .is_err());
+        let still_verifying = cancelled_first.get_job(&job.id).unwrap().unwrap();
+        assert_eq!(still_verifying.state, JobState::Verifying);
+        assert!(still_verifying.completion_kind.is_none());
+
+        let mut completed_first = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000012");
+        completed_first.create_job(&job).unwrap();
+        completed_first
+            .complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT,
+            )
+            .unwrap();
+        assert!(!completed_first.request_cancellation(&job.id).unwrap());
+        assert_eq!(
+            completed_first
+                .get_job(&job.id)
+                .unwrap()
+                .unwrap()
+                .completion_kind,
+            Some(JobCompletionKind::NoBenefit)
+        );
+    }
+
+    #[test]
+    fn published_completion_helper_requires_and_loads_full_publication_evidence() {
+        let mut missing_verification = Database::open_in_memory().unwrap();
+        let mut unverified_job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000016");
+        unverified_job.state = JobState::Publishing;
+        unverified_job.stage = Some(OperationStage::Cleanup);
+        unverified_job.resolved_output_name = Some("balanced.pdf".to_owned());
+        let mut unverified_output = planned_output();
+        unverified_output.resolved_name = Some("balanced.pdf".to_owned());
+        unverified_output.final_path = Some(r"C:\output\balanced.pdf".to_owned());
+        unverified_output.size_bytes = Some(120_000);
+        unverified_output.sha256 = Some("b".repeat(64));
+        unverified_output.status = OutputStatus::Published;
+        unverified_output.published_at = Some("2026-08-25T11:59:55Z".to_owned());
+        unverified_job.outputs.push(unverified_output);
+        missing_verification.create_job(&unverified_job).unwrap();
+        assert!(matches!(
+            missing_verification.complete_published(
+                &unverified_job.id,
+                unverified_job.version,
+                COMPLETED_AT
+            ),
+            Err(DatabaseError::TerminalEvidenceMissing)
+        ));
+        let still_publishing = missing_verification
+            .get_job(&unverified_job.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_publishing.state, JobState::Publishing);
+        assert!(still_publishing.completion_kind.is_none());
+
+        let mut database = Database::open_in_memory().unwrap();
+        let mut job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000013");
+        job.state = JobState::Publishing;
+        job.stage = Some(OperationStage::Cleanup);
+        job.resolved_output_name = Some("balanced.pdf".to_owned());
+        let mut output = planned_output();
+        output.resolved_name = Some("balanced.pdf".to_owned());
+        output.final_path = Some(r"C:\output\balanced.pdf".to_owned());
+        output.size_bytes = Some(120_000);
+        output.sha256 = Some("b".repeat(64));
+        output.status = OutputStatus::Published;
+        output.verified_at = Some("2026-08-25T11:59:50Z".to_owned());
+        output.published_at = Some("2026-08-25T11:59:55Z".to_owned());
+        job.outputs.push(output);
+        database.create_job(&job).unwrap();
+
+        database
+            .complete_published(&job.id, job.version, COMPLETED_AT)
+            .unwrap();
+        let completed = database.get_job(&job.id).unwrap().unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert_eq!(
+            completed.completion_kind,
+            Some(JobCompletionKind::Published)
+        );
+        assert_eq!(completed.reason, None);
+    }
+
+    #[test]
+    fn load_rejects_impossible_outcome_metadata() {
+        let mut cancelled_outcome = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000017");
+        cancelled_outcome.create_job(&job).unwrap();
+        cancelled_outcome
+            .complete_no_benefit(
+                &job.id,
+                job.version,
+                JobCompletionReason::SavingsThresholdNotMet,
+                COMPLETED_AT,
+            )
+            .unwrap();
+        cancelled_outcome
+            .connection()
+            .execute(
+                "UPDATE jobs SET cancellation_requested_at = ?1 WHERE id = ?2",
+                ("2026-08-25T11:59:59Z", &job.id),
+            )
+            .unwrap();
+        assert!(matches!(
+            cancelled_outcome.get_job(&job.id),
+            Err(DatabaseError::InvalidContractValue { .. })
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000014");
+        database.create_job(&job).unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO job_completion_outcomes
+                 (job_id, completion_kind, reason, created_at)
+                 VALUES (?1, 'no-benefit', 'savings-threshold-not-met', ?2)",
+                (&job.id, COMPLETED_AT),
+            )
+            .unwrap();
+        assert!(matches!(
+            database.get_job(&job.id),
+            Err(DatabaseError::InvalidContractValue { .. })
+        ));
+
+        let mut database = Database::open_in_memory().unwrap();
+        let mut job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000015");
+        job.state = JobState::Completed;
+        job.finished_at = Some(COMPLETED_AT.to_owned());
+        job.resolved_output_name = Some("balanced.pdf".to_owned());
+        job.outputs.push(planned_output());
+        database.create_job(&job).unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO job_completion_outcomes
+                 (job_id, completion_kind, reason, created_at)
+                 VALUES (?1, 'published', NULL, ?2)",
+                (&job.id, COMPLETED_AT),
+            )
+            .unwrap();
+        assert!(matches!(
+            database.get_job(&job.id),
+            Err(DatabaseError::InvalidContractValue { .. })
+        ));
+    }
 }

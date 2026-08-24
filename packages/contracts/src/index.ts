@@ -39,6 +39,8 @@ export type OperationRisk = 'normal' | 'sensitive' | 'irreversible';
 export type OperationLocality = 'local' | 'local-or-cloud' | 'cloud';
 export type DependencyStatus = 'available' | 'missing' | 'unhealthy' | 'deferred' | 'not-required';
 export type OutputStatus = 'planned' | 'staged' | 'verified' | 'publishing' | 'published';
+export type JobCompletionKind = 'published' | 'no-benefit';
+export type JobCompletionReason = 'savings-threshold-not-met';
 
 export interface OperationError {
   code: string;
@@ -100,6 +102,8 @@ export interface JobRecord {
   updatedAt: string;
   finishedAt: string | null;
   version: number;
+  completionKind: JobCompletionKind | null;
+  reason: JobCompletionReason | null;
   inputs: JobInput[];
   outputs: JobOutput[];
   errors: OperationError[];

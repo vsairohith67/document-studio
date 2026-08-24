@@ -895,7 +895,7 @@ export function ViewerWorkspace() {
         <div><strong>{job ? OPERATION_LABELS[job.operationId as CorePdfOperationId] ?? job.operationId : 'No durable page job'}</strong><span>{progress?.message ?? (job ? `Job ${job.state}` : 'Viewer activity is not job history.')}</span></div>
         {job && <span className={`job-state state-${job.state}`}>{job.state}</span>}
         {job && !TERMINAL_STATES.has(job.state) && <button type="button" className="secondary compact" disabled={progress?.cancellable === false || job.state === 'publishing'} onClick={() => void api.jobs.cancel({ jobId: job.id })}>Cancel</button>}
-        {job?.state === 'completed' && <span>{job.outputs.length} verified output{job.outputs.length === 1 ? '' : 's'} published</span>}
+        {job?.state === 'completed' && <span>{job.completionKind === 'no-benefit' ? 'No output created' : `${job.outputs.length} verified output${job.outputs.length === 1 ? '' : 's'} published`}</span>}
         {job?.errors.at(-1) && <span className="job-tray-error">{job.errors.at(-1)?.title}: {job.errors.at(-1)?.detail}</span>}
       </footer>
     </main>

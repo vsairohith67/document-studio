@@ -184,6 +184,51 @@ pub enum OutputStatus {
     Published,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum JobCompletionKind {
+    Published,
+    NoBenefit,
+}
+
+impl JobCompletionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::NoBenefit => "no-benefit",
+        }
+    }
+
+    pub fn from_contract(value: &str) -> Option<Self> {
+        Some(match value {
+            "published" => Self::Published,
+            "no-benefit" => Self::NoBenefit,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum JobCompletionReason {
+    SavingsThresholdNotMet,
+}
+
+impl JobCompletionReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SavingsThresholdNotMet => "savings-threshold-not-met",
+        }
+    }
+
+    pub fn from_contract(value: &str) -> Option<Self> {
+        Some(match value {
+            "savings-threshold-not-met" => Self::SavingsThresholdNotMet,
+            _ => return None,
+        })
+    }
+}
+
 impl OutputStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -317,6 +362,8 @@ pub struct JobRecord {
     pub updated_at: String,
     pub finished_at: Option<String>,
     pub version: u64,
+    pub completion_kind: Option<JobCompletionKind>,
+    pub reason: Option<JobCompletionReason>,
     pub inputs: Vec<JobInput>,
     pub outputs: Vec<JobOutput>,
     pub errors: Vec<OperationError>,

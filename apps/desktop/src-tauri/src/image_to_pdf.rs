@@ -160,6 +160,8 @@ impl ImageToPdfService {
             updated_at: now.clone(),
             finished_at: None,
             version: 0,
+            completion_kind: None,
+            reason: None,
             inputs,
             outputs: vec![JobOutput {
                 ordinal: 0,

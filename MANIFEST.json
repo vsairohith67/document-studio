@@ -1,12 +1,12 @@
 {
   "product": "Document Studio",
-  "version": "0.5.1-g04b2-pdf-to-images-dev",
-  "audit_date": "22 August 2026",
+  "version": "0.6.0-g04c2a-completion-outcomes-dev",
+  "audit_date": "25 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
-  "current_goal": "G04B2 — PDF to Images (active implementation)",
+  "current_goal": "G04C2A — durable successful completion outcomes",
   "current_goal_prompt": "codex/prompts/04-compression-conversion.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
@@ -23,6 +23,7 @@
     "npm run test:browser --workspace @document-studio/desktop",
     "npm run test:webview2 --workspace @document-studio/desktop",
     "npm run verify:g04b2 --workspace @document-studio/desktop",
+    "npm run verify:g04c2a --workspace @document-studio/desktop",
     "npm run build",
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
@@ -30,7 +31,7 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G01 through G04B are accepted on main. G04B — COMPLETE at 6940a1381822a5872f4c345cc0e5cd15b2e6294c. G04B2 — active implementation on feat/g04b2-pdf-to-images; G04B2 is not accepted or complete and must pass its owner merge gate.",
+  "publication_status": "G01 through G04B2 are accepted on main. G04B2 — COMPLETE at merge b5901a7baca58b3acb1ee00027e42b0059c59fd4. G04C2A adds only the outcome foundation; G04C2 balanced compression remains unimplemented and overall G04 is incomplete.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
@@ -80,11 +81,18 @@
   "active_operation": {
     "id": "pdf.to-images",
     "version": "1.0.0",
-    "status": "G04B2 implementation; not accepted or complete",
+    "status": "accepted on main at merge b5901a7baca58b3acb1ee00027e42b0059c59fd4",
     "engine": "pdfjs-dist 6.2.108 private canvas renderer with authenticated raw IPC; image 0.25.10 Rust encoder",
     "formats": "PNG, fixed-quality JPEG, lossless WebP",
     "dpi": [72, 150, 300],
     "limits": "1-128 ordered pages; 8192 axes; 16777216 pixels per page; 67108864 aggregate pixels"
+  },
+  "completion_outcome_foundation": {
+    "migration": "0006_job_completion_outcomes.sql",
+    "wire_fields": ["completionKind", "reason"],
+    "allowed": ["null/null", "published/null", "no-benefit/savings-threshold-not-met"],
+    "ipc": "No new command; terminalization remains internal to Rust",
+    "production_operation": "G04C2 balanced compression remains unimplemented until G04C2B"
   },
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [

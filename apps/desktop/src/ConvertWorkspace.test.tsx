@@ -41,7 +41,7 @@ import { ConvertWorkspace } from './ConvertWorkspace';
 
 const system: SystemStatus = {
   product: 'Document Studio', phase: 'g04b2-pdf-to-images',
-  offlineByDefault: true, databaseSchemaVersion: 5, webview2RuntimeVersion: '151.0.7922.34',
+  offlineByDefault: true, databaseSchemaVersion: 6, webview2RuntimeVersion: '151.0.7922.34',
 };
 const dependencies: DependencyDiagnostic[] = [
   { id: 'document-studio-core', kind: 'built-in', status: 'available', version: '0.1.0', capabilities: ['image.to-pdf'], checkedAt: '2026-08-22T00:00:00Z', errorCode: null },
@@ -57,6 +57,7 @@ function job(state: JobRecord['state']): JobRecord {
     progress: { completedUnits: state === 'completed' ? 2 : 0, totalUnits: 2, unit: 'items' },
     destinationDirectory: 'C:\\output', requestedOutputName: 'images.pdf', resolvedOutputName: state === 'completed' ? 'images.pdf' : null,
     cancellationRequestedAt: null, createdAt: '2026-08-22T00:00:00Z', updatedAt: '2026-08-22T00:00:01Z', finishedAt: state === 'completed' ? '2026-08-22T00:00:01Z' : null, version: 1,
+    completionKind: null, reason: null,
     inputs: [first, second].map((image, ordinal) => ({ ordinal, displayName: image.displayName, sourcePath: image.path, canonicalPath: image.path, fileIdentity: image.fileIdentity, sizeBytes: image.sizeBytes, modifiedAt: image.modifiedAt, mimeType: image.mimeType, sha256: state === 'completed' ? 'a'.repeat(64) : null, passwordReference: null })),
     outputs: [{ ordinal: 0, requestedName: 'images.pdf', resolvedName: state === 'completed' ? 'images.pdf' : null, stagingPath: null, partialPath: null, finalPath: state === 'completed' ? 'C:\\output\\images.pdf' : null, sizeBytes: state === 'completed' ? 300 : null, mimeType: 'application/pdf', sha256: state === 'completed' ? 'b'.repeat(64) : null, status: state === 'completed' ? 'published' : 'planned', verifiedAt: state === 'completed' ? '2026-08-22T00:00:01Z' : null, publishedAt: state === 'completed' ? '2026-08-22T00:00:01Z' : null }],
     errors: [],

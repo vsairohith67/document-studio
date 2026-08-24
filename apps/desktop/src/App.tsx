@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { DependencyDiagnostic, FileInspection, JobRecord, ProgressEvent, SystemStatus } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
+import { NoBenefitResult } from './JobCompletionOutcome';
 
 const ViewerWorkspace = lazy(async () => {
   const module = await import('./viewer/ViewerWorkspace');
@@ -327,7 +328,7 @@ export default function App() {
               <strong>{progress?.message ?? (job ? `Job ${job.state}` : 'Ready for a local merge')}</strong>
               {isIndeterminate ? <div className="indeterminate-bar" role="progressbar" aria-label="Merging PDFs" /> : <progress value={progressPercent} max={100} aria-label="PDF Merge progress" />}
               {busy && !cancellable && <p className="publishing-copy">Publishing safely—cancellation is no longer available.</p>}
-              {job?.state === 'completed' && <div className="success-result"><strong>Verified merged PDF</strong><span>{job.outputs[0]?.finalPath}</span><small>{job.outputs[0]?.sizeBytes == null ? '' : formatBytes(job.outputs[0].sizeBytes)}</small><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy path</button></div>}
+              {job?.state === 'completed' && (job.completionKind === 'no-benefit' ? <NoBenefitResult /> : <div className="success-result"><strong>Verified merged PDF</strong><span>{job.outputs[0]?.finalPath}</span><small>{job.outputs[0]?.sizeBytes == null ? '' : formatBytes(job.outputs[0].sizeBytes)}</small><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy path</button></div>)}
               {(job?.state === 'failed' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? 'The merge did not finish'}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span></div>}
             </article>
             <article className="card placeholder-card" aria-labelledby="viewer-heading"><p className="eyebrow">LOCAL PDF WORKSPACE</p><h2 id="viewer-heading">View and organize pages</h2><p>Open one PDF for progressive viewing, search, selection and verified page operations.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('viewer')}>Open Viewer</button></article>
@@ -341,7 +342,8 @@ export default function App() {
             {history.length === 0 && <p className="empty-state">Completed, failed, cancelled and interrupted jobs will appear here.</p>}
             {history.map((item) => {
               const legacyCleanupUnproven = item.errors.some((itemError) => itemError.code === 'LEGACY_CLEANUP_UNPROVEN');
-              return <article className="history-row" key={item.id}><div><strong>{item.operationId === 'pdf.merge' ? `${item.inputs.length} PDFs` : shortPath(item.inputs[0]?.displayName)}</strong><small>{item.operationId} · {new Date(item.updatedAt).toLocaleString()}</small>{legacyCleanupUnproven && <small className="cleanup-warning" role="status">Legacy destination cleanup is unproven. Inspect the destination manually; history is preserved.</small>}</div><span className={`job-state state-${item.state}`}>{item.state}</span><span>{item.outputs[0]?.sizeBytes == null ? '—' : formatBytes(item.outputs[0].sizeBytes)}</span>{item.state === 'interrupted' && !legacyCleanupUnproven && <button type="button" className="secondary compact" onClick={() => void resolveInterruptedJob(item.id)}>Resolve safely</button>}</article>;
+              const noBenefit = item.state === 'completed' && item.completionKind === 'no-benefit';
+              return <article className="history-row" key={item.id}><div><strong>{item.operationId === 'pdf.merge' ? `${item.inputs.length} PDFs` : shortPath(item.inputs[0]?.displayName)}</strong><small>{item.operationId} · {new Date(item.updatedAt).toLocaleString()}</small>{legacyCleanupUnproven && <small className="cleanup-warning" role="status">Legacy destination cleanup is unproven. Inspect the destination manually; history is preserved.</small>}</div><span className={`job-state ${noBenefit ? 'state-no-benefit' : `state-${item.state}`}`} aria-label={noBenefit ? 'Completed — no benefit' : undefined}>{noBenefit ? 'No benefit' : item.state}</span><span>{noBenefit ? 'No output created' : item.outputs[0]?.sizeBytes == null ? '—' : formatBytes(item.outputs[0].sizeBytes)}</span>{item.state === 'interrupted' && !legacyCleanupUnproven && <button type="button" className="secondary compact" onClick={() => void resolveInterruptedJob(item.id)}>Resolve safely</button>}</article>;
             })}
           </div>
         </section>
