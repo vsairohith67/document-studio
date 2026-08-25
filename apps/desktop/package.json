@@ -22,6 +22,7 @@
     "verify:g04b2": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04b2-boundaries.ps1",
     "verify:g04c2a": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04c2a-boundaries.ps1",
     "verify:g04c2-corpus": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04c2-corpus.ps1",
+    "verify:g04c2b": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04c2b-boundaries.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

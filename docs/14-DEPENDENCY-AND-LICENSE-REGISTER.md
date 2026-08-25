@@ -105,6 +105,7 @@ G04A adds no new production dependency. `pdf.compress-lossless@1.0.0` reuses the
 | `image` | 0.25.10 | `85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104` | MIT OR Apache-2.0 | `default-features = false`; JPEG, PNG, WebP decoding plus G04B2 JPEG/PNG/lossless-WebP encoding |
 | `pdf-writer` | 0.15.0 | `f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753` | MIT OR Apache-2.0 | `default-features = false`; original PDF object generation |
 | `flate2` | 1.1.9 | `843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c` | MIT OR Apache-2.0 | `default-features = false`, `rust_backend`; deterministic image streams |
+| `base64` | 0.22.1 | Existing locked transitive package, now declared directly | MIT OR Apache-2.0 | Encodes/decodes bounded qpdf JSON stream payloads for G04C2B; no network or document parser |
 
 On 22 August 2026 the exact direct crates and their resolved codec/compression subtree had no exact-version matches from the GitHub Advisory API/RustSec data reviewed for this gate. This is point-in-time evidence; every update and release must repeat the advisory, checksum, licence and notices review.
 

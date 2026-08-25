@@ -11,6 +11,12 @@ Every serialized `JobRecord` includes required nullable `completionKind` and `re
 
 No-benefit is successful completion without publication. It is not a new `JobState`, an error or permission to create a fake output. The generic state graph still rejects `Verifying → Completed`; only the internal cleanup-preconditioned CAS transaction in ADR-015 may perform that specialized transition. G04C2A adds this foundation but no balanced-compression manifest, control or production operation.
 
+## G04C2B balanced compression
+
+`pdf.compress-balanced@1.0.0` accepts exactly one admitted local PDF and the exact settings object `{ "profile": "balanced-v1" }`. It refuses encrypted or signature-bearing inputs and has multiplicity `zero-or-one`. A beneficial result is completed/published with exactly one verified output; a below-threshold result is completed/no-benefit with reason `savings-threshold-not-met`, zero outputs and zero errors. Arbitrary settings, quality sliders, resampling, page rasterisation, repair, decryption, metadata removal and linearisation are outside this contract.
+
+The fixed profile uses JPEG quality 82, safe indirect RGB8 DCT/simple-Flate images, every-affected-page visual verification at 144 DPI, SSIM at least 0.985, PSNR at least 36 dB and `changedPixels * 200 <= totalPixels`. Publication requires both `savedBytes >= 65_536` and `savedBytes * 100 >= sourceBytes * 5` using checked integer arithmetic.
+
 ## Manifest fields
 
 - `id` and semantic version.

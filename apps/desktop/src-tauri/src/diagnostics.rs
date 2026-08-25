@@ -3,8 +3,9 @@ use chrono::{SecondsFormat, Utc};
 use crate::app_state::AppState;
 use crate::contracts::{
     DependencyDiagnostic, DependencyKind, DependencyStatus, OperationError, OperationStage,
-    IMAGE_TO_PDF_OPERATION_ID, PDFJS_VERSION, PDF_COMPRESS_LOSSLESS_OPERATION_ID,
-    PDF_MERGE_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID, QPDF_DEPENDENCY_ID,
+    BALANCED_COMPRESSION_OPERATION_ID, IMAGE_TO_PDF_OPERATION_ID, PDFJS_VERSION,
+    PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_MERGE_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID,
+    QPDF_DEPENDENCY_ID,
 };
 use crate::process_sandbox::{
     authorize_qpdf_paths, ensure_production_profile, run_sandboxed_capture, SandboxLaunchSpec,
@@ -45,7 +46,10 @@ pub fn scan_dependencies(state: &AppState) -> Result<Vec<DependencyDiagnostic>, 
             kind: DependencyKind::BuiltIn,
             status: DependencyStatus::Available,
             version: Some(PDFJS_VERSION.to_owned()),
-            capabilities: vec![PDF_TO_IMAGES_OPERATION_ID.to_owned()],
+            capabilities: vec![
+                PDF_TO_IMAGES_OPERATION_ID.to_owned(),
+                BALANCED_COMPRESSION_OPERATION_ID.to_owned(),
+            ],
             checked_at: checked_at.clone(),
             error_code: None,
         },
@@ -115,6 +119,7 @@ fn qpdf_diagnostic(state: &AppState, checked_at: &str) -> DependencyDiagnostic {
         capabilities: vec![
             PDF_MERGE_OPERATION_ID.to_owned(),
             PDF_COMPRESS_LOSSLESS_OPERATION_ID.to_owned(),
+            BALANCED_COMPRESSION_OPERATION_ID.to_owned(),
             IMAGE_TO_PDF_OPERATION_ID.to_owned(),
             PDF_TO_IMAGES_OPERATION_ID.to_owned(),
         ],

@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
+  BalancedCompressionAudit,
+  BalancedCompressionVisualSession,
   DependencyDiagnostic,
   FileInspection,
   JobRecord,
   ProgressEvent,
   SystemStatus,
 } from '@document-studio/contracts';
+import type { RenderTask } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
 import { NoBenefitResult } from './JobCompletionOutcome';
+import { renderBalancedCompression } from './viewer/balancedCompression';
 import {
   calculateSizeReport,
   formatBytes,
@@ -45,6 +49,7 @@ export function OptimizeWorkspace({
   onOpenViewer,
   onOpenConvert = () => undefined,
 }: OptimizeWorkspaceProps) {
+  const [profile, setProfile] = useState<'lossless' | 'balanced'>('lossless');
   const [source, setSource] = useState<FileInspection | null>(null);
   const [destination, setDestination] = useState<string | null>(null);
   const [outputName, setOutputName] = useState('compressed.pdf');
@@ -53,9 +58,50 @@ export function OptimizeWorkspace({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
+  const [audit, setAudit] = useState<BalancedCompressionAudit | null>(null);
   const selectButton = useRef<HTMLButtonElement>(null);
   const result = useRef<HTMLDivElement>(null);
   const jobId = useRef<string | null>(null);
+  const renderAbort = useRef<AbortController | null>(null);
+  const renderTask = useRef<RenderTask | null>(null);
+  const pendingVisual = useRef<BalancedCompressionVisualSession | null>(null);
+  const visualRunning = useRef(false);
+
+  const runBalancedVisual = async (session: BalancedCompressionVisualSession) => {
+    if (visualRunning.current || session.jobId !== jobId.current) return;
+    visualRunning.current = true;
+    pendingVisual.current = null;
+    const controller = new AbortController();
+    renderAbort.current = controller;
+    try {
+      setAnnouncement(`Verifying ${session.pages.length} affected page${session.pages.length === 1 ? '' : 's'} at 144 DPI.`);
+      const completed = await renderBalancedCompression(session, controller.signal, {
+        onRenderTask: (task) => { renderTask.current = task; },
+        onJob: setJob,
+      });
+      setJob(completed);
+      setAudit(await api.jobs.balancedAudit({ jobId: completed.id }));
+      setBusy(false);
+      setAnnouncement(completed.completionKind === 'no-benefit'
+        ? 'Balanced verification passed, but the candidate did not save both 5% and 64 KiB. No output was created.'
+        : 'Balanced verification passed and one verified PDF was published.');
+    } catch (reason) {
+      const activeJobId = jobId.current;
+      if (activeJobId) {
+        await api.jobs.cancel({ jobId: activeJobId }).catch(() => undefined);
+        const snapshot = await api.jobs.get({ jobId: activeJobId }).catch(() => null);
+        if (snapshot) setJob(snapshot);
+      }
+      if (!controller.signal.aborted) {
+        setError(operationErrorMessage(reason));
+      }
+      setBusy(false);
+    } finally {
+      renderTask.current = null;
+      renderAbort.current = null;
+      visualRunning.current = false;
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -72,7 +118,16 @@ export function OptimizeWorkspace({
         if (terminalStates.has(event.state)) {
           setBusy(false);
           void api.jobs.get({ jobId: event.jobId }).then((snapshot) => {
-            if (active) setJob(snapshot);
+            if (!active) return;
+            setJob(snapshot);
+            if (
+              snapshot.operationId === 'pdf.compress-balanced'
+              && typeof api.jobs.balancedAudit === 'function'
+            ) {
+              void api.jobs.balancedAudit({ jobId: snapshot.id })
+                .then((value) => { if (active) setAudit(value); })
+                .catch(() => undefined);
+            }
           });
         }
       },
@@ -86,13 +141,33 @@ export function OptimizeWorkspace({
   }, []);
 
   useEffect(() => {
+    if (typeof api.jobs.onBalancedVisualReady !== 'function') return undefined;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void api.jobs.onBalancedVisualReady((session) => {
+      if (!active) return;
+      pendingVisual.current = session;
+      if (session.jobId === jobId.current) void runBalancedVisual(session);
+    }).then((stop) => { if (active) unlisten = stop; else stop(); });
+    return () => { active = false; unlisten?.(); };
+  }, []);
+
+  useEffect(() => () => {
+    renderTask.current?.cancel();
+    renderAbort.current?.abort();
+    if (jobId.current && visualRunning.current) {
+      void api.jobs.cancel({ jobId: jobId.current }).catch(() => undefined);
+    }
+  }, []);
+
+  useEffect(() => {
     if (job?.state === 'completed') result.current?.focus();
   }, [job?.state]);
 
   const inspectPaths = async (paths: string[]) => {
     if (paths.length === 0) return;
     if (paths.length !== 1) {
-      setError('Lossless Compression accepts exactly one local PDF.');
+      setError('PDF Compression accepts exactly one local PDF.');
       return;
     }
     setError(null);
@@ -105,6 +180,7 @@ export function OptimizeWorkspace({
       setSource(inspection);
       setOutputName(compressedName(inspection.displayName));
       setJob(null);
+      setAudit(null);
       setProgress(null);
       setAnnouncement(`${inspection.displayName} passed local file preflight.`);
     } catch (reason) {
@@ -130,18 +206,27 @@ export function OptimizeWorkspace({
   const removeSource = () => {
     setSource(null);
     setJob(null);
+    setAudit(null);
     setProgress(null);
     setAnnouncement('Selected PDF removed.');
     requestAnimationFrame(() => selectButton.current?.focus());
   };
   const qpdf = dependencies.find((dependency) => dependency.id === 'qpdf');
+  const pdfjs = dependencies.find((dependency) => dependency.id === 'pdfjs');
   const qpdfAvailable = qpdf?.status === 'available'
     && qpdf.version === '12.3.2'
-    && qpdf.capabilities.includes('pdf.compress-lossless');
+    && qpdf.capabilities.includes(profile === 'balanced'
+      ? 'pdf.compress-balanced'
+      : 'pdf.compress-lossless');
+  const balancedRendererAvailable = pdfjs?.status === 'available'
+    && pdfjs.version === '6.2.108'
+    && pdfjs.capabilities.includes('pdf.compress-balanced');
   const validation = !source ? 'Open one PDF.'
     : !destination ? 'Choose a destination folder.'
       : !validPdfOutputName(outputName) ? 'Enter a Windows-safe filename ending in .pdf.'
         : !qpdfAvailable ? 'The bundled qpdf 12.3.2 compression boundary must pass its local check.'
+          : profile === 'balanced' && !balancedRendererAvailable
+            ? 'The bundled PDF.js 6.2.108 visual-verification boundary must pass its local check.'
           : null;
   const startCompression = async () => {
     if (!source || !destination || validation) return;
@@ -149,15 +234,29 @@ export function OptimizeWorkspace({
     setError(null);
     setProgress(null);
     try {
-      const created = await api.jobs.create({
-        operationId: 'pdf.compress-lossless',
-        inputPaths: [source.path],
-        destinationDirectory: destination,
-        requestedOutputName: outputName,
-      });
+      const created = profile === 'balanced'
+        ? await api.jobs.createBalanced({
+          operationId: 'pdf.compress-balanced',
+          inputPaths: [source.path],
+          destinationDirectory: destination,
+          requestedOutputName: outputName,
+          settings: { profile: 'balanced-v1' },
+        })
+        : await api.jobs.create({
+          operationId: 'pdf.compress-lossless',
+          inputPaths: [source.path],
+          destinationDirectory: destination,
+          requestedOutputName: outputName,
+        });
       jobId.current = created.id;
       setJob(created);
-      setAnnouncement('Lossless compression job queued.');
+      setAnnouncement(profile === 'balanced'
+        ? 'Balanced compression job queued with the fixed balanced-v1 profile.'
+        : 'Lossless compression job queued.');
+      const pending = pendingVisual.current;
+      if (profile === 'balanced' && pending?.jobId === created.id) {
+        void runBalancedVisual(pending);
+      }
     } catch (reason) {
       setBusy(false);
       setError(operationErrorMessage(reason));
@@ -166,6 +265,8 @@ export function OptimizeWorkspace({
   const cancel = async () => {
     if (!job) return;
     try {
+      renderTask.current?.cancel();
+      renderAbort.current?.abort();
       await api.jobs.cancel({ jobId: job.id });
       setAnnouncement('Cancellation requested. Owned temporary data is being reconciled.');
     } catch (reason) {
@@ -186,7 +287,8 @@ export function OptimizeWorkspace({
   const activeError = job?.errors.at(-1);
   const cancellable = progress?.cancellable
     ?? Boolean(job && !terminalStates.has(job.state) && job.state !== 'publishing');
-  const indeterminate = progress?.messageCode === 'COMPRESSING_PDF_LOSSLESSLY';
+  const indeterminate = progress?.messageCode === 'COMPRESSING_PDF_LOSSLESSLY'
+    || progress?.messageCode === 'BALANCED_SELECTING_IMAGES';
   const progressValue = progress?.completedUnits ?? job?.progress.completedUnits ?? 0;
   const progressTotal = progress?.totalUnits ?? job?.progress.totalUnits ?? 0;
   const progressPercent = progressTotal > 0
@@ -211,18 +313,36 @@ export function OptimizeWorkspace({
         <header className="page-header">
           <div>
             <p className="eyebrow">OPTIMIZE · LOCAL ONLY</p>
-            <h1>Lossless PDF Compression</h1>
-            <p className="lede">Recompress PDF structure without intentionally reducing image quality or document content.</p>
+            <h1>{profile === 'balanced' ? 'Balanced PDF Compression' : 'Lossless PDF Compression'}</h1>
+            <p className="lede">{profile === 'balanced'
+              ? 'Re-encode only proven-safe photographic image streams, then verify every affected page before any output can be published.'
+              : 'Recompress PDF structure without intentionally reducing image quality or document content.'}</p>
           </div>
           <div className="privacy-badge"><span aria-hidden="true">●</span>{system?.offlineByDefault ? 'Offline by default' : 'Checking local status'}</div>
         </header>
         {error && <div className="error-banner" role="alert">{error}</div>}
         <div className="sr-announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
-        <section className="optimize-layout" aria-label="Lossless PDF Compression workspace">
+        <section className="optimize-layout" aria-label={`${profile === 'balanced' ? 'Balanced' : 'Lossless'} PDF Compression workspace`}>
           <article className="card optimize-source-card">
             <div className="card-heading">
               <div><p className="eyebrow">SOURCE</p><h2>Open one PDF</h2></div>
               <span className={`status-chip ${qpdfAvailable ? '' : 'unavailable'}`}>{qpdfAvailable ? 'qpdf 12.3.2 verified' : 'Engine unavailable'}</span>
+            </div>
+            <div className="compression-profile" role="group" aria-label="Compression profile">
+              <button
+                type="button"
+                className={profile === 'lossless' ? 'secondary active' : 'secondary'}
+                aria-pressed={profile === 'lossless'}
+                disabled={busy}
+                onClick={() => { setProfile('lossless'); setAudit(null); setJob(null); }}
+              >Lossless</button>
+              <button
+                type="button"
+                className={profile === 'balanced' ? 'secondary active' : 'secondary'}
+                aria-pressed={profile === 'balanced'}
+                disabled={busy}
+                onClick={() => { setProfile('balanced'); setAudit(null); setJob(null); }}
+              >Balanced</button>
             </div>
             {!source ? (
               <button ref={selectButton} type="button" className="drop-zone" onClick={chooseSource} disabled={busy}>
@@ -234,9 +354,9 @@ export function OptimizeWorkspace({
                 <button type="button" className="secondary danger" onClick={removeSource} disabled={busy}>Remove</button>
               </div>
             )}
-            {source && <div className="preflight-ready" role="status"><strong>Local file preflight ready</strong><span>PDF structure, encryption, page count, and preservation inventory are checked by qpdf before and after recompression.</span></div>}
-            <div className="lossless-note" role="note"><strong>What lossless means here</strong><p>Document Studio recompresses streams and object structure. It does not rasterize pages, flatten forms, or intentionally reduce image quality. The result can be smaller, unchanged, or larger.</p></div>
-            <div className="signature-warning" role="note"><strong>Digital signature warning</strong><p>PDF rewriting invalidates existing digital signatures. If this PDF is signed, its signatures will no longer validate after compression.</p></div>
+            {source && <div className="preflight-ready" role="status"><strong>Local file preflight ready</strong><span>{profile === 'balanced' ? 'qpdf will refuse encryption, signatures, recovery, malformed structure, and unsafe image resources before candidate generation.' : 'PDF structure, encryption, page count, and preservation inventory are checked by qpdf before and after recompression.'}</span></div>}
+            {profile === 'lossless' ? <div className="lossless-note" role="note"><strong>What lossless means here</strong><p>Document Studio recompresses streams and object structure. It does not rasterize pages, flatten forms, or intentionally reduce image quality. The result can be smaller, unchanged, or larger.</p></div> : <div className="lossless-note" role="note"><strong>Fixed balanced-v1 profile</strong><p>Quality 82, no resampling. Only safe indirect RGB8 DCT or simple-Flate image XObjects are eligible. Text, vectors, and page structure are never rasterized, while unsupported images remain unchanged. Every affected page must pass SSIM ≥ 0.985, PSNR ≥ 36 dB, and the changed-pixel limit at 144 DPI. A file is published only when it saves both 5% and 64 KiB; no benefit creates no file.</p></div>}
+            <div className="signature-warning" role="note"><strong>{profile === 'balanced' ? 'Signed documents are refused' : 'Digital signature warning'}</strong><p>{profile === 'balanced' ? 'Balanced compression stops before writing a candidate when signature or ByteRange evidence is present.' : 'PDF rewriting invalidates existing digital signatures. If this PDF is signed, its signatures will no longer validate after compression.'}</p></div>
           </article>
           <aside className="side-stack">
             <article className="card output-card">
@@ -244,15 +364,16 @@ export function OptimizeWorkspace({
               <div className="selection-row compact-selection"><div><span className="field-label">Destination</span><strong>{destination ?? 'No folder selected'}</strong><small>Existing user files are never overwritten.</small></div><button type="button" className="secondary" onClick={chooseDestination} disabled={busy}>Choose</button></div>
               <label className="output-field"><span className="field-label">Output filename</span><input value={outputName} onChange={(event) => setOutputName(event.target.value)} disabled={busy} aria-describedby="compression-output-help" /><small id="compression-output-help">A collision receives a numbered name through the existing safe publication boundary.</small></label>
               {validation && <p className="preflight-message" role="status">{validation}</p>}
-              <div className="action-row"><button type="button" className="primary" disabled={Boolean(validation) || busy} onClick={startCompression}>Compress</button>{busy && <button type="button" className="secondary danger" disabled={!cancellable} onClick={cancel}>{cancellable ? 'Cancel' : 'Publishing safely'}</button>}</div>
+              <div className="action-row"><button type="button" className="primary" disabled={Boolean(validation) || busy} onClick={startCompression}>{profile === 'balanced' ? 'Compress with Balanced' : 'Compress Losslessly'}</button>{busy && <button type="button" className="secondary danger" disabled={!cancellable} onClick={cancel}>{cancellable ? 'Cancel' : 'Publishing safely'}</button>}</div>
             </article>
             <article className="card job-card" aria-live="polite" aria-atomic="true">
               <div className="card-heading"><h2>Compression status</h2>{job && <span className={`job-state state-${job.state}`}>{job.state}</span>}</div>
               <strong>{progress?.message ?? (job ? `Job ${job.state}` : 'Ready for local preflight')}</strong>
-              {indeterminate ? <div className="indeterminate-bar" role="progressbar" aria-label="Compressing PDF" /> : <progress value={progressPercent} max={100} aria-label="Lossless PDF Compression progress" />}
+              {indeterminate ? <div className="indeterminate-bar" role="progressbar" aria-label="Compressing PDF" /> : <progress value={progressPercent} max={100} aria-label={`${profile === 'balanced' ? 'Balanced' : 'Lossless'} PDF Compression progress`} />}
               {busy && !cancellable && <p className="publishing-copy">Publishing safely—cancellation is no longer available.</p>}
               {job?.state === 'completed' && job.completionKind === 'no-benefit' && <NoBenefitResult resultRef={result} />}
               {job?.state === 'completed' && job.completionKind !== 'no-benefit' && sizeReport && <div ref={result} className="success-result compression-result" tabIndex={-1}><strong>Verified compressed PDF</strong><span>{job.outputs[0]?.finalPath}</span><div className="size-comparison" aria-label="Compression size comparison"><span><small>Before</small><strong>{source?.sizeBytes.toLocaleString()} bytes</strong></span><span><small>After</small><strong>{afterBytes?.toLocaleString()} bytes</strong></span><span><small>Delta</small><strong>{formatSignedBytes(sizeReport.deltaBytes)} · {formatSignedPercentage(sizeReport.percentageDelta)}</strong></span></div><p className={`size-outcome outcome-${sizeReport.outcome}`}>{sizeOutcomeLabel(sizeReport)}</p><div className="action-row"><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(job.outputs[0]?.finalPath ?? '')}>Copy saved path</button><button type="button" className="secondary compact" onClick={onOpenViewer}>Open PDF Viewer</button></div></div>}
+              {audit && <div className="balanced-audit" aria-label="Balanced compression verification evidence"><strong>balanced-v1 verification</strong><span>{formatBytes(audit.sourceBytes)} source · {formatBytes(audit.candidateBytes)} candidate · {formatBytes(audit.savedBytes)} saved ({audit.savedPercent.toFixed(2)}%)</span><span>{audit.affectedPages} affected page{audit.affectedPages === 1 ? '' : 's'} · {audit.selectedImages} image{audit.selectedImages === 1 ? '' : 's'} replaced · {audit.skippedImages} skipped</span>{audit.skippedReasons.length > 0 && <small>Skipped: {audit.skippedReasons.map((entry) => `${entry.reason} (${entry.count})`).join(', ')}</small>}{audit.minimumSsim != null && <small>Minimum SSIM {audit.minimumSsim.toFixed(6)} · Minimum PSNR {audit.psnrIsInfinite ? '∞' : `${audit.minimumPsnrDb?.toFixed(3)} dB`} · maximum changed pixels {audit.maximumChangedPixels.toLocaleString()} / {audit.maximumTotalPixels.toLocaleString()}</small>}<small>Publication gate: {audit.sizeGatePassed ? 'passed both 5% and 64 KiB' : 'did not pass both 5% and 64 KiB'}</small></div>}
               {(job?.state === 'failed' || job?.state === 'cancelled' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? `Compression ${job.state}`}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span>{job.state === 'interrupted' && <button type="button" className="secondary compact" onClick={resolveInterrupted}>Resolve safely</button>}</div>}
             </article>
           </aside>

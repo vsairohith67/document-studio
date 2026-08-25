@@ -71,3 +71,9 @@ A Windows-only WebView2 smoke launches the `test-runtime` binary, connects with 
 - History/retention tests prove list/get fields, valid cascade deletion, ordinary terminal retention and fail-closed invalid metadata.
 - React tests require the exact neutral no-benefit heading/detail/output label, accessible history label and absence of output actions, saved-success copy and failure styling. Existing success/failure/interrupted rendering remains unchanged.
 - Privacy checks keep the reason enum closed and prove migration 6 contains no document body, raw candidate bytes, path or arbitrary JSON.
+
+## G04C2B conservative balanced-compression matrix
+
+Acceptance covers the fixed request/spec checksum, signed/encrypted/source-change refusal, direct/shared/nested/cyclic resource graphs, every allowed and skipped image class, deterministic qpdf partial updates, selected-only structural mutation, exact SSIM/PSNR/delta vectors, 0.5% changed-pixel boundary, every affected page, stale/wrong-side raw uploads, aggregate limits, beneficial and no-benefit outcomes, both exact size thresholds, cancellation races, collision/publication/recovery integrity, scalar-only SQLite evidence, keyboard/accessibility copy and regressions across existing PDF and conversion operations.
+
+The committed public-domain corpus must validate offline before balanced tests. Its current six-page aggregate is an expected successful no-benefit case: all six correct frozen sources remain unchanged and their quality-82 candidates are larger. A deterministic generated RGB PDF provides the beneficial replacement/publication boundary and must produce byte-identical candidates on two runs. CI never downloads corpus assets.

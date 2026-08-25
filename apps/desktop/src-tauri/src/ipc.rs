@@ -10,15 +10,18 @@ use tauri::{
 use tauri_plugin_dialog::DialogExt;
 
 use crate::app_state::{AppState, CancelOutcome};
+use crate::balanced_compression::{BalancedCompressionService, BalancedPixelUploadMetadata};
 use crate::contracts::{
+    BalancedCompressionAudit, BalancedCompressionJobCreateRequest, BalancedRenderSide,
     CancelResponse, CorePdfJobCreateRequest, DestinationGrant, DestinationGrantRequest,
     FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest, JobIdRequest,
     JobRecord, JobWarning, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
     PdfToImagesJobCreateRequest, PdfToImagesJobSession, SettingGetRequest, SettingRecord,
     SettingSetRequest, SystemStatus, ViewerDocumentMetadata, ViewerRangeRequest,
-    ViewerSessionRequest, JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID,
-    PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID,
-    PDF_SPLIT_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID,
+    ViewerSessionRequest, BALANCED_COMPRESSION_OPERATION_ID, BALANCED_VISUAL_READY_EVENT_NAME,
+    JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID, PDF_REMOVE_OPERATION_ID,
+    PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID,
+    PDF_TO_IMAGES_OPERATION_ID,
 };
 use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
@@ -286,6 +289,43 @@ pub fn jobs_create_pdf_to_images(
 }
 
 #[tauri::command]
+pub fn jobs_create_balanced(
+    request: BalancedCompressionJobCreateRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<JobRecord, OperationError> {
+    let job = BalancedCompressionService::new(state.inner().clone()).create_job(request)?;
+    let job_id = job.id.clone();
+    let worker_job_id = job_id.clone();
+    let worker_state = state.inner().clone();
+    spawn_registered_worker(
+        state.inner(),
+        &job_id,
+        move |token| {
+            let app_for_visual = app.clone();
+            let service = BalancedCompressionService::new(worker_state);
+            let _ = service.prepare_with_registered_token(
+                &worker_job_id,
+                token,
+                |event| {
+                    let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                },
+                |session| {
+                    let _ = app_for_visual.emit(BALANCED_VISUAL_READY_EVENT_NAME, session);
+                },
+            );
+        },
+        |name, worker| {
+            std::thread::Builder::new()
+                .name(name)
+                .spawn(worker)
+                .map(|_| ())
+        },
+    )?;
+    Ok(redact_viewer_job_paths(job))
+}
+
+#[tauri::command]
 pub async fn pdf_to_images_submit_page(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -305,6 +345,28 @@ pub async fn pdf_to_images_submit_page(
     .await
     .map_err(|_| pixel_body_error())??;
     Ok(redact_viewer_job_paths(result))
+}
+
+#[tauri::command]
+pub async fn balanced_compression_submit_page(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: Request<'_>,
+) -> Result<JobRecord, OperationError> {
+    let metadata = balanced_pixel_upload_metadata_from_headers(request.headers())?;
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) if bytes.len() <= 67_108_864 => bytes.clone(),
+        _ => return Err(pixel_body_error()),
+    };
+    let worker_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        BalancedCompressionService::new(worker_state).submit_page(metadata, bytes, |event| {
+            let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+        })
+    })
+    .await
+    .map_err(|_| pixel_body_error())?
+    .map(redact_viewer_job_paths)
 }
 
 fn pixel_upload_metadata(request: &Request<'_>) -> Result<PixelUploadMetadata, OperationError> {
@@ -332,6 +394,35 @@ fn pixel_upload_metadata_from_headers(
         render_session_id: header(headers, "x-document-studio-render-session-id")?,
         page_ordinal: u32_header(headers, "x-document-studio-page-ordinal")?,
         nonce: header(headers, "x-document-studio-page-nonce")?,
+        expected_width: u32_header(headers, "x-document-studio-expected-width")?,
+        expected_height: u32_header(headers, "x-document-studio-expected-height")?,
+    })
+}
+
+fn balanced_pixel_upload_metadata_from_headers(
+    headers: &HeaderMap,
+) -> Result<BalancedPixelUploadMetadata, OperationError> {
+    fn header(headers: &HeaderMap, name: &'static str) -> Result<String, OperationError> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(str::to_owned)
+            .ok_or_else(pixel_header_error)
+    }
+    fn u32_header(headers: &HeaderMap, name: &'static str) -> Result<u32, OperationError> {
+        header(headers, name)?
+            .parse::<u32>()
+            .map_err(|_| pixel_header_error())
+    }
+    Ok(BalancedPixelUploadMetadata {
+        job_id: header(headers, "x-document-studio-job-id")?,
+        render_session_id: header(headers, "x-document-studio-render-session-id")?,
+        page_ordinal: u32_header(headers, "x-document-studio-page-ordinal")?,
+        source_page_index: u32_header(headers, "x-document-studio-source-page-index")?,
+        nonce: header(headers, "x-document-studio-page-nonce")?,
+        side: BalancedRenderSide::from_contract(&header(headers, "x-document-studio-render-side")?)
+            .ok_or_else(pixel_header_error)?,
         expected_width: u32_header(headers, "x-document-studio-expected-width")?,
         expected_height: u32_header(headers, "x-document-studio-expected-height")?,
     })
@@ -375,13 +466,20 @@ pub fn jobs_cancel(
                 .database()
                 .request_cancellation(&request.job_id)
                 .map_err(|_| metadata_error())?;
-            let is_pdf_to_images = state
+            let operation_id = state
                 .database()
                 .get_job(&request.job_id)
                 .map_err(|_| metadata_error())?
-                .is_some_and(|job| job.operation_id == PDF_TO_IMAGES_OPERATION_ID);
-            if is_pdf_to_images {
+                .map(|job| job.operation_id);
+            if operation_id.as_deref() == Some(PDF_TO_IMAGES_OPERATION_ID) {
                 let _ = PdfToImagesService::new(state.inner().clone()).cancel_if_idle(
+                    &request.job_id,
+                    |event| {
+                        let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+                    },
+                )?;
+            } else if operation_id.as_deref() == Some(BALANCED_COMPRESSION_OPERATION_ID) {
+                let _ = BalancedCompressionService::new(state.inner().clone()).cancel_if_idle(
                     &request.job_id,
                     |event| {
                         let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
@@ -425,6 +523,25 @@ pub fn jobs_get(
 }
 
 #[tauri::command]
+pub fn jobs_balanced_audit(
+    request: JobIdRequest,
+    state: State<'_, AppState>,
+) -> Result<Option<BalancedCompressionAudit>, OperationError> {
+    let job = state
+        .database()
+        .get_job(&request.job_id)
+        .map_err(|_| metadata_error())?
+        .ok_or_else(job_not_found)?;
+    if job.operation_id != BALANCED_COMPRESSION_OPERATION_ID {
+        return Err(request_error());
+    }
+    state
+        .database()
+        .get_balanced_compression_audit(&request.job_id)
+        .map_err(|_| metadata_error())
+}
+
+#[tauri::command]
 pub fn jobs_warnings(
     request: JobIdRequest,
     state: State<'_, AppState>,
@@ -457,6 +574,7 @@ pub fn history_list(
 }
 
 fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
+    let balanced = job.operation_id == BALANCED_COMPRESSION_OPERATION_ID;
     if !matches!(
         job.operation_id.as_str(),
         PDF_EXTRACT_OPERATION_ID
@@ -465,6 +583,7 @@ fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
             | PDF_ROTATE_OPERATION_ID
             | PDF_SPLIT_OPERATION_ID
             | PDF_TO_IMAGES_OPERATION_ID
+            | BALANCED_COMPRESSION_OPERATION_ID
     ) {
         return job;
     }
@@ -476,7 +595,9 @@ fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
     for output in &mut job.outputs {
         output.staging_path = None;
         output.partial_path = None;
-        output.final_path = None;
+        if !balanced || output.status != crate::contracts::OutputStatus::Published {
+            output.final_path = None;
+        }
     }
     job
 }
@@ -648,8 +769,8 @@ mod tests {
     use crate::app_state::{AppState, CancelOutcome};
     use crate::contracts::{
         JobInput, JobOutput, JobProgress, JobRecord, JobState, JobsCreateRequest, OperationStage,
-        OutputStatus, ProgressUnit, PDF_EXTRACT_OPERATION_ID, PDF_MERGE_OPERATION_ID,
-        PDF_TO_IMAGES_OPERATION_ID,
+        OutputStatus, ProgressUnit, BALANCED_COMPRESSION_OPERATION_ID, PDF_EXTRACT_OPERATION_ID,
+        PDF_MERGE_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID,
     };
     use crate::database::Database;
     use crate::diagnostic_copy::DiagnosticCopyService;
@@ -745,6 +866,22 @@ mod tests {
         assert!(!serde_json::to_string(&pdf_images)
             .unwrap()
             .contains(r"C:\Secret"));
+
+        let balanced = redact_viewer_job_paths(path_bearing_job(BALANCED_COMPRESSION_OPERATION_ID));
+        assert!(balanced.destination_directory.is_empty());
+        assert!(balanced.inputs[0].source_path.is_empty());
+        assert!(balanced.inputs[0].canonical_path.is_empty());
+        assert!(balanced.outputs[0].staging_path.is_none());
+        assert!(balanced.outputs[0].partial_path.is_none());
+        assert_eq!(
+            balanced.outputs[0].final_path.as_deref(),
+            Some(r"C:\Secret\Output\result.pdf")
+        );
+
+        let mut private_candidate = path_bearing_job(BALANCED_COMPRESSION_OPERATION_ID);
+        private_candidate.outputs[0].status = OutputStatus::Verified;
+        let private_candidate = redact_viewer_job_paths(private_candidate);
+        assert!(private_candidate.outputs[0].final_path.is_none());
 
         let accepted_merge = redact_viewer_job_paths(path_bearing_job(PDF_MERGE_OPERATION_ID));
         assert_eq!(accepted_merge.destination_directory, r"C:\Secret\Output");

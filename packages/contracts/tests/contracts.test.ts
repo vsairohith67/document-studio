@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import fixtures from '../fixtures/foundation-contracts.json';
 import pdfMergeFixtures from '../fixtures/pdf-merge-contracts.json';
 import pdfCompressLosslessFixtures from '../fixtures/pdf-compress-lossless-contracts.json';
+import pdfCompressBalancedFixtures from '../fixtures/pdf-compress-balanced-contracts.json';
 import pdfToImagesFixtures from '../fixtures/pdf-to-images-contracts.json';
 import ipcSchema from '../ipc.schema.json';
 import jobSchema from '../job.schema.json';
@@ -137,6 +138,33 @@ describe('pdf.compress-lossless contracts', () => {
       { ...pdfCompressLosslessFixtures.request, inputPaths: ['C:\\input\\a.pdf', 'C:\\input\\b.pdf'] },
       { ...pdfCompressLosslessFixtures.request, requestedOutputName: 'compressed.txt' },
       { ...pdfCompressLosslessFixtures.request, settings: { quality: 'balanced' } },
+    ]) {
+      expect(validateJobsCreateRequest(candidate)).toBe(false);
+    }
+  });
+});
+
+describe('pdf.compress-balanced contracts', () => {
+  it('accepts only the fixed balanced-v1 request and zero-or-one output manifest', () => {
+    expect(
+      validateOperation(pdfCompressBalancedFixtures.operationManifest),
+      JSON.stringify(validateOperation.errors),
+    ).toBe(true);
+    expect(pdfCompressBalancedFixtures.operationManifest.outputs.multiplicity).toBe('zero-or-one');
+    expect(
+      validateJobsCreateRequest(pdfCompressBalancedFixtures.request),
+      JSON.stringify(validateJobsCreateRequest.errors),
+    ).toBe(true);
+  });
+
+  it('rejects zero, multiple, non-PDF, free-form, and missing settings', () => {
+    const { settings: _settings, ...withoutSettings } = pdfCompressBalancedFixtures.request;
+    for (const candidate of [
+      { ...pdfCompressBalancedFixtures.request, inputPaths: [] },
+      { ...pdfCompressBalancedFixtures.request, inputPaths: ['C:\\input\\a.pdf', 'C:\\input\\b.pdf'] },
+      { ...pdfCompressBalancedFixtures.request, requestedOutputName: 'balanced.txt' },
+      { ...pdfCompressBalancedFixtures.request, settings: { profile: 'custom', quality: 70 } },
+      withoutSettings,
     ]) {
       expect(validateJobsCreateRequest(candidate)).toBe(false);
     }

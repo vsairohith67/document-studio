@@ -157,6 +157,7 @@ pub struct AppState {
     pub qpdf: Option<crate::qpdf::QpdfRuntimeManager>,
     pub viewer_sessions: crate::viewer_sessions::ViewerSessionManager,
     pub pdf_to_images_jobs: crate::pdf_to_images::PdfToImagesManager,
+    pub balanced_compression_jobs: crate::balanced_compression::BalancedCompressionManager,
 }
 
 impl AppState {
@@ -168,6 +169,8 @@ impl AppState {
             qpdf: None,
             viewer_sessions: crate::viewer_sessions::ViewerSessionManager::default(),
             pdf_to_images_jobs: crate::pdf_to_images::PdfToImagesManager::default(),
+            balanced_compression_jobs:
+                crate::balanced_compression::BalancedCompressionManager::default(),
         }
     }
 

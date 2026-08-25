@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import axe from 'axe-core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  BalancedCompressionVisualSession,
   DependencyDiagnostic,
   FileInspection,
   JobRecord,
@@ -12,8 +13,11 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   inspect: vi.fn(), selectPdfInputs: vi.fn(), selectDestination: vi.fn(),
-  create: vi.fn(), cancel: vi.fn(), get: vi.fn(), resolveInterrupted: vi.fn(),
+  create: vi.fn(), createBalanced: vi.fn(), balancedAudit: vi.fn(),
+  renderBalanced: vi.fn(),
+  cancel: vi.fn(), get: vi.fn(), resolveInterrupted: vi.fn(),
   progressHandler: undefined as ((event: ProgressEvent) => void) | undefined,
+  balancedVisualHandler: undefined as ((session: BalancedCompressionVisualSession) => void) | undefined,
 }));
 
 vi.mock('./api', async (importOriginal) => {
@@ -29,6 +33,8 @@ vi.mock('./api', async (importOriginal) => {
     },
     jobs: {
       create: mocks.create,
+      createBalanced: mocks.createBalanced,
+      balancedAudit: mocks.balancedAudit,
       cancel: mocks.cancel,
       get: mocks.get,
       resolveInterrupted: mocks.resolveInterrupted,
@@ -36,9 +42,17 @@ vi.mock('./api', async (importOriginal) => {
         mocks.progressHandler = handler;
         return vi.fn();
       }),
+      onBalancedVisualReady: vi.fn(async (handler) => {
+        mocks.balancedVisualHandler = handler;
+        return vi.fn();
+      }),
     },
   } };
 });
+
+vi.mock('./viewer/balancedCompression', () => ({
+  renderBalancedCompression: mocks.renderBalanced,
+}));
 
 import { OptimizeWorkspace } from './OptimizeWorkspace';
 
@@ -48,7 +62,11 @@ const system: SystemStatus = {
 };
 const dependencies: DependencyDiagnostic[] = [{
   id: 'qpdf', kind: 'external', status: 'available', version: '12.3.2',
-  capabilities: ['pdf.merge', 'pdf.compress-lossless'],
+  capabilities: ['pdf.merge', 'pdf.compress-lossless', 'pdf.compress-balanced'],
+  checkedAt: '2026-08-21T12:00:00Z', errorCode: null,
+}, {
+  id: 'pdfjs', kind: 'built-in', status: 'available', version: '6.2.108',
+  capabilities: ['pdf.to-images', 'pdf.compress-balanced'],
   checkedAt: '2026-08-21T12:00:00Z', errorCode: null,
 }];
 const source: FileInspection = {
@@ -101,20 +119,27 @@ function renderWorkspace() {
 describe('G04A Optimize workspace', () => {
   beforeEach(() => {
     mocks.progressHandler = undefined;
+    mocks.balancedVisualHandler = undefined;
     mocks.selectPdfInputs.mockResolvedValue([source.path]);
     mocks.selectDestination.mockResolvedValue('C:\\output');
     mocks.inspect.mockResolvedValue([source]);
     mocks.create.mockResolvedValue(job('queued'));
+    mocks.createBalanced.mockResolvedValue({
+      ...job('queued'),
+      operationId: 'pdf.compress-balanced',
+    });
     mocks.get.mockResolvedValue(job('completed', 1250));
     mocks.cancel.mockResolvedValue({ outcome: 'requested' });
     mocks.resolveInterrupted.mockResolvedValue(job('failed'));
+    mocks.renderBalanced.mockRejectedValue(new Error('The balanced candidate page geometry changed.'));
   });
 
   it('warns about signatures before execution and has no accessibility violations', async () => {
     const { container } = renderWorkspace();
     expect(screen.getByText(/rewriting invalidates existing digital signatures/i)).toBeTruthy();
     expect(screen.getByText(/smaller, unchanged, or larger/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /balanced|aggressive/i })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Balanced' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /aggressive/i })).toBeNull();
     const accessibility = await axe.run(container, { rules: { 'color-contrast': { enabled: false } } });
     expect(accessibility.violations).toEqual([]);
   });
@@ -127,7 +152,7 @@ describe('G04A Optimize workspace', () => {
     await user.keyboard('{Enter}');
     expect(await screen.findByText('Local file preflight ready')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Choose' }));
-    const compress = screen.getByRole('button', { name: 'Compress' });
+    const compress = screen.getByRole('button', { name: 'Compress Losslessly' });
     compress.focus();
     await user.keyboard(' ');
     expect(mocks.create).toHaveBeenCalledWith({
@@ -149,7 +174,7 @@ describe('G04A Optimize workspace', () => {
     renderWorkspace();
     await user.click(screen.getByRole('button', { name: /Open PDF/ }));
     await user.click(screen.getByRole('button', { name: 'Choose' }));
-    await user.click(screen.getByRole('button', { name: 'Compress' }));
+    await user.click(screen.getByRole('button', { name: 'Compress Losslessly' }));
     await act(async () => { mocks.progressHandler?.(completedEvent()); });
     expect(await screen.findByText('No worthwhile size reduction')).toBeTruthy();
     expect(screen.getByText('No output created')).toBeTruthy();
@@ -167,5 +192,60 @@ describe('G04A Optimize workspace', () => {
     await user.click(screen.getByRole('button', { name: /Open PDF/ }));
     await user.click(await screen.findByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /Open PDF/ })));
+  });
+
+  it('uses only the fixed balanced-v1 profile and explains the refusal boundary', async () => {
+    const user = userEvent.setup();
+    renderWorkspace();
+    await user.click(screen.getByRole('button', { name: 'Balanced' }));
+    expect(screen.getByRole('heading', { name: 'Balanced PDF Compression' })).toBeTruthy();
+    expect(screen.getByText(/Quality 82, no resampling/i)).toBeTruthy();
+    expect(screen.getByText(/Signed documents are refused/i)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /Open PDF/ }));
+    await user.click(screen.getByRole('button', { name: 'Choose' }));
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    expect(mocks.createBalanced).toHaveBeenCalledWith({
+      operationId: 'pdf.compress-balanced',
+      inputPaths: [source.path],
+      destinationDirectory: 'C:\\output',
+      requestedOutputName: 'signed-report-compressed.pdf',
+      settings: { profile: 'balanced-v1' },
+    });
+  });
+
+  it('cancels and reloads the private job when browser visual verification fails', async () => {
+    const user = userEvent.setup();
+    mocks.get.mockResolvedValue({
+      ...job('failed'),
+      operationId: 'pdf.compress-balanced',
+      outputs: [],
+    });
+    renderWorkspace();
+    await user.click(screen.getByRole('button', { name: 'Balanced' }));
+    await user.click(screen.getByRole('button', { name: /Open PDF/ }));
+    await user.click(screen.getByRole('button', { name: 'Choose' }));
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    await act(async () => {
+      mocks.balancedVisualHandler?.({
+        jobId: job('queued').id,
+        renderSessionId: 'render-session',
+        source: {
+          sessionId: 'source-session', generation: 1, sizeBytes: 100,
+          fileIdentity: 'source', displayName: 'source.pdf',
+          modifiedAt: '2026-08-26T00:00:00Z', mimeType: 'application/pdf',
+        },
+        candidate: {
+          sessionId: 'candidate-session', generation: 1, sizeBytes: 90,
+          fileIdentity: 'candidate', displayName: 'candidate.pdf',
+          modifiedAt: '2026-08-26T00:00:00Z', mimeType: 'application/pdf',
+        },
+        pages: [{ pageOrdinal: 0, sourcePageIndex: 0, nonce: 'nonce' }],
+        selectedImageCount: 1,
+        skippedImageCount: 0,
+      });
+    });
+    await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith({ jobId: job('queued').id }));
+    expect(mocks.get).toHaveBeenCalledWith({ jobId: job('queued').id });
+    expect(await screen.findByText('Document Studio could not complete that request.')).toBeTruthy();
   });
 });

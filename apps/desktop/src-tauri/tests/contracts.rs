@@ -12,6 +12,8 @@ const PDF_MERGE_GOLDEN: &str =
     include_str!("../../../../packages/contracts/fixtures/pdf-merge-contracts.json");
 const PDF_COMPRESS_LOSSLESS_GOLDEN: &str =
     include_str!("../../../../packages/contracts/fixtures/pdf-compress-lossless-contracts.json");
+const PDF_COMPRESS_BALANCED_GOLDEN: &str =
+    include_str!("../../../../packages/contracts/fixtures/pdf-compress-balanced-contracts.json");
 const PDF_TO_IMAGES_GOLDEN: &str =
     include_str!("../../../../packages/contracts/fixtures/pdf-to-images-contracts.json");
 
@@ -93,6 +95,23 @@ fn rust_deserializes_the_lossless_compression_manifest_and_single_request() {
     assert_eq!(operation.inputs.maximum, 1);
     assert_eq!(request.operation_id, "pdf.compress-lossless");
     assert_eq!(request.input_paths.len(), 1);
+}
+
+#[test]
+fn rust_deserializes_the_balanced_manifest_and_fixed_request() {
+    let fixture: Value =
+        serde_json::from_str(PDF_COMPRESS_BALANCED_GOLDEN).expect("golden JSON must parse");
+    let operation: OperationManifest = serde_json::from_value(fixture["operationManifest"].clone())
+        .expect("Balanced PDF Compression operation must deserialize");
+    let request: document_studio_lib::contracts::BalancedCompressionJobCreateRequest =
+        serde_json::from_value(fixture["request"].clone())
+            .expect("Balanced PDF Compression request must deserialize");
+
+    assert_eq!(operation.id, "pdf.compress-balanced");
+    assert_eq!(operation.version, "1.0.0");
+    assert_eq!(operation.outputs.multiplicity, "zero-or-one");
+    assert_eq!(request.input_paths.len(), 1);
+    assert_eq!(request.settings.profile, "balanced-v1");
 }
 
 #[test]

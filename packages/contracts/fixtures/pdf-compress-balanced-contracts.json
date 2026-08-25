@@ -1,0 +1,63 @@
+{
+  "request": {
+    "operationId": "pdf.compress-balanced",
+    "inputPaths": ["C:\\Users\\Example\\Documents\\source.pdf"],
+    "destinationDirectory": "C:\\Users\\Example\\Documents",
+    "requestedOutputName": "source-balanced.pdf",
+    "settings": { "profile": "balanced-v1" }
+  },
+  "operationManifest": {
+    "id": "pdf.compress-balanced",
+    "version": "1.0.0",
+    "name": "Balanced PDF Compression",
+    "category": "optimize",
+    "description": "Conservatively recompresses safe RGB images and publishes only a verified, meaningfully smaller PDF.",
+    "risk": "normal",
+    "locality": "local",
+    "inputs": {
+      "acceptedMimeTypes": ["application/pdf"],
+      "minimum": 1,
+      "maximum": 1,
+      "allowDirectories": false
+    },
+    "settingsSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile"],
+      "properties": { "profile": { "const": "balanced-v1" } }
+    },
+    "outputs": {
+      "mimeType": "application/pdf",
+      "multiplicity": "zero-or-one"
+    },
+    "dependencies": ["document-studio-core", "pdfjs", "qpdf"],
+    "verification": [
+      "regular-file",
+      "pdf-magic",
+      "sha256",
+      "qpdf-strict-check",
+      "unencrypted",
+      "unsigned",
+      "bounded-resource-graph",
+      "rgb8-image-allow-list",
+      "structural-inventory",
+      "pdfjs-page-visual-gate",
+      "ssim",
+      "psnr",
+      "changed-pixel-ratio",
+      "source-immutability",
+      "publication-hash"
+    ],
+    "stages": [
+      "inspect",
+      "preflight",
+      "estimate",
+      "plan",
+      "execute",
+      "verify",
+      "publish",
+      "audit",
+      "cleanup"
+    ]
+  }
+}

@@ -15,6 +15,7 @@ import {
   RANGE_CHUNK_BYTES,
   type OperationError,
   type ViewerDocumentMetadata,
+  type ViewerRangeRequest,
 } from '@document-studio/contracts';
 import { api } from '../api';
 
@@ -33,6 +34,37 @@ export {
   MAX_RANGE_READS,
   RANGE_CHUNK_BYTES,
 };
+
+export type PdfRangeReader = (request: ViewerRangeRequest) => Promise<Uint8Array>;
+
+export function createBoundedRangeReader(maximumActiveReads = MAX_RANGE_READS): PdfRangeReader {
+  if (!Number.isInteger(maximumActiveReads) || maximumActiveReads < 1) {
+    throw new Error('The native PDF range-read limit is invalid.');
+  }
+  let activeReads = 0;
+  const queue: Array<{
+    request: ViewerRangeRequest;
+    resolve: (bytes: Uint8Array) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
+  const pump = () => {
+    while (activeReads < maximumActiveReads && queue.length > 0) {
+      const work = queue.shift();
+      if (!work) return;
+      activeReads += 1;
+      void api.viewer.readRange(work.request)
+        .then(work.resolve, work.reject)
+        .finally(() => {
+          activeReads -= 1;
+          pump();
+        });
+    }
+  };
+  return (request) => new Promise<Uint8Array>((resolve, reject) => {
+    queue.push({ request, resolve, reject });
+    pump();
+  });
+}
 
 GlobalWorkerOptions.workerSrc = '/pdfjs/pdf.worker.mjs';
 export { PasswordResponses };
@@ -97,6 +129,7 @@ export class SessionRangeTransport extends PDFDataRangeTransport {
   private readonly physicalQueue: PhysicalRangeWork[] = [];
   private readonly logicalQueue: LogicalRangeRequest[] = [];
   private readonly onFatal: (error: unknown) => void;
+  private readonly readRange: PdfRangeReader;
   private ranges: PhysicalRangeWork[] = [];
   private activeReads = 0;
   private admittedRangeCount = 0;
@@ -108,10 +141,12 @@ export class SessionRangeTransport extends PDFDataRangeTransport {
     session: ViewerDocumentMetadata,
     initialData: Uint8Array,
     onFatal: (error: unknown) => void,
+    readRange: PdfRangeReader = api.viewer.readRange,
   ) {
     super(session.sizeBytes, initialData, initialData.byteLength === session.sizeBytes, session.displayName);
     this.session = session;
     this.onFatal = onFatal;
+    this.readRange = readRange;
   }
 
   override requestDataRange(begin: number, end: number): void {
@@ -274,7 +309,7 @@ export class SessionRangeTransport extends PDFDataRangeTransport {
       work.epoch = epoch;
       work.state = 'active';
       this.activeReads += 1;
-      void api.viewer.readRange({
+      void this.readRange({
         sessionId: this.session.sessionId,
         generation: this.session.generation,
         begin: work.begin,
@@ -344,16 +379,17 @@ export async function loadPdfSession(
   onFatalRangeError: (error: unknown) => void,
   signal?: AbortSignal,
   onLoadingResources?: (resources: PdfLoadingResources) => void,
+  readRange: PdfRangeReader = api.viewer.readRange,
 ): Promise<LoadedPdfSession> {
   if (signal?.aborted) throw new DOMException('Loading cancelled', 'AbortError');
   const initialEnd = Math.min(session.sizeBytes, RANGE_CHUNK_BYTES);
-  const initialData = await api.viewer.readRange({
+  const initialData = await readRange({
     sessionId: session.sessionId,
     generation: session.generation,
     begin: 0,
     end: initialEnd,
   });
-  const transport = new SessionRangeTransport(session, initialData, onFatalRangeError);
+  const transport = new SessionRangeTransport(session, initialData, onFatalRangeError, readRange);
   if (signal?.aborted) {
     transport.abort();
     throw new DOMException('Loading cancelled', 'AbortError');
