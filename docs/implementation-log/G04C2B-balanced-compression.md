@@ -54,6 +54,8 @@ The first exact-head review of `34ed716aff524c826c09dd41b2c8c935ef86840c` return
 
 Focused regressions cover balanced crash recovery, reference swaps, object-content swaps, oversized/mismatched DCT headers, grayscale DCT data under an RGB dictionary, equal-byte-count geometry swaps and cancellation immediately after source decode. The superseded first CI run was cancelled after the findings were confirmed; it is not final acceptance evidence.
 
+Repair-cycle re-review found one remaining MEDIUM scoped-resource collision: different nested Forms may legally reuse `/Im0` on the same page. Cycle 2 removed page/name masking and binds the allowed mutation set directly to the exact indirect image object reference selected for the qpdf patch. Its regression models two Forms with separate `/Im0` objects, proves the selected object may change, and proves the same-named unselected object may not. The superseded second CI run was cancelled and is not final acceptance evidence.
+
 ## Bounded performance evidence
 
 The reference machine was Microsoft Windows 11 Home Single Language build 26200, Intel Core i7-11800H (8 cores/16 logical processors), 42,636,668,928 bytes visible RAM and Samsung MZVL21T0HCLR-00B00 NVMe. The local toolchain was Rust 1.97.1, qpdf 12.3.2, project Chromium 151.0.7922.34 and WebView2 151.0.4129.107.

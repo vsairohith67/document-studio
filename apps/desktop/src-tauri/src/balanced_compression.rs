@@ -130,7 +130,6 @@ struct PreparedCandidate {
 struct ImageUse {
     page_indexes: BTreeSet<u32>,
     safe_edges: HashSet<String>,
-    positions: BTreeSet<(u32, String)>,
 }
 
 type ImageReplacement = (Vec<u8>, JsonMap<String, JsonValue>);
@@ -1156,7 +1155,7 @@ fn build_candidate(
         return Err(resource_error());
     }
     let mut selected_images = 0_u32;
-    let mut selected_positions = BTreeSet::<(u32, String)>::new();
+    let mut selected_references = BTreeSet::<String>::new();
     let mut affected_pages = BTreeSet::<u32>::new();
     let patch_path = workspace.root.join(PATCH_RELATIVE);
     let mut patch_file: Option<File> = None;
@@ -1208,7 +1207,7 @@ fn build_candidate(
                 )?;
                 first_patch_entry = false;
                 selected_images = selected_images.checked_add(1).ok_or_else(resource_error)?;
-                selected_positions.extend(image_use.positions);
+                selected_references.insert(reference);
                 affected_pages.extend(image_use.page_indexes);
                 drop(candidate);
             }
@@ -1225,7 +1224,7 @@ fn build_candidate(
     if affected_pages.len() > BALANCED_COMPRESSION_MAX_AFFECTED_PAGES {
         return Err(resource_error());
     }
-    let source_inventory = structural_inventory(source_json, &selected_positions)?;
+    let source_inventory = structural_inventory(source_json, &selected_references)?;
     let source_proof_hash = sha256_bytes(source_inventory.as_bytes());
     if selected_images == 0 {
         return Ok(PreparedCandidate {
@@ -1290,7 +1289,7 @@ fn build_candidate(
         return Err(verify_error());
     }
     let candidate_json = qpdf_json(runtime, workspace, candidate_relative, token)?;
-    let candidate_inventory = structural_inventory(&candidate_json, &selected_positions)?;
+    let candidate_inventory = structural_inventory(&candidate_json, &selected_references)?;
     if candidate_inventory != source_inventory {
         return Err(structural_error());
     }
@@ -1447,16 +1446,14 @@ fn collect_safe_image_uses<'a>(
             let reference = image.get("object").and_then(JsonValue::as_str);
             let name = image.get("name").and_then(JsonValue::as_str);
             match (reference, name) {
-                (Some(reference), Some(name)) if is_reference(reference) => {
+                (Some(reference), Some(_name)) if is_reference(reference) => {
                     let entry = uses
                         .entry(reference.to_owned())
                         .or_insert_with(|| ImageUse {
                             page_indexes: BTreeSet::new(),
                             safe_edges: HashSet::new(),
-                            positions: BTreeSet::new(),
                         });
                     entry.page_indexes.insert(page_index);
-                    entry.positions.insert((page_index, name.to_owned()));
                 }
                 _ => inline_count = inline_count.saturating_add(1),
             }
@@ -1526,7 +1523,6 @@ fn walk_resources(
             Some("/Image") => {
                 if let Some(image_use) = uses.get_mut(reference) {
                     image_use.page_indexes.insert(page_index);
-                    image_use.positions.insert((page_index, name.clone()));
                     let edge = format!("{container}|{name}|{reference}");
                     image_use.safe_edges.insert(edge);
                     if unsafe_ancestry {
@@ -1563,17 +1559,15 @@ fn walk_resources(
 
 fn structural_inventory(
     root: &JsonValue,
-    selected_positions: &BTreeSet<(u32, String)>,
+    selected_references: &BTreeSet<String>,
 ) -> Result<String, OperationError> {
     let objects = qpdf_objects(root)?;
     let pages = root
         .get("pages")
         .and_then(JsonValue::as_array)
         .ok_or_else(inventory_error)?;
-    let mut selected_references = HashSet::<String>::new();
     let mut page_inventory = Vec::new();
-    for (page_index, page) in pages.iter().enumerate() {
-        let page_index_u32 = page_index as u32;
+    for page in pages {
         let images = page
             .get("images")
             .and_then(JsonValue::as_array)
@@ -1584,12 +1578,10 @@ fn structural_inventory(
                 .get("name")
                 .and_then(JsonValue::as_str)
                 .ok_or_else(inventory_error)?;
-            let selected = selected_positions.contains(&(page_index_u32, name.to_owned()));
-            if selected {
-                if let Some(reference) = image.get("object").and_then(JsonValue::as_str) {
-                    selected_references.insert(reference.to_owned());
-                }
-            }
+            let selected = image
+                .get("object")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|reference| selected_references.contains(reference));
             image_inventory.push(json!({
                 "name": name,
                 "object": image.get("object"),
@@ -2840,6 +2832,41 @@ mod tests {
         assert_ne!(
             source_inventory,
             structural_inventory(&changed_ownership, &selected).unwrap()
+        );
+
+        let scoped_names = json!({
+            "pages": [{
+                "object": "1 0 R",
+                "images": [
+                    {"object": "5 0 R", "name": "/Im0", "filter": "/DCTDecode"},
+                    {"object": "7 0 R", "name": "/Im0", "filter": "/DCTDecode"}
+                ],
+                "outlines": null
+            }],
+            "qpdf": [{"jsonversion": 2}, {
+                "obj:1 0 R": {"value": {"/Resources": {"/XObject": {"/Fm0": "4 0 R", "/Fm1": "6 0 R"}}}},
+                "obj:4 0 R": {"stream": {"dict": {"/Subtype": "/Form", "/Resources": {"/XObject": {"/Im0": "5 0 R"}}}, "data": BASE64.encode(b"form-zero")}},
+                "obj:5 0 R": {"stream": {"dict": {"/Subtype": "/Image", "/Filter": "/DCTDecode"}, "data": BASE64.encode(b"selected-image")}},
+                "obj:6 0 R": {"stream": {"dict": {"/Subtype": "/Form", "/Resources": {"/XObject": {"/Im0": "7 0 R"}}}, "data": BASE64.encode(b"form-one")}},
+                "obj:7 0 R": {"stream": {"dict": {"/Subtype": "/Image", "/Filter": "/DCTDecode"}, "data": BASE64.encode(b"unselected-image")}},
+                "trailer": {"value": {"/Root": "1 0 R"}}
+            }]
+        });
+        let selected_reference = BTreeSet::from(["5 0 R".to_owned()]);
+        let scoped_inventory = structural_inventory(&scoped_names, &selected_reference).unwrap();
+        let mut allowed_selected_change = scoped_names.clone();
+        allowed_selected_change["qpdf"][1]["obj:5 0 R"]["stream"]["data"] =
+            json!(BASE64.encode(b"replacement-image"));
+        assert_eq!(
+            scoped_inventory,
+            structural_inventory(&allowed_selected_change, &selected_reference).unwrap()
+        );
+        let mut forbidden_same_name_change = scoped_names;
+        forbidden_same_name_change["qpdf"][1]["obj:7 0 R"]["stream"]["data"] =
+            json!(BASE64.encode(b"mutated-unselected-image"));
+        assert_ne!(
+            scoped_inventory,
+            structural_inventory(&forbidden_same_name_change, &selected_reference).unwrap()
         );
     }
 
