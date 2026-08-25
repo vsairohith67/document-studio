@@ -53,3 +53,14 @@ G04B's images-to-PDF writer adds these exact crates from crates.io:
 - `flate2` 1.1.9: MIT OR Apache-2.0; only the pure-Rust backend is enabled.
 
 Their exact registry checksums and boundaries are recorded in ADR-013 and the dependency register. A distributable build must regenerate complete transitive notices from the accepted `Cargo.lock`. G04B2 reuses accepted `pdfjs-dist` 6.2.108 for rendering and `image` 0.25.10 for encoding; it does not bundle PDFium, MuPDF, Poppler, PDFBox, libvips or another raster renderer.
+
+### G04C2 public-domain photographic test corpus
+
+G04C2 commits six 1280px JPEG derivatives by George Chernilevsky solely as offline quality and compression fixtures. Each source page marks the work PD-self/Public domain. Exact revision identity, resolved binary URL, dimensions, byte size and SHA-256 are preserved in the corpus manifest.
+
+- [Sunflower head 2015 G2](https://commons.wikimedia.org/w/index.php?title=File:Sunflower_head_2015_G2.jpg&oldid=1251267196)
+- [Folk Architecture 2015 G07](https://commons.wikimedia.org/w/index.php?title=File:Folk_Architecture_2015_G07.jpg&oldid=1250325699)
+- [Lviv Church of the Dormition 2015 G1](https://commons.wikimedia.org/w/index.php?title=File:Lviv_Church_of_the_Dormition_2015_G1.jpg&oldid=1098857210)
+- [Uzh River near Chernobyl 2019 G2](https://commons.wikimedia.org/w/index.php?title=File:Uzh_River_near_Chernobyl_2019_G2.jpg&oldid=1110946301)
+- [Thorichthys meeki 2019 G1](https://commons.wikimedia.org/w/index.php?title=File:Thorichthys_meeki_2019_G1.jpg&oldid=1238638582)
+- [Fruit on a plate 2019 G1](https://commons.wikimedia.org/w/index.php?title=File:Fruit_on_a_plate_2019_G1.jpg&oldid=1262411860)

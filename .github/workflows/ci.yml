@@ -23,6 +23,7 @@ jobs:
         run: |
           python -B scripts/validate_repo.py
           python -B scripts/test_validate_repo_g03.py
+          python -B scripts/g04c2_corpus.py check
       - name: Check internal Markdown links
         run: python -B scripts/check_links.py
 
@@ -91,6 +92,7 @@ jobs:
           npm run verify:g04a --workspace @document-studio/desktop
           npm run verify:g04b --workspace @document-studio/desktop
           npm run verify:g04b2 --workspace @document-studio/desktop
+          npm run verify:g04c2-corpus --workspace @document-studio/desktop
       - name: Install locked project-local Chromium
         shell: pwsh
         env:

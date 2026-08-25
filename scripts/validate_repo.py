@@ -62,6 +62,12 @@ required = [
     'docs/implementation-log/G03-viewer-core-pdf.md',
     'docs/implementation-log/G04B-image-pdf-conversion.md',
     'docs/implementation-log/G04B2-pdf-to-images.md',
+    'docs/implementation-log/G04C2-corpus-recovery.md',
+    'scripts/g04c2_corpus.py',
+    'apps/desktop/scripts/verify-g04c2-corpus.ps1',
+    'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/README.md',
+    'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/corpus-manifest.json',
+    'apps/desktop/src-tauri/tests/g04c2_corpus.rs',
     'docs/implementation-log/assets/g01-tauri-dev-launch.png',
     'Cargo.toml',
     'Cargo.lock',
@@ -681,6 +687,35 @@ G04B2_VALIDATION_INPUTS = {
 }
 validate_g04b2_boundaries(G04B2_VALIDATION_INPUTS)
 
+g04c2_manifest = json.loads(
+    (ROOT / 'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/corpus-manifest.json').read_text(encoding='utf-8')
+)
+if g04c2_manifest.get('CORPUS_MODE') != 'reviewed-rebaseline':
+    raise SystemExit('G04C2 corpus mode must preserve the independently reviewed rebaseline')
+if len(g04c2_manifest.get('entries', [])) != 6 or len(g04c2_manifest.get('generatedPdfs', [])) != 7:
+    raise SystemExit('G04C2 corpus must contain exactly six JPEG entries and seven generated PDFs')
+uzh_entries = [entry for entry in g04c2_manifest['entries'] if entry.get('id') == 'uzh-river']
+if len(uzh_entries) != 1 or uzh_entries[0].get('previousFrozenEvidence') != {
+    'dimensions': {'width': 1280, 'height': 817},
+    'bytes': 296546,
+    'sha256': '0fa88acf594e48c5a8e87e588056f66aad4cc00035b655648c37c1b54938e727',
+}:
+    raise SystemExit('G04C2 Uzh previous frozen evidence was not preserved exactly')
+g04c2_script = (ROOT / 'scripts/g04c2_corpus.py').read_text(encoding='utf-8')
+for prohibited in ['urllib', 'requests.', 'Invoke-WebRequest', 'Invoke-RestMethod']:
+    if prohibited in g04c2_script:
+        raise SystemExit(f'G04C2 CI corpus validator contains a network path: {prohibited}')
+desktop_scripts = json.loads((ROOT / 'apps/desktop/package.json').read_text(encoding='utf-8')).get('scripts', {})
+if 'verify:g04c2-corpus' not in desktop_scripts:
+    raise SystemExit('G04C2 corpus verifier is not registered in the desktop package')
+ci_text = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+for required_ci in [
+    'python -B scripts/g04c2_corpus.py check',
+    'npm run verify:g04c2-corpus --workspace @document-studio/desktop',
+]:
+    if required_ci not in ci_text:
+        raise SystemExit(f'G04C2 corpus exact-head CI is missing: {required_ci}')
+
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):
     if 'attachments/archive' in str(p):
@@ -690,5 +725,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01-G04B accepted status and G04B2 contract, raw IPC, scope and document consistency verified.'
+    f'{len(rows)} feature entries found; G01-G04B accepted status, G04B2 boundaries and G04C2 offline corpus consistency verified.'
 )
