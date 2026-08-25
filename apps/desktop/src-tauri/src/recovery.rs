@@ -2,8 +2,9 @@ use std::path::Path;
 
 use crate::app_state::AppState;
 use crate::contracts::{
-    JobRecord, JobState, OperationError, OperationStage, DIAGNOSTIC_COPY_OPERATION_ID,
-    LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN, LEGACY_DIAGNOSTIC_COPY_VERSION,
+    JobRecord, JobState, OperationError, OperationStage, BALANCED_COMPRESSION_OPERATION_ID,
+    DIAGNOSTIC_COPY_OPERATION_ID, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
+    LEGACY_DIAGNOSTIC_COPY_VERSION,
 };
 use crate::database::{Database, DatabaseError};
 use crate::publication::{hash_file, is_exact_owned_partial_path, partial_ownership_result_code};
@@ -241,13 +242,17 @@ fn reconcile_current_job(
         let current = database
             .get_job(&job.id)?
             .ok_or(DatabaseError::JobConflict)?;
-        database.transition_job(
-            &job.id,
-            current.state,
-            current.version,
-            JobState::Completed,
-            Some(OperationStage::Recovery),
-        )?;
+        if job.operation_id == BALANCED_COMPRESSION_OPERATION_ID {
+            database.complete_recovered_published(&job.id, current.state, current.version)?;
+        } else {
+            database.transition_job(
+                &job.id,
+                current.state,
+                current.version,
+                JobState::Completed,
+                Some(OperationStage::Recovery),
+            )?;
+        }
         report.completed_publications += 1;
         return Ok(());
     }

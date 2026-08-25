@@ -34,13 +34,25 @@ Local pre-PR evidence on 2026-08-26 passed:
 - locked Python validation dependency installation and `npm ci --ignore-scripts` with zero reported npm vulnerabilities;
 - repository validator, internal link checker, offline corpus validator, every G03-G04 boundary verifier and `git diff --check`;
 - TypeScript typecheck, 105 desktop tests, 29 shared-contract tests and the production Vite build;
-- `cargo fmt --check`, strict Clippy with `-D warnings`, and all 196 executed Rust tests; the two existing manual performance probes remained ignored by the normal suite;
+- `cargo fmt --check`, strict Clippy with `-D warnings`, and all 200 executed Rust tests after repair cycle 1; the two existing manual performance probes remained ignored by the normal suite;
 - all 22 real-Chromium PDF.js/browser cases;
 - the native WebView2 smoke on runtime 151.0.4129.107, including raw IPC, replay rejection, path redaction and cleanup regression evidence;
 - production WebView2 inherited-argument and single-instance smokes; and
 - the Tauri optimized no-bundle build, producing `target/release/document-studio.exe`.
 
 Exact-head CI and independent-review results remain to be recorded in the pull request before the owner gate; no unrun result is claimed here.
+
+## Independent review repair cycle 1
+
+The first exact-head review of `34ed716aff524c826c09dd41b2c8c935ef86840c` returned two HIGH and three MEDIUM findings. All five were addressed before requesting a replacement exact-head gate:
+
+- proven balanced publications now recover through the same atomic `completionKind=published` transaction used by the live path;
+- structural verification binds every object to its exact object identifier and retains indirect-reference topology while normalising only the selected image stream fields that the fixed profile may change;
+- DCT frame width, height, pixel count, precision and three-component identity are checked from the JPEG header before full decode, and decoded images must remain native RGB8 rather than being converted;
+- candidate visual dimensions must exactly equal the authenticated source upload dimensions at the Rust boundary; and
+- cancellation/time-budget checkpoints run before and between source decode, quality-82 encode, candidate decode and metric computation.
+
+Focused regressions cover balanced crash recovery, reference swaps, object-content swaps, oversized/mismatched DCT headers, grayscale DCT data under an RGB dictionary, equal-byte-count geometry swaps and cancellation immediately after source decode. The superseded first CI run was cancelled after the findings were confirmed; it is not final acceptance evidence.
 
 ## Bounded performance evidence
 

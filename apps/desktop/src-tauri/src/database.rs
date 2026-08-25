@@ -1022,6 +1022,28 @@ impl Database {
         expected_version: u64,
         timestamp: &str,
     ) -> Result<u64, DatabaseError> {
+        self.complete_published_from_state(id, JobState::Publishing, expected_version, timestamp)
+    }
+
+    pub(crate) fn complete_recovered_published(
+        &mut self,
+        id: &str,
+        expected_state: JobState,
+        expected_version: u64,
+    ) -> Result<u64, DatabaseError> {
+        if !matches!(expected_state, JobState::Publishing | JobState::Interrupted) {
+            return Err(DatabaseError::IllegalTransition);
+        }
+        self.complete_published_from_state(id, expected_state, expected_version, &now())
+    }
+
+    fn complete_published_from_state(
+        &mut self,
+        id: &str,
+        expected_state: JobState,
+        expected_version: u64,
+        timestamp: &str,
+    ) -> Result<u64, DatabaseError> {
         validate_completion_timestamp(timestamp)?;
         let expected_version_i64 = metadata_i64(expected_version, "job version")?;
         let transaction = self
@@ -1045,7 +1067,7 @@ impl Database {
         let Some((state, version, cancellation_requested_at, resolved_output_name)) = header else {
             return Err(DatabaseError::JobConflict);
         };
-        if state != JobState::Publishing.as_str()
+        if state != expected_state.as_str()
             || version != expected_version
             || cancellation_requested_at.is_some()
         {
@@ -1089,9 +1111,9 @@ impl Database {
              SET state = 'completed', stage = NULL, completed_units = total_units,
                  finished_at = ?1, updated_at = ?1,
                  version = version + 1, sequence = sequence + 1
-             WHERE id = ?2 AND state = 'publishing' AND version = ?3
+             WHERE id = ?2 AND state = ?3 AND version = ?4
                AND cancellation_requested_at IS NULL AND resolved_output_name IS NOT NULL",
-            params![timestamp, id, expected_version_i64],
+            params![timestamp, id, expected_state.as_str(), expected_version_i64],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);

@@ -95,6 +95,7 @@ struct ActiveBalancedJob {
     next_page: usize,
     expected_side: BalancedRenderSide,
     source_rgb: Option<Vec<u8>>,
+    source_dimensions: Option<(u32, u32)>,
     minimum_ssim: Option<f64>,
     minimum_psnr_db: Option<f64>,
     psnr_is_infinite: bool,
@@ -134,6 +135,18 @@ struct ImageUse {
 
 type ImageReplacement = (Vec<u8>, JsonMap<String, JsonValue>);
 type ImageUseInventory = (HashMap<String, ImageUse>, HashSet<String>, u32);
+
+#[derive(Debug)]
+enum ImageReplacementFailure {
+    Skip(BalancedCompressionSkipReason),
+    Abort(OperationError),
+}
+
+impl From<BalancedCompressionSkipReason> for ImageReplacementFailure {
+    fn from(value: BalancedCompressionSkipReason) -> Self {
+        Self::Skip(value)
+    }
+}
 
 impl BalancedCompressionService {
     pub fn new(state: AppState) -> Self {
@@ -525,6 +538,7 @@ impl BalancedCompressionService {
             next_page: 0,
             expected_side: BalancedRenderSide::Source,
             source_rgb: None,
+            source_dimensions: None,
             minimum_ssim: None,
             minimum_psnr_db: None,
             psnr_is_infinite: true,
@@ -630,6 +644,8 @@ impl BalancedCompressionService {
         match metadata.side {
             BalancedRenderSide::Source => {
                 active.source_rgb = Some(rgb);
+                active.source_dimensions =
+                    Some((metadata.expected_width, metadata.expected_height));
                 active.expected_side = BalancedRenderSide::Candidate;
                 self.progress(
                     &metadata.job_id,
@@ -645,6 +661,10 @@ impl BalancedCompressionService {
                 self.current_job(&metadata.job_id)
             }
             BalancedRenderSide::Candidate => {
+                let source_dimensions = active.source_dimensions.take().ok_or_else(stale_pixels)?;
+                if source_dimensions != (metadata.expected_width, metadata.expected_height) {
+                    return Err(stale_pixels());
+                }
                 let source = active.source_rgb.take().ok_or_else(stale_pixels)?;
                 let metrics = compare_rgb8(
                     &source,
@@ -1163,7 +1183,8 @@ fn build_candidate(
             );
             continue;
         };
-        match replacement_for_stream(stream) {
+        let mut checkpoint = || check_budget(token, started, OperationStage::Execute);
+        match replacement_for_stream(stream, &mut checkpoint) {
             Ok(Some((candidate, output_dict))) => {
                 let file = match patch_file.as_mut() {
                     Some(file) => file,
@@ -1196,7 +1217,8 @@ fn build_candidate(
                 BalancedCompressionSkipReason::CandidateNotSmaller,
                 1,
             ),
-            Err(reason) => add_skip(&mut skipped, reason, 1),
+            Err(ImageReplacementFailure::Skip(reason)) => add_skip(&mut skipped, reason, 1),
+            Err(ImageReplacementFailure::Abort(error)) => return Err(error),
         }
     }
     let affected_pages = affected_pages.into_iter().collect::<Vec<_>>();
@@ -1292,9 +1314,13 @@ fn build_candidate(
     })
 }
 
-fn replacement_for_stream(
+fn replacement_for_stream<F>(
     stream: &JsonMap<String, JsonValue>,
-) -> Result<Option<ImageReplacement>, BalancedCompressionSkipReason> {
+    checkpoint: &mut F,
+) -> Result<Option<ImageReplacement>, ImageReplacementFailure>
+where
+    F: FnMut() -> Result<(), OperationError>,
+{
     let dict = stream
         .get("dict")
         .and_then(JsonValue::as_object)
@@ -1308,17 +1334,17 @@ fn replacement_for_stream(
         || height < MIN_IMAGE_AXIS
         || !(MIN_IMAGE_PIXELS..=MAX_IMAGE_PIXELS).contains(&pixels)
     {
-        return Err(BalancedCompressionSkipReason::BelowMinimum);
+        return Err(BalancedCompressionSkipReason::BelowMinimum.into());
     }
     if dict.get("/BitsPerComponent").and_then(JsonValue::as_u64) != Some(8) {
-        return Err(BalancedCompressionSkipReason::NonRgb8);
+        return Err(BalancedCompressionSkipReason::NonRgb8.into());
     }
     if dict.get("/ColorSpace").and_then(JsonValue::as_str) != Some("/DeviceRGB") {
-        return Err(BalancedCompressionSkipReason::UnsupportedColorspace);
+        return Err(BalancedCompressionSkipReason::UnsupportedColorspace.into());
     }
     for key in ["/ImageMask", "/SMask", "/Mask", "/Matte"] {
         if dict.contains_key(key) {
-            return Err(BalancedCompressionSkipReason::MaskOrTransparency);
+            return Err(BalancedCompressionSkipReason::MaskOrTransparency.into());
         }
     }
     for key in [
@@ -1330,16 +1356,16 @@ fn replacement_for_stream(
         "/FDecodeParms",
     ] {
         if dict.contains_key(key) {
-            return Err(BalancedCompressionSkipReason::ExternalOrAlternate);
+            return Err(BalancedCompressionSkipReason::ExternalOrAlternate.into());
         }
     }
     if dict.contains_key("/DecodeParms") || dict.contains_key("/Decode") {
-        return Err(BalancedCompressionSkipReason::DecodeParameters);
+        return Err(BalancedCompressionSkipReason::DecodeParameters.into());
     }
     let filter = single_filter(dict.get("/Filter"))
         .ok_or(BalancedCompressionSkipReason::UnsupportedFilter)?;
     if !matches!(filter, "/DCTDecode" | "/FlateDecode") {
-        return Err(BalancedCompressionSkipReason::UnsupportedFilter);
+        return Err(BalancedCompressionSkipReason::UnsupportedFilter.into());
     }
     let data = stream
         .get("data")
@@ -1348,6 +1374,7 @@ fn replacement_for_stream(
     let encoded = BASE64
         .decode(data)
         .map_err(|_| BalancedCompressionSkipReason::CandidateDecode)?;
+    checkpoint().map_err(ImageReplacementFailure::Abort)?;
     let source_rgb = if filter == "/DCTDecode" {
         decode_rgb_jpeg(&encoded, width, height)?
     } else {
@@ -1367,22 +1394,26 @@ fn replacement_for_stream(
             .read_to_end(&mut decoded)
             .map_err(|_| BalancedCompressionSkipReason::CandidateDecode)?;
         if decoded.len() != expected {
-            return Err(BalancedCompressionSkipReason::CandidateDecode);
+            return Err(BalancedCompressionSkipReason::CandidateDecode.into());
         }
         decoded
     };
+    checkpoint().map_err(ImageReplacementFailure::Abort)?;
     let mut candidate = Vec::new();
     JpegEncoder::new_with_quality(&mut candidate, BALANCED_COMPRESSION_JPEG_QUALITY)
         .encode(&source_rgb, width, height, ExtendedColorType::Rgb8)
         .map_err(|_| BalancedCompressionSkipReason::CandidateDecode)?;
+    checkpoint().map_err(ImageReplacementFailure::Abort)?;
     if candidate.len().saturating_add(MIN_IMAGE_SAVINGS) > encoded.len() {
         return Ok(None);
     }
     let decoded_candidate = decode_rgb_jpeg(&candidate, width, height)?;
+    checkpoint().map_err(ImageReplacementFailure::Abort)?;
     let metrics = compare_rgb8(&source_rgb, &decoded_candidate, width, height)
         .map_err(|_| BalancedCompressionSkipReason::CandidateQuality)?;
+    checkpoint().map_err(ImageReplacementFailure::Abort)?;
     if !metrics.passes() {
-        return Err(BalancedCompressionSkipReason::CandidateQuality);
+        return Err(BalancedCompressionSkipReason::CandidateQuality.into());
     }
     let mut output_dict = dict.clone();
     output_dict.remove("/Length");
@@ -1561,6 +1592,7 @@ fn structural_inventory(
             }
             image_inventory.push(json!({
                 "name": name,
+                "object": image.get("object"),
                 "width": image.get("width"),
                 "height": image.get("height"),
                 "bits": image.get("bitspercomponent"),
@@ -1570,12 +1602,12 @@ fn structural_inventory(
             }));
         }
         page_inventory.push(json!({
+            "object": page.get("object"),
             "images": image_inventory,
-            "outlines": normalize_value(page.get("outlines").unwrap_or(&JsonValue::Null), false),
+            "outlines": normalize_value(page.get("outlines").unwrap_or(&JsonValue::Null)),
         }));
     }
-    let mut plain = Vec::<String>::new();
-    let mut streams = Vec::<String>::new();
+    let mut object_inventory = BTreeMap::<String, JsonValue>::new();
     for (key, object) in objects {
         if let Some(stream) = object.get("stream").and_then(JsonValue::as_object) {
             let reference = key.strip_prefix("obj:").unwrap_or(key);
@@ -1592,12 +1624,13 @@ fn structural_inventory(
                 .get("data")
                 .and_then(JsonValue::as_str)
                 .ok_or_else(inventory_error)?;
-            streams.push(
-                serde_json::to_string(&json!({
-                    "dict": normalize_value(&dict, true),
+            object_inventory.insert(
+                key.clone(),
+                json!({
+                    "kind": "stream",
+                    "dict": normalize_value(&dict),
                     "sha256": if selected { "@selected".to_owned() } else { sha256_bytes(&BASE64.decode(data).map_err(|_| inventory_error())?) },
-                }))
-                .map_err(|_| inventory_error())?,
+                }),
             );
         } else if let Some(value) = object.get("value") {
             let mut value = value.clone();
@@ -1609,27 +1642,29 @@ fn structural_inventory(
                     trailer.remove("/ID");
                 }
             }
-            plain.push(
-                serde_json::to_string(&normalize_value(&value, true))
-                    .map_err(|_| inventory_error())?,
+            object_inventory.insert(
+                key.clone(),
+                json!({
+                    "kind": "value",
+                    "value": normalize_value(&value),
+                }),
             );
+        } else {
+            return Err(inventory_error());
         }
     }
-    plain.sort();
-    streams.sort();
     serde_json::to_string(&json!({
         "pages": page_inventory,
-        "acroform": normalize_value(root.get("acroform").unwrap_or(&JsonValue::Null), true),
-        "attachments": normalize_value(root.get("attachments").unwrap_or(&JsonValue::Null), true),
-        "outlines": normalize_value(root.get("outlines").unwrap_or(&JsonValue::Null), true),
-        "pagelabels": normalize_value(root.get("pagelabels").unwrap_or(&JsonValue::Null), true),
-        "plain": plain,
-        "streams": streams,
+        "acroform": normalize_value(root.get("acroform").unwrap_or(&JsonValue::Null)),
+        "attachments": normalize_value(root.get("attachments").unwrap_or(&JsonValue::Null)),
+        "outlines": normalize_value(root.get("outlines").unwrap_or(&JsonValue::Null)),
+        "pagelabels": normalize_value(root.get("pagelabels").unwrap_or(&JsonValue::Null)),
+        "objects": object_inventory,
     }))
     .map_err(|_| inventory_error())
 }
 
-fn normalize_value(value: &JsonValue, normalize_references: bool) -> JsonValue {
+fn normalize_value(value: &JsonValue) -> JsonValue {
     match value {
         JsonValue::Object(object) => {
             let mut normalized = JsonMap::new();
@@ -1637,19 +1672,11 @@ fn normalize_value(value: &JsonValue, normalize_references: bool) -> JsonValue {
                 if key == "/Length" {
                     continue;
                 }
-                normalized.insert(key.clone(), normalize_value(value, normalize_references));
+                normalized.insert(key.clone(), normalize_value(value));
             }
             JsonValue::Object(normalized)
         }
-        JsonValue::Array(values) => JsonValue::Array(
-            values
-                .iter()
-                .map(|value| normalize_value(value, normalize_references))
-                .collect(),
-        ),
-        JsonValue::String(value) if normalize_references && is_reference(value) => {
-            json!("@reference")
-        }
+        JsonValue::Array(values) => JsonValue::Array(values.iter().map(normalize_value).collect()),
         _ => value.clone(),
     }
 }
@@ -1848,12 +1875,105 @@ fn decode_rgb_jpeg(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, BalancedCompressionSkipReason> {
+    verify_rgb8_jpeg_header(bytes, width, height)?;
     let decoded = image::load_from_memory_with_format(bytes, ImageFormat::Jpeg)
         .map_err(|_| BalancedCompressionSkipReason::CandidateDecode)?;
-    if decoded.width() != width || decoded.height() != height || decoded.color().has_alpha() {
+    match decoded {
+        image::DynamicImage::ImageRgb8(image)
+            if image.width() == width && image.height() == height =>
+        {
+            Ok(image.into_raw())
+        }
+        image::DynamicImage::ImageLuma8(_) | image::DynamicImage::ImageLumaA8(_) => {
+            Err(BalancedCompressionSkipReason::NonRgb8)
+        }
+        _ => Err(BalancedCompressionSkipReason::CandidateDecode),
+    }
+}
+
+fn verify_rgb8_jpeg_header(
+    bytes: &[u8],
+    expected_width: u32,
+    expected_height: u32,
+) -> Result<(), BalancedCompressionSkipReason> {
+    if bytes.len() < 4 || bytes[..2] != [0xff, 0xd8] {
         return Err(BalancedCompressionSkipReason::CandidateDecode);
     }
-    Ok(decoded.into_rgb8().into_raw())
+    let mut cursor = 2_usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] != 0xff {
+            return Err(BalancedCompressionSkipReason::CandidateDecode);
+        }
+        while cursor < bytes.len() && bytes[cursor] == 0xff {
+            cursor += 1;
+        }
+        let marker = *bytes
+            .get(cursor)
+            .ok_or(BalancedCompressionSkipReason::CandidateDecode)?;
+        cursor += 1;
+        if marker == 0x00 {
+            return Err(BalancedCompressionSkipReason::CandidateDecode);
+        }
+        if marker == 0xd8 || marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        if marker == 0xd9 || marker == 0xda {
+            return Err(BalancedCompressionSkipReason::CandidateDecode);
+        }
+        let length_bytes = bytes
+            .get(cursor..cursor.saturating_add(2))
+            .ok_or(BalancedCompressionSkipReason::CandidateDecode)?;
+        let segment_length = usize::from(u16::from_be_bytes([length_bytes[0], length_bytes[1]]));
+        if segment_length < 2 {
+            return Err(BalancedCompressionSkipReason::CandidateDecode);
+        }
+        let payload_start = cursor + 2;
+        let segment_end = cursor
+            .checked_add(segment_length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(BalancedCompressionSkipReason::CandidateDecode)?;
+        let is_start_of_frame = matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        );
+        if is_start_of_frame {
+            let header = bytes
+                .get(payload_start..segment_end)
+                .ok_or(BalancedCompressionSkipReason::CandidateDecode)?;
+            if header.len() < 6 {
+                return Err(BalancedCompressionSkipReason::CandidateDecode);
+            }
+            let precision = header[0];
+            let height = u32::from(u16::from_be_bytes([header[1], header[2]]));
+            let width = u32::from(u16::from_be_bytes([header[3], header[4]]));
+            let components = header[5];
+            let component_bytes = usize::from(components)
+                .checked_mul(3)
+                .and_then(|value| value.checked_add(6))
+                .ok_or(BalancedCompressionSkipReason::CandidateDecode)?;
+            if header.len() < component_bytes {
+                return Err(BalancedCompressionSkipReason::CandidateDecode);
+            }
+            if precision != 8 || components != 3 {
+                return Err(BalancedCompressionSkipReason::NonRgb8);
+            }
+            let pixels = u64::from(width)
+                .checked_mul(u64::from(height))
+                .filter(|pixels| *pixels <= MAX_IMAGE_PIXELS)
+                .ok_or(BalancedCompressionSkipReason::CandidateDecode)?;
+            if width == 0
+                || height == 0
+                || pixels == 0
+                || width != expected_width
+                || height != expected_height
+            {
+                return Err(BalancedCompressionSkipReason::CandidateDecode);
+            }
+            return Ok(());
+        }
+        cursor = segment_end;
+    }
+    Err(BalancedCompressionSkipReason::CandidateDecode)
 }
 
 fn copy_snapshot(
@@ -2395,6 +2515,19 @@ fn cancelled() -> OperationError {
 mod tests {
     use super::*;
 
+    fn replacement_without_cancellation(
+        stream: &JsonMap<String, JsonValue>,
+    ) -> Result<Option<ImageReplacement>, BalancedCompressionSkipReason> {
+        let mut checkpoint = || Ok(());
+        match replacement_for_stream(stream, &mut checkpoint) {
+            Ok(replacement) => Ok(replacement),
+            Err(ImageReplacementFailure::Skip(reason)) => Err(reason),
+            Err(ImageReplacementFailure::Abort(error)) => {
+                panic!("unexpected replacement abort: {}", error.code)
+            }
+        }
+    }
+
     #[test]
     fn reference_parser_is_strict() {
         assert!(is_reference("12 0 R"));
@@ -2563,7 +2696,7 @@ mod tests {
                 stream["dict"][key] = value.clone();
             }
             assert_eq!(
-                replacement_for_stream(stream.as_object().unwrap()).unwrap_err(),
+                replacement_without_cancellation(stream.as_object().unwrap()).unwrap_err(),
                 expected,
                 "{label}"
             );
@@ -2590,7 +2723,7 @@ mod tests {
             "data": BASE64.encode(encoded)
         });
         assert_eq!(
-            replacement_for_stream(stream.as_object().unwrap()).unwrap(),
+            replacement_without_cancellation(stream.as_object().unwrap()).unwrap(),
             None
         );
 
@@ -2602,8 +2735,111 @@ mod tests {
         let mut oversized_stream = stream;
         oversized_stream["data"] = json!(BASE64.encode(encoded));
         assert_eq!(
-            replacement_for_stream(oversized_stream.as_object().unwrap()).unwrap_err(),
+            replacement_without_cancellation(oversized_stream.as_object().unwrap()).unwrap_err(),
             BalancedCompressionSkipReason::CandidateDecode
+        );
+    }
+
+    #[test]
+    fn dct_header_limits_and_rgb8_identity_are_proven_before_full_decode() {
+        let oversized_header = vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x20, 0x00, 0x20, 0x00, 0x03, 0x01, 0x11,
+            0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+        ];
+        assert_eq!(
+            verify_rgb8_jpeg_header(&oversized_header, 512, 512).unwrap_err(),
+            BalancedCompressionSkipReason::CandidateDecode
+        );
+
+        let grayscale = vec![127_u8; 512 * 512];
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode(&grayscale, 512, 512, ExtendedColorType::L8)
+            .unwrap();
+        let stream = json!({
+            "dict": {
+                "/Type": "/XObject",
+                "/Subtype": "/Image",
+                "/Width": 512,
+                "/Height": 512,
+                "/ColorSpace": "/DeviceRGB",
+                "/BitsPerComponent": 8,
+                "/Filter": "/DCTDecode"
+            },
+            "data": BASE64.encode(jpeg)
+        });
+        assert_eq!(
+            replacement_without_cancellation(stream.as_object().unwrap()).unwrap_err(),
+            BalancedCompressionSkipReason::NonRgb8
+        );
+    }
+
+    #[test]
+    fn replacement_observes_cancellation_between_expensive_image_stages() {
+        let pixels = vec![0_u8; 512 * 512 * 3];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&pixels).unwrap();
+        let encoded = encoder.finish().unwrap();
+        let stream = json!({
+            "dict": {
+                "/Type": "/XObject",
+                "/Subtype": "/Image",
+                "/Width": 512,
+                "/Height": 512,
+                "/ColorSpace": "/DeviceRGB",
+                "/BitsPerComponent": 8,
+                "/Filter": "/FlateDecode"
+            },
+            "data": BASE64.encode(encoded)
+        });
+        let mut checkpoints = 0_u32;
+        let mut checkpoint = || {
+            checkpoints += 1;
+            if checkpoints == 2 {
+                Err(cancelled())
+            } else {
+                Ok(())
+            }
+        };
+        let result = replacement_for_stream(stream.as_object().unwrap(), &mut checkpoint);
+        match result {
+            Err(ImageReplacementFailure::Abort(error)) => assert_eq!(error.code, "CANCELLED"),
+            other => panic!("expected cancellation after source decode, got {other:?}"),
+        }
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn structural_inventory_binds_reference_topology_and_object_ownership() {
+        let source = json!({
+            "pages": [{"object": "1 0 R", "images": [], "outlines": null}],
+            "qpdf": [{"jsonversion": 2}, {
+                "obj:1 0 R": {"value": {"/Contents": "2 0 R", "/Thumb": "3 0 R"}},
+                "obj:2 0 R": {"stream": {"dict": {"/Type": "/Metadata"}, "data": BASE64.encode(b"first")}},
+                "obj:3 0 R": {"stream": {"dict": {"/Type": "/Metadata"}, "data": BASE64.encode(b"second")}},
+                "trailer": {"value": {"/Root": "1 0 R"}}
+            }]
+        });
+        let selected = BTreeSet::new();
+        let source_inventory = structural_inventory(&source, &selected).unwrap();
+
+        let mut changed_topology = source.clone();
+        changed_topology["qpdf"][1]["obj:1 0 R"]["value"]["/Contents"] = json!("3 0 R");
+        changed_topology["qpdf"][1]["obj:1 0 R"]["value"]["/Thumb"] = json!("2 0 R");
+        assert_ne!(
+            source_inventory,
+            structural_inventory(&changed_topology, &selected).unwrap()
+        );
+
+        let mut changed_ownership = source.clone();
+        changed_ownership["qpdf"][1]["obj:2 0 R"]["stream"]["data"] =
+            source["qpdf"][1]["obj:3 0 R"]["stream"]["data"].clone();
+        changed_ownership["qpdf"][1]["obj:3 0 R"]["stream"]["data"] =
+            source["qpdf"][1]["obj:2 0 R"]["stream"]["data"].clone();
+        assert_ne!(
+            source_inventory,
+            structural_inventory(&changed_ownership, &selected).unwrap()
         );
     }
 
@@ -3212,6 +3448,81 @@ mod tests {
                     expected_height: 16,
                 },
                 vec![255_u8; 16 * 16 * 4],
+                |_| {},
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "BALANCED_RENDER_STALE");
+        let failed = state.database().get_job(&job.id).unwrap().unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(failed.outputs.is_empty());
+        assert!(!destination.path().join("must-not-exist.pdf").exists());
+        assert!(!state.workspaces.root().join(&job.id).exists());
+    }
+
+    #[test]
+    fn candidate_visual_geometry_must_match_the_authenticated_source_geometry() {
+        let app_data = tempfile::tempdir().unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_path = source_root.path().join("geometry.pdf");
+        fs::write(&source_path, synthetic_rgb_pdf(512, 512, 100)).unwrap();
+        let database =
+            crate::database::Database::open(&app_data.path().join("metadata.sqlite3")).unwrap();
+        let workspaces = crate::workspace::WorkspaceManager::initialize(app_data.path()).unwrap();
+        let state =
+            AppState::new(database, workspaces).with_qpdf(crate::qpdf::QpdfRuntimeManager::new(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/qpdf/12.3.2"),
+                app_data.path().join("runtime-cache"),
+            ));
+        let service = BalancedCompressionService::new(state.clone());
+        let job = service
+            .create_job(BalancedCompressionJobCreateRequest {
+                operation_id: BALANCED_COMPRESSION_OPERATION_ID.to_owned(),
+                input_paths: vec![source_path.to_string_lossy().into_owned()],
+                destination_directory: destination.path().to_string_lossy().into_owned(),
+                requested_output_name: "must-not-exist.pdf".to_owned(),
+                settings: crate::contracts::BalancedCompressionSettings {
+                    profile: BALANCED_COMPRESSION_PROFILE.to_owned(),
+                },
+            })
+            .unwrap();
+        let token = state.cancellations.register(&job.id);
+        let mut visual = None;
+        service
+            .prepare_with_registered_token(&job.id, token, |_| {}, |session| visual = Some(session))
+            .unwrap();
+        let visual = visual.unwrap();
+        let ticket = visual.pages[0].clone();
+        let source_pixels = vec![255_u8; 16 * 32 * 4];
+        service
+            .submit_page(
+                BalancedPixelUploadMetadata {
+                    job_id: job.id.clone(),
+                    render_session_id: visual.render_session_id.clone(),
+                    page_ordinal: ticket.page_ordinal,
+                    source_page_index: ticket.source_page_index,
+                    nonce: ticket.nonce.clone(),
+                    side: BalancedRenderSide::Source,
+                    expected_width: 16,
+                    expected_height: 32,
+                },
+                source_pixels.clone(),
+                |_| {},
+            )
+            .unwrap();
+        let error = service
+            .submit_page(
+                BalancedPixelUploadMetadata {
+                    job_id: job.id.clone(),
+                    render_session_id: visual.render_session_id,
+                    page_ordinal: ticket.page_ordinal,
+                    source_page_index: ticket.source_page_index,
+                    nonce: ticket.nonce,
+                    side: BalancedRenderSide::Candidate,
+                    expected_width: 32,
+                    expected_height: 16,
+                },
+                source_pixels,
                 |_| {},
             )
             .unwrap_err();

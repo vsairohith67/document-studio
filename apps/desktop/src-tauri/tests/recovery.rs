@@ -6,7 +6,10 @@ use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
 use document_studio_lib::app_state::AppState;
-use document_studio_lib::contracts::{JobRecord, JobState, JobsCreateRequest, OperationStage};
+use document_studio_lib::contracts::{
+    JobCompletionKind, JobRecord, JobState, JobsCreateRequest, OperationStage,
+    BALANCED_COMPRESSION_OPERATION_ID, BALANCED_COMPRESSION_VERSION,
+};
 use document_studio_lib::database::{Database, DatabaseError};
 use document_studio_lib::diagnostic_copy::DiagnosticCopyService;
 use document_studio_lib::pdf_merge::PdfMergeService;
@@ -414,12 +417,24 @@ fn activated_identity_mismatch_preserves_preexisting_partial_after_release_failu
 }
 
 #[test]
-fn publishing_job_completes_only_when_recorded_final_hash_and_size_match() {
+fn balanced_interrupted_publication_recovers_with_durable_published_outcome() {
     let (_app_data, state, service) = setup();
     let source = tempdir().unwrap();
     let destination = tempdir().unwrap();
     let input = support::write_fixture(source.path(), "input.bin", b"verified crash fixture");
     let job = create_job(&service, &input, destination.path());
+    state
+        .database()
+        .connection()
+        .execute(
+            "UPDATE jobs SET operation_id = ?1, operation_version = ?2 WHERE id = ?3",
+            (
+                BALANCED_COMPRESSION_OPERATION_ID,
+                BALANCED_COMPRESSION_VERSION,
+                &job.id,
+            ),
+        )
+        .unwrap();
     let workspace = state.workspaces.create_job(&job.id).unwrap();
     let staging = workspace.staging.join("output.staging");
     fs::write(&staging, b"verified crash fixture").unwrap();
@@ -481,14 +496,22 @@ fn publishing_job_completes_only_when_recorded_final_hash_and_size_match() {
             Some(&partial_path.to_string_lossy()),
         )
         .unwrap();
+    let publishing = state.database().get_job(&job.id).unwrap().unwrap();
+    state
+        .database()
+        .mark_interrupted(&job.id, publishing.state)
+        .unwrap();
 
     let report = reconcile_startup(&state).unwrap();
     assert_eq!(report.completed_publications, 1);
     assert!(!workspace.root.exists());
+    let recovered = state.database().get_job(&job.id).unwrap().unwrap();
+    assert_eq!(recovered.state, JobState::Completed);
     assert_eq!(
-        state.database().get_job(&job.id).unwrap().unwrap().state,
-        JobState::Completed
+        recovered.completion_kind,
+        Some(JobCompletionKind::Published)
     );
+    assert_eq!(recovered.reason, None);
     assert_eq!(fs::read(final_path).unwrap(), b"verified crash fixture");
 }
 
