@@ -69,7 +69,7 @@ export function OptimizeWorkspace({
     generation: number;
     session: BalancedCompressionVisualSession;
   }>());
-  const visualRunning = useRef(false);
+  const visualOwner = useRef<{ generation: number; jobId: string } | null>(null);
   const mounted = useRef(true);
   const operationGeneration = useRef(0);
   const balancedOperation = useRef<BalancedCompressionOperation | null>(null);
@@ -112,11 +112,24 @@ export function OptimizeWorkspace({
     operation: BalancedCompressionOperation,
   ) => {
     if (
-      visualRunning.current
-      || !acceptsBalancedCallback(operation, session.jobId)
+      !acceptsBalancedCallback(operation, session.jobId)
       || !operation.canStartVisual(session.jobId)
     ) return;
-    visualRunning.current = true;
+    const activeVisual = visualOwner.current;
+    if (activeVisual) {
+      if (
+        activeVisual.generation !== operation.generation
+        || activeVisual.jobId !== session.jobId
+      ) {
+        pendingVisual.current.set(session.jobId, {
+          generation: operation.generation,
+          session,
+        });
+      }
+      return;
+    }
+    const owner = { generation: operation.generation, jobId: session.jobId };
+    visualOwner.current = owner;
     pendingVisual.current.delete(session.jobId);
     const controller = new AbortController();
     renderAbort.current = controller;
@@ -150,7 +163,20 @@ export function OptimizeWorkspace({
         renderTask.current = null;
         renderAbort.current = null;
       }
-      visualRunning.current = false;
+      if (visualOwner.current === owner) visualOwner.current = null;
+      const nextOperation = balancedOperation.current;
+      const nextJobId = jobId.current;
+      const pending = nextJobId ? pendingVisual.current.get(nextJobId) : undefined;
+      if (
+        mounted.current
+        && nextOperation
+        && nextJobId
+        && pending?.generation === nextOperation.generation
+        && nextOperation.canStartVisual(pending.session.jobId)
+      ) {
+        pendingVisual.current.delete(nextJobId);
+        void runBalancedVisual(pending.session, nextOperation);
+      }
     }
   };
 
@@ -385,6 +411,15 @@ export function OptimizeWorkspace({
       }
     }
   };
+  const changeProfile = (nextProfile: 'lossless' | 'balanced') => {
+    operationGeneration.current += 1;
+    balancedOperation.current = null;
+    jobId.current = null;
+    pendingVisual.current.clear();
+    setProfile(nextProfile);
+    setAudit(null);
+    setJob(null);
+  };
   const cancel = async () => {
     if (!job) return;
     try {
@@ -466,14 +501,14 @@ export function OptimizeWorkspace({
                 className={profile === 'lossless' ? 'secondary active' : 'secondary'}
                 aria-pressed={profile === 'lossless'}
                 disabled={busy}
-                onClick={() => { setProfile('lossless'); setAudit(null); setJob(null); }}
+                onClick={() => { changeProfile('lossless'); }}
               >Lossless</button>
               <button
                 type="button"
                 className={profile === 'balanced' ? 'secondary active' : 'secondary'}
                 aria-pressed={profile === 'balanced'}
                 disabled={busy}
-                onClick={() => { setProfile('balanced'); setAudit(null); setJob(null); }}
+                onClick={() => { changeProfile('balanced'); }}
               >Balanced</button>
             </div>
             {!source ? (

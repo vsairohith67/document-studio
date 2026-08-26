@@ -165,6 +165,9 @@ foreach ($prohibited in @('toBlob(', 'convertToBlob(', 'Promise.all(', 'fetch(',
 }
 if (!$workspace.Contains('const snapshot = await operation.dispose().catch(() => null)') -or
     !$workspace.Contains('pendingVisual.current.get(created.id)') -or
+    !$workspace.Contains('const visualOwner = useRef<') -or
+    !$workspace.Contains('void runBalancedVisual(pending.session, nextOperation)') -or
+    !$workspace.Contains('operationGeneration.current += 1') -or
     !$lifecycle.Contains('request = (async () =>') -or
     !$lifecycle.Contains('await this.jobs.cancel({ jobId })') -or
     !$lifecycle.Contains('!this.cancellationRequested') -or
@@ -172,6 +175,8 @@ if (!$workspace.Contains('const snapshot = await operation.dispose().catch(() =>
     !$backend.Contains('&& token.is_cancelled()') -or
     !$backend.Contains('copy_rgb8_with_cancellation') -or
     !$workspaceTests.Contains('cancels and reloads the private job when browser visual verification fails') -or
+    !$workspaceTests.Contains('drains the exact replacement visual session after the previous terminal renderer unwinds') -or
+    !$workspaceTests.Contains('does not repopulate balanced audit evidence after switching profiles') -or
     !$lifecycleTests.Contains('deduplicates known-job reconciliation across unmount, render abort, and repeated requests')) {
   throw 'G04C2B browser-render failure and unmount paths do not reconcile the private backend job exactly once.'
 }

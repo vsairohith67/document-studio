@@ -638,6 +638,40 @@ describe('G04A Optimize workspace', () => {
     expect(await screen.findByText('Verified compressed PDF')).toBeTruthy();
   });
 
+  it('drains the exact replacement visual session after the previous terminal renderer unwinds', async () => {
+    const user = userEvent.setup();
+    const first = balancedJob('queued', { id: 'unwinding-old-job' });
+    const firstCompleted = balancedJob('completed', { id: first.id });
+    const second = balancedJob('queued', { id: 'unwinding-new-job' });
+    const secondCompleted = balancedJob('completed', { id: second.id });
+    const heldFirstRender = deferred<JobRecord>();
+    mocks.createBalanced.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mocks.renderBalanced
+      .mockReturnValueOnce(heldFirstRender.promise)
+      .mockResolvedValueOnce(secondCompleted);
+    mocks.get.mockImplementation(({ jobId }: { jobId: string }) => Promise.resolve(
+      jobId === first.id ? firstCompleted : secondCompleted,
+    ));
+    renderWorkspace();
+    await prepareBalanced(user);
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    await act(async () => { mocks.balancedVisualHandler?.(visualSession(first.id)); });
+    expect(mocks.renderBalanced).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      mocks.progressHandler?.(balancedEvent(firstCompleted, firstCompleted.sequence + 1));
+    });
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    await waitFor(() => expect(mocks.createBalanced).toHaveBeenCalledTimes(2));
+    await act(async () => { mocks.balancedVisualHandler?.(visualSession(second.id)); });
+    expect(mocks.renderBalanced).toHaveBeenCalledTimes(1);
+
+    await act(async () => { heldFirstRender.resolve(firstCompleted); });
+    await waitFor(() => expect(mocks.renderBalanced).toHaveBeenCalledTimes(2));
+    expect(mocks.renderBalanced.mock.calls[1]?.[0]).toEqual(visualSession(second.id));
+    expect(await screen.findByText('Verified compressed PDF')).toBeTruthy();
+  });
+
   it('performs no stale write or cancellation when unmounted during terminal audit read', async () => {
     const user = userEvent.setup();
     const auditRead = deferred<BalancedCompressionAudit | null>();
@@ -654,5 +688,24 @@ describe('G04A Optimize workspace', () => {
 
     expect(mocks.cancel).not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain('balanced-v1 verification');
+  });
+
+  it('does not repopulate balanced audit evidence after switching profiles', async () => {
+    const user = userEvent.setup();
+    const auditRead = deferred<BalancedCompressionAudit | null>();
+    mocks.renderBalanced.mockResolvedValue(balancedJob('completed'));
+    mocks.balancedAudit.mockReturnValue(auditRead.promise);
+    renderWorkspace();
+    await prepareBalanced(user);
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    await act(async () => { mocks.balancedVisualHandler?.(visualSession()); });
+    expect(await screen.findByText('Verified compressed PDF')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Lossless' }));
+    await act(async () => { auditRead.resolve(auditEvidence); });
+
+    expect(screen.getByRole('heading', { name: 'Lossless PDF Compression' })).toBeTruthy();
+    expect(screen.queryByLabelText('Balanced compression verification evidence')).toBeNull();
+    expect(mocks.cancel).not.toHaveBeenCalled();
   });
 });
