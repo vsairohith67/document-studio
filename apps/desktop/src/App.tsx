@@ -18,6 +18,11 @@ const ConvertWorkspace = lazy(async () => {
   return { default: module.ConvertWorkspace };
 });
 
+const BatchWorkspace = lazy(async () => {
+  const module = await import('./BatchWorkspace');
+  return { default: module.BatchWorkspace };
+});
+
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const maximumInputs = 128;
 
@@ -46,7 +51,7 @@ function validPdfOutputName(name: string): boolean {
 }
 
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<'merge' | 'viewer' | 'optimize' | 'convert'>('merge');
+  const [workspaceMode, setWorkspaceMode] = useState<'merge' | 'viewer' | 'optimize' | 'convert' | 'batch'>('merge');
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [inputs, setInputs] = useState<SelectedPdf[]>([]);
   const [destination, setDestination] = useState<string | null>(null);
@@ -238,6 +243,7 @@ export default function App() {
           onOpenMerge={() => setWorkspaceMode('merge')}
           onOpenViewer={() => setWorkspaceMode('viewer')}
           onOpenConvert={() => setWorkspaceMode('convert')}
+          onOpenBatch={() => setWorkspaceMode('batch')}
         />
       </Suspense>
     );
@@ -252,6 +258,7 @@ export default function App() {
           onOpenMerge={() => setWorkspaceMode('merge')}
           onOpenViewer={() => setWorkspaceMode('viewer')}
           onOpenOptimize={() => setWorkspaceMode('optimize')}
+          onOpenBatch={() => setWorkspaceMode('batch')}
         />
       </Suspense>
     );
@@ -266,10 +273,26 @@ export default function App() {
           <button className="rail-button active" aria-current="page">Viewer</button>
           <button className="rail-button" onClick={() => setWorkspaceMode('optimize')}>Optimize</button>
           <button className="rail-button" onClick={() => setWorkspaceMode('convert')}>Convert</button>
+          <button className="rail-button" onClick={() => setWorkspaceMode('batch')}>Batch</button>
           <button className="rail-button" disabled>Settings</button>
         </aside>
         <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing the local PDF workspace…</div></main>}><ViewerWorkspace /></Suspense>
       </div>
+    );
+  }
+
+  if (workspaceMode === 'batch') {
+    return (
+      <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing batch preview…</div></main>}>
+        <BatchWorkspace
+          system={system}
+          onOpenMerge={() => setWorkspaceMode('merge')}
+          onOpenViewer={() => setWorkspaceMode('viewer')}
+          onOpenOptimize={() => setWorkspaceMode('optimize')}
+          onOpenConvert={() => setWorkspaceMode('convert')}
+          onCreated={() => void refreshHistory()}
+        />
+      </Suspense>
     );
   }
 
@@ -278,7 +301,7 @@ export default function App() {
       <aside className="rail" aria-label="Primary navigation">
         <div className="brand" aria-label="Document Studio">DS</div>
         <button className="rail-button active" aria-current="page">Merge</button>
-        <button className="rail-button" onClick={() => setWorkspaceMode('viewer')}>Viewer</button><button className="rail-button" onClick={() => setWorkspaceMode('optimize')}>Optimize</button><button className="rail-button" onClick={() => setWorkspaceMode('convert')}>Convert</button><button className="rail-button" disabled>Settings</button>
+        <button className="rail-button" onClick={() => setWorkspaceMode('viewer')}>Viewer</button><button className="rail-button" onClick={() => setWorkspaceMode('optimize')}>Optimize</button><button className="rail-button" onClick={() => setWorkspaceMode('convert')}>Convert</button><button className="rail-button" onClick={() => setWorkspaceMode('batch')}>Batch</button><button className="rail-button" disabled>Settings</button>
       </aside>
       <main className="workspace">
         <header className="page-header">
@@ -334,6 +357,7 @@ export default function App() {
             <article className="card placeholder-card" aria-labelledby="viewer-heading"><p className="eyebrow">LOCAL PDF WORKSPACE</p><h2 id="viewer-heading">View and organize pages</h2><p>Open one PDF for progressive viewing, search, selection and verified page operations.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('viewer')}>Open Viewer</button></article>
             <article className="card placeholder-card" aria-labelledby="optimize-heading"><p className="eyebrow">LOSSLESS OPTIMIZE</p><h2 id="optimize-heading">Recompress one PDF</h2><p>Use verified structural recompression without image-quality settings or presets.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('optimize')}>Open Optimize</button></article>
             <article className="card placeholder-card" aria-labelledby="convert-heading"><p className="eyebrow">LOCAL CONVERT</p><h2 id="convert-heading">Images to PDF</h2><p>Create one verified PDF page per ordered JPEG, PNG, or WebP image.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('convert')}>Open Convert</button></article>
+            <article className="card placeholder-card" aria-labelledby="batch-heading"><p className="eyebrow">METADATA-ONLY BATCH</p><h2 id="batch-heading">Preview lossless jobs</h2><p>Review ordered source identities, exact output names and disk bounds without starting document processing.</p><button type="button" className="secondary" onClick={() => setWorkspaceMode('batch')}>Open Batch Preview</button></article>
           </aside>
         </section>
         <section className="history-section" aria-labelledby="history-heading">

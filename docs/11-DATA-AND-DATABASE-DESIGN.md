@@ -28,6 +28,7 @@ The G01 database is opened by one blocking Rust repository worker. It enables fo
 - `jobs`, `job_inputs`, `job_outputs`, `job_stage_runs`, `job_errors`: durable lifecycle, progress, paths, identities, hashes, publication evidence and sanitized errors.
 - `workflows`, `workflow_steps`, `workflow_runs`, `workflow_run_jobs`: metadata foundation only; G01 does not execute workflows.
 - `job_completion_outcomes`: optional strict completion-kind metadata added by migration 6; one row per job at most, with cascade deletion.
+- `batch_runs`, `batch_run_jobs`: migration 8 metadata for private preview proofs, CAS/live-plan ownership and stable links to ordinary queued child jobs; no scheduler.
 
 Constraints restrict states, stages, statuses, non-negative units and ordinals, JSON validity and SHA-256 length. Indexed fields include state/update time, operation/create time, retention time, dependency status and workflow-run status. No migration contains a BLOB column.
 
@@ -80,3 +81,9 @@ Loading an explicit outcome validates the full cross-table contract. Published r
 No-benefit completion is one `IMMEDIATE` transaction: exact state/version/cancellation/output/error/outcome/name preconditions, exact outcome insertion, and the terminal state/progress/time/sequence update. A failed insert or update rolls back both. The internal published helper likewise records the published outcome in the same transaction as the future operation's truthful terminal update. Neither helper is exposed through IPC.
 
 Retention and `history_delete` validate explicit outcomes before deletion; a valid no-benefit row cascades with its job without a filesystem operation. Startup recovery includes every job with an explicit outcome so invalid combinations fail closed. Valid completed no-benefit metadata is left untouched and has no final path to reconcile.
+
+## G04F1 migration 8 and atomic batch metadata
+
+`0008_batch_preview_foundation.sql` follows accepted G04C2B migration 7 without changing migrations 1–7. `batch_runs` stores only closed proof metadata: schema/operation/version, preview and plan-key hashes, exact `{}` settings hash, naming template, optimistic version, trusted local destination identity/path, checked estimates, child count, state and timestamps. A partial unique index permits only one queued/active batch per plan key. `batch_run_jobs` stores stable ordinals and naming decisions. Neither table stores canonical preview JSON or document content.
+
+After full recomputation, one `IMMEDIATE` transaction checks the optimistic version/live-plan gate and inserts the batch, ordinary queued child jobs, inputs, planned outputs, canonical operation specs and ordered links. Any injected insert failure rolls back every row. Unstarted queued children are excluded from worker-start and startup-recovery selection, while history deletion does not orphan linked metadata. Existing ordinary published/null legacy and explicit published/no-benefit outcomes load without reinterpretation.

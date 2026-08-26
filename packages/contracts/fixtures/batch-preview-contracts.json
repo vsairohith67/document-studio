@@ -1,0 +1,85 @@
+{
+  "previewRequest": {
+    "schemaVersion": 1,
+    "operationId": "pdf.compress-lossless",
+    "operationVersion": "1.0.0",
+    "settings": {},
+    "inputPaths": ["C:\\private\\alpha.pdf", "C:\\private\\beta.pdf"],
+    "destinationDirectory": "C:\\output",
+    "namingTemplate": "{stem}-compressed.pdf"
+  },
+  "previewResponse": {
+    "schemaVersion": 1,
+    "operationId": "pdf.compress-lossless",
+    "operationVersion": "1.0.0",
+    "settingsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "namingTemplate": "{stem}-compressed.pdf",
+    "rows": [
+      { "ordinal": 0, "sourceName": "alpha.pdf", "outputName": "alpha-compressed.pdf", "collisionIndex": 0, "sizeBytes": 1024 },
+      { "ordinal": 1, "sourceName": "beta.pdf", "outputName": "beta-compressed (1).pdf", "collisionIndex": 1, "sizeBytes": 2048 }
+    ],
+    "diskEstimate": {
+      "workspacePeakBytes": 67112960,
+      "destinationTotalBytes": 134220800,
+      "combinedRequiredBytes": 201333760,
+      "workspaceAndDestinationShareVolume": true
+    },
+    "previewSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "canonicalSizeBytes": 1392,
+    "optimisticVersion": 0
+  },
+  "batchRecord": {
+    "id": "018f0f17-2f4a-7fb1-a247-303030303030",
+    "schemaVersion": 1,
+    "operationId": "pdf.compress-lossless",
+    "operationVersion": "1.0.0",
+    "state": "queued",
+    "previewSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "settingsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "namingTemplate": "{stem}-compressed.pdf",
+    "optimisticVersion": 0,
+    "diskEstimate": {
+      "workspacePeakBytes": 67112960,
+      "destinationTotalBytes": 134220800,
+      "combinedRequiredBytes": 201333760,
+      "workspaceAndDestinationShareVolume": true
+    },
+    "progress": {
+      "settledChildren": 0,
+      "totalChildren": 2,
+      "completedChildren": 0,
+      "failedChildren": 0,
+      "cancelledChildren": 0,
+      "interruptedChildren": 0,
+      "publishedChildren": 0,
+      "noBenefitChildren": 0
+    },
+    "createdAt": "2026-08-26T08:02:00Z",
+    "updatedAt": "2026-08-26T08:02:00Z",
+    "version": 0,
+    "children": [
+      {
+        "ordinal": 0,
+        "jobId": "018f0f17-2f4a-7fb1-a247-303030303031",
+        "state": "queued",
+        "completionKind": null,
+        "reason": null,
+        "requestedName": "alpha-compressed.pdf",
+        "plannedName": "alpha-compressed.pdf",
+        "collisionIndex": 0,
+        "progress": { "completedUnits": 0, "totalUnits": 1024, "unit": "bytes" }
+      },
+      {
+        "ordinal": 1,
+        "jobId": "018f0f17-2f4a-7fb1-a247-303030303032",
+        "state": "queued",
+        "completionKind": null,
+        "reason": null,
+        "requestedName": "beta-compressed.pdf",
+        "plannedName": "beta-compressed (1).pdf",
+        "collisionIndex": 1,
+        "progress": { "completedUnits": 0, "totalUnits": 2048, "unit": "bytes" }
+      }
+    ]
+  }
+}

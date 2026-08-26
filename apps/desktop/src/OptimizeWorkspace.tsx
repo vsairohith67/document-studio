@@ -41,6 +41,7 @@ interface OptimizeWorkspaceProps {
   onOpenMerge: () => void;
   onOpenViewer: () => void;
   onOpenConvert?: () => void;
+  onOpenBatch?: () => void;
 }
 
 export function OptimizeWorkspace({
@@ -49,6 +50,7 @@ export function OptimizeWorkspace({
   onOpenMerge,
   onOpenViewer,
   onOpenConvert = () => undefined,
+  onOpenBatch = () => undefined,
 }: OptimizeWorkspaceProps) {
   const [profile, setProfile] = useState<'lossless' | 'balanced'>('lossless');
   const [source, setSource] = useState<FileInspection | null>(null);
@@ -474,6 +476,7 @@ export function OptimizeWorkspace({
         <button className="rail-button" onClick={onOpenViewer}>Viewer</button>
         <button className="rail-button active" aria-current="page">Optimize</button>
         <button className="rail-button" onClick={onOpenConvert}>Convert</button>
+        <button className="rail-button" onClick={onOpenBatch}>Batch</button>
         <button className="rail-button" disabled>Settings</button>
       </aside>
       <main className="workspace">

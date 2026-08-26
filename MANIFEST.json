@@ -1,12 +1,12 @@
 {
   "product": "Document Studio",
-  "version": "0.6.0-g04c2a-completion-outcomes-dev",
-  "audit_date": "25 August 2026",
+  "version": "0.7.0-g04f1-batch-preview-dev",
+  "audit_date": "26 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
-  "current_goal": "G04C2A — durable successful completion outcomes",
+  "current_goal": "G04F1 — durable batch preview foundation",
   "current_goal_prompt": "codex/prompts/04-compression-conversion.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
@@ -24,6 +24,7 @@
     "npm run test:webview2 --workspace @document-studio/desktop",
     "npm run verify:g04b2 --workspace @document-studio/desktop",
     "npm run verify:g04c2a --workspace @document-studio/desktop",
+    "npm run verify:g04f1 --workspace @document-studio/desktop",
     "npm run build",
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
@@ -31,7 +32,7 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G01 through G04B2 are accepted on main. G04B2 — COMPLETE at merge b5901a7baca58b3acb1ee00027e42b0059c59fd4. G04C2A adds only the outcome foundation; G04C2 balanced compression remains unimplemented and overall G04 is incomplete.",
+  "publication_status": "G04F1 is implemented on a branch rooted at accepted post-G04C2B main 198f29fae206b21dbd9d8a9b4689f5865b94420d and remains pending owner review, exact-head CI and merge. It adds no scheduler, child execution, worker start, merge, tag or release.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
@@ -93,6 +94,16 @@
     "allowed": ["null/null", "published/null", "no-benefit/savings-threshold-not-met"],
     "ipc": "No new command; terminalization remains internal to Rust",
     "production_operation": "G04C2 balanced compression remains unimplemented until G04C2B"
+  },
+  "batch_preview_foundation": {
+    "migration": "0008_batch_preview_foundation.sql",
+    "schema_version": 1,
+    "eligible_operation": "pdf.compress-lossless@1.0.0",
+    "maximum_inputs": 128,
+    "naming": "Exactly one {stem}, optional one-based three-digit {index}, and {{/}} escapes",
+    "preview": "Private canonical UTF-8 JSON proof with a sanitized path/identity/hash-free IPC response",
+    "creation": "Full recomputation, exact hash/version, one-live CAS, and atomic batch/job/input/planned-output/spec/link metadata",
+    "excluded": ["scheduler", "child execution", "worker start", "automatic resume", "balanced compression batches", "other operations"]
   },
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [

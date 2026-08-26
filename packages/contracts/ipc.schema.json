@@ -3,6 +3,9 @@
   "$id": "https://document.studio/schemas/ipc.schema.json",
   "title": "Document Studio IPC v1",
   "$defs": {
+    "batchPreviewRequest": { "$ref": "https://document.studio/schemas/batch.schema.json#/$defs/batchPreviewRequest" },
+    "batchCreateRequest": { "$ref": "https://document.studio/schemas/batch.schema.json#/$defs/batchCreateRequest" },
+    "batchGetRequest": { "$ref": "https://document.studio/schemas/batch.schema.json#/$defs/batchGetRequest" },
     "jobIdRequest": {
       "type": "object",
       "additionalProperties": false,

@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://document.studio/schemas/batch.schema.json",
+  "title": "Document Studio batch preview contracts v1",
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "uuid": { "type": "string", "format": "uuid" },
+    "dateTime": { "type": "string", "format": "date-time" },
+    "localPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "pdfName": {
+      "$comment": "JSON Schema maxLength counts Unicode code points. Rust is authoritative for the Windows limit of 255 UTF-16 code units.",
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 255,
+      "pattern": "\\.[pP][dD][fF]$"
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "batchPreviewRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "operationId", "operationVersion", "settings", "inputPaths",
+        "destinationDirectory", "namingTemplate"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "operationId": { "const": "pdf.compress-lossless" },
+        "operationVersion": { "const": "1.0.0" },
+        "settings": { "$ref": "#/$defs/settings" },
+        "inputPaths": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/localPath" } },
+        "destinationDirectory": { "$ref": "#/$defs/localPath" },
+        "namingTemplate": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "batchCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "operationId", "operationVersion", "settings", "inputPaths",
+        "destinationDirectory", "namingTemplate", "previewSha256", "optimisticVersion"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "operationId": { "const": "pdf.compress-lossless" },
+        "operationVersion": { "const": "1.0.0" },
+        "settings": { "$ref": "#/$defs/settings" },
+        "inputPaths": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/localPath" } },
+        "destinationDirectory": { "$ref": "#/$defs/localPath" },
+        "namingTemplate": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "previewSha256": { "$ref": "#/$defs/sha256" },
+        "optimisticVersion": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "previewRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "sourceName", "outputName", "collisionIndex", "sizeBytes"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 0, "maximum": 127 },
+        "sourceName": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "outputName": { "$ref": "#/$defs/pdfName" },
+        "collisionIndex": { "type": "integer", "minimum": 0, "maximum": 999 },
+        "sizeBytes": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diskEstimate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspacePeakBytes", "destinationTotalBytes", "combinedRequiredBytes",
+        "workspaceAndDestinationShareVolume"
+      ],
+      "properties": {
+        "workspacePeakBytes": { "type": "integer", "minimum": 0 },
+        "destinationTotalBytes": { "type": "integer", "minimum": 0 },
+        "combinedRequiredBytes": { "type": "integer", "minimum": 0 },
+        "workspaceAndDestinationShareVolume": { "type": "boolean" }
+      }
+    },
+    "batchPreviewResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "operationId", "operationVersion", "settingsSha256", "namingTemplate",
+        "rows", "diskEstimate", "previewSha256", "canonicalSizeBytes", "optimisticVersion"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "operationId": { "const": "pdf.compress-lossless" },
+        "operationVersion": { "const": "1.0.0" },
+        "settingsSha256": { "$ref": "#/$defs/sha256" },
+        "namingTemplate": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "rows": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/previewRow" } },
+        "diskEstimate": { "$ref": "#/$defs/diskEstimate" },
+        "previewSha256": { "$ref": "#/$defs/sha256" },
+        "canonicalSizeBytes": { "type": "integer", "minimum": 2, "maximum": 262144 },
+        "optimisticVersion": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "jobProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completedUnits", "totalUnits", "unit"],
+      "properties": {
+        "completedUnits": { "type": "integer", "minimum": 0 },
+        "totalUnits": { "type": "integer", "minimum": 0 },
+        "unit": { "enum": ["bytes", "items", "steps"] }
+      }
+    },
+    "batchProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settledChildren", "totalChildren", "completedChildren", "failedChildren",
+        "cancelledChildren", "interruptedChildren", "publishedChildren", "noBenefitChildren"
+      ],
+      "properties": {
+        "settledChildren": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "totalChildren": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "completedChildren": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "failedChildren": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "cancelledChildren": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "interruptedChildren": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "publishedChildren": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "noBenefitChildren": { "type": "integer", "minimum": 0, "maximum": 128 }
+      }
+    },
+    "batchChild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal", "jobId", "state", "completionKind", "reason", "requestedName",
+        "plannedName", "collisionIndex", "progress"
+      ],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 0, "maximum": 127 },
+        "jobId": { "$ref": "#/$defs/uuid" },
+        "state": { "enum": ["queued", "inspecting", "preflight", "ready", "running", "verifying", "publishing", "completed", "failed", "cancelled", "interrupted"] },
+        "completionKind": { "type": ["string", "null"], "enum": ["published", "no-benefit", null] },
+        "reason": { "type": ["string", "null"], "enum": ["savings-threshold-not-met", null] },
+        "requestedName": { "$ref": "#/$defs/pdfName" },
+        "plannedName": { "$ref": "#/$defs/pdfName" },
+        "collisionIndex": { "type": "integer", "minimum": 0, "maximum": 999 },
+        "progress": { "$ref": "#/$defs/jobProgress" }
+      },
+      "oneOf": [
+        { "properties": { "completionKind": { "type": "null" }, "reason": { "type": "null" } } },
+        { "properties": { "completionKind": { "const": "published" }, "reason": { "type": "null" } } },
+        { "properties": { "completionKind": { "const": "no-benefit" }, "reason": { "const": "savings-threshold-not-met" } } }
+      ]
+    },
+    "batchRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "schemaVersion", "operationId", "operationVersion", "state", "previewSha256",
+        "settingsSha256", "namingTemplate", "optimisticVersion", "diskEstimate", "progress",
+        "createdAt", "updatedAt", "version", "children"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "schemaVersion": { "const": 1 },
+        "operationId": { "const": "pdf.compress-lossless" },
+        "operationVersion": { "const": "1.0.0" },
+        "state": { "enum": ["queued", "active", "completed", "failed", "cancelled", "interrupted"] },
+        "previewSha256": { "$ref": "#/$defs/sha256" },
+        "settingsSha256": { "$ref": "#/$defs/sha256" },
+        "namingTemplate": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "optimisticVersion": { "type": "integer", "minimum": 0 },
+        "diskEstimate": { "$ref": "#/$defs/diskEstimate" },
+        "progress": { "$ref": "#/$defs/batchProgress" },
+        "createdAt": { "$ref": "#/$defs/dateTime" },
+        "updatedAt": { "$ref": "#/$defs/dateTime" },
+        "version": { "type": "integer", "minimum": 0 },
+        "children": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/batchChild" } }
+      }
+    },
+    "batchGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchId"],
+      "properties": { "batchId": { "$ref": "#/$defs/uuid" } }
+    }
+  }
+}

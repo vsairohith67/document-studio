@@ -3,22 +3,26 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::contracts::{
     BalancedCompressionAudit, BalancedCompressionSkipCount, BalancedCompressionSkipReason,
+    BatchChildRecord, BatchDiskEstimate, BatchProgress, BatchRecord, BatchState,
     DependencyDiagnostic, JobCompletionKind, JobCompletionReason, JobInput, JobOutput, JobProgress,
     JobRecord, JobState, JobWarning, OperationError, OperationSpecEnvelope, OperationStage,
     OutputStatus, ProgressUnit, SettingRecord, StoredOperationPlan, StoredOperationSpec,
+    BATCH_MAX_INPUTS, BATCH_NAMING_TEMPLATE_MAX_BYTES, BATCH_PREVIEW_SCHEMA_VERSION,
     DEFAULT_HISTORY_RETENTION_DAYS, DIAGNOSTIC_COPY_OPERATION_ID, HISTORY_RETENTION_KEY,
     HISTORY_RETENTION_SCOPE, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
     LEGACY_DIAGNOSTIC_COPY_VERSION, MAX_HISTORY_PURGE, OPERATION_PLAN_MAX_BYTES,
     OPERATION_PLAN_SCHEMA_VERSION, OPERATION_SPEC_MAX_BYTES, OPERATION_SPEC_SCHEMA_VERSION,
+    PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION,
 };
 use crate::job_engine::can_transition;
+use crate::path_policy::windows_file_names_equal;
 
 const MIGRATION_LEDGER_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -72,6 +76,11 @@ pub const FOUNDATION_MIGRATIONS: &[Migration] = &[
         name: "balanced_compression_audits",
         sql: include_str!("../migrations/0007_balanced_compression_audits.sql"),
     },
+    Migration {
+        version: 8,
+        name: "batch_preview_foundation",
+        sql: include_str!("../migrations/0008_batch_preview_foundation.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -106,6 +115,8 @@ pub enum DatabaseError {
     OperationSpecInvalid,
     #[error("operation settings do not match the owning job operation")]
     OperationSpecMismatch,
+    #[error("the batch plan changed before atomic creation")]
+    BatchPlanConflict,
 }
 
 pub struct Database {
@@ -157,6 +168,319 @@ impl Database {
 
     pub fn create_job(&mut self, job: &JobRecord) -> Result<(), DatabaseError> {
         self.create_job_internal(job, None, None)
+    }
+
+    pub fn next_batch_optimistic_version(
+        &self,
+        plan_key_sha256: &str,
+    ) -> Result<u64, DatabaseError> {
+        if !is_lower_sha256(plan_key_sha256) {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "batch plan key",
+            });
+        }
+        let latest: Option<i64> = self.connection.query_row(
+            "SELECT MAX(optimistic_version) FROM batch_runs WHERE plan_key_sha256 = ?1",
+            [plan_key_sha256],
+            |row| row.get(0),
+        )?;
+        match latest {
+            Some(value) => u64::try_from(value)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or(DatabaseError::InvalidContractValue {
+                    field: "batch optimistic version",
+                }),
+            None => Ok(0),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_batch_with_jobs(
+        &mut self,
+        batch: &BatchRecord,
+        jobs: &[JobRecord],
+        specs: &[StoredOperationSpec],
+        destination_directory: &Path,
+        destination_identity: &str,
+        plan_key_sha256: &str,
+    ) -> Result<(), DatabaseError> {
+        validate_new_batch(
+            batch,
+            jobs,
+            specs,
+            destination_directory,
+            destination_identity,
+            plan_key_sha256,
+        )?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let latest: Option<i64> = transaction.query_row(
+            "SELECT MAX(optimistic_version) FROM batch_runs WHERE plan_key_sha256 = ?1",
+            [plan_key_sha256],
+            |row| row.get(0),
+        )?;
+        let next_version = match latest {
+            Some(value) => value
+                .checked_add(1)
+                .ok_or(DatabaseError::BatchPlanConflict)?,
+            None => 0,
+        };
+        let live_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM batch_runs
+             WHERE plan_key_sha256 = ?1 AND state IN ('queued', 'active')",
+            [plan_key_sha256],
+            |row| row.get(0),
+        )?;
+        if live_count != 0 || u64::try_from(next_version).ok() != Some(batch.optimistic_version) {
+            return Err(DatabaseError::BatchPlanConflict);
+        }
+
+        transaction.execute(
+            "INSERT INTO batch_runs (
+                id, schema_version, operation_id, operation_version, state,
+                preview_sha256, plan_key_sha256, settings_sha256, naming_template,
+                optimistic_version, destination_directory, destination_identity,
+                workspace_peak_bytes, destination_total_bytes, combined_required_bytes,
+                shared_volume, total_children, created_at, updated_at, version
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+             )",
+            params![
+                batch.id,
+                batch.schema_version,
+                batch.operation_id,
+                batch.operation_version,
+                batch.state.as_str(),
+                batch.preview_sha256,
+                plan_key_sha256,
+                batch.settings_sha256,
+                batch.naming_template,
+                metadata_i64(batch.optimistic_version, "batch optimistic version")?,
+                destination_directory.to_string_lossy(),
+                destination_identity,
+                metadata_i64(
+                    batch.disk_estimate.workspace_peak_bytes,
+                    "batch workspace estimate"
+                )?,
+                metadata_i64(
+                    batch.disk_estimate.destination_total_bytes,
+                    "batch destination estimate"
+                )?,
+                metadata_i64(
+                    batch.disk_estimate.combined_required_bytes,
+                    "batch combined estimate"
+                )?,
+                batch.disk_estimate.workspace_and_destination_share_volume,
+                metadata_i64(batch.progress.total_children.into(), "batch child count")?,
+                batch.created_at,
+                batch.updated_at,
+                metadata_i64(batch.version, "batch version")?,
+            ],
+        )?;
+
+        for ((child, job), spec) in batch.children.iter().zip(jobs).zip(specs) {
+            insert_batch_job_rows(&transaction, job)?;
+            insert_batch_operation_spec(&transaction, job, spec)?;
+            transaction.execute(
+                "INSERT INTO batch_run_jobs (
+                    batch_id, ordinal, job_id, requested_name, planned_name, collision_index
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    batch.id,
+                    child.ordinal,
+                    child.job_id,
+                    child.requested_name,
+                    child.planned_name,
+                    child.collision_index,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn get_batch(&self, id: &str) -> Result<Option<BatchRecord>, DatabaseError> {
+        let header = self
+            .connection
+            .query_row(
+                "SELECT schema_version, operation_id, operation_version, state,
+                        preview_sha256, settings_sha256, naming_template, optimistic_version,
+                        workspace_peak_bytes, destination_total_bytes, combined_required_bytes,
+                        shared_volume, total_children, created_at, updated_at, version
+                 FROM batch_runs WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, u8>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row_u64(row, 7)?,
+                        row_u64(row, 8)?,
+                        row_u64(row, 9)?,
+                        row_u64(row, 10)?,
+                        row.get::<_, bool>(11)?,
+                        row_u64(row, 12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, String>(14)?,
+                        row_u64(row, 15)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            schema_version,
+            operation_id,
+            operation_version,
+            state,
+            preview_sha256,
+            settings_sha256,
+            naming_template,
+            optimistic_version,
+            workspace_peak_bytes,
+            destination_total_bytes,
+            combined_required_bytes,
+            shared_volume,
+            total_children,
+            created_at,
+            updated_at,
+            version,
+        )) = header
+        else {
+            return Ok(None);
+        };
+        if schema_version != BATCH_PREVIEW_SCHEMA_VERSION
+            || operation_id != PDF_COMPRESS_LOSSLESS_OPERATION_ID
+            || operation_version != PDF_COMPRESS_LOSSLESS_VERSION
+            || total_children == 0
+            || total_children > BATCH_MAX_INPUTS as u64
+            || naming_template.len() > BATCH_NAMING_TEMPLATE_MAX_BYTES
+            || !is_lower_sha256(&preview_sha256)
+            || !is_lower_sha256(&settings_sha256)
+        {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "batch header",
+            });
+        }
+
+        let links = {
+            let mut statement = self.connection.prepare(
+                "SELECT ordinal, job_id, requested_name, planned_name, collision_index
+                 FROM batch_run_jobs WHERE batch_id = ?1 ORDER BY ordinal",
+            )?;
+            let rows = statement
+                .query_map([id], |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, u32>(4)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if links.len() as u64 != total_children {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "batch child count",
+            });
+        }
+
+        let mut children = Vec::with_capacity(links.len());
+        let mut planned_names: Vec<String> = Vec::with_capacity(links.len());
+        let mut progress = BatchProgress {
+            settled_children: 0,
+            total_children: u32::try_from(total_children).map_err(|_| {
+                DatabaseError::InvalidContractValue {
+                    field: "batch child count",
+                }
+            })?,
+            completed_children: 0,
+            failed_children: 0,
+            cancelled_children: 0,
+            interrupted_children: 0,
+            published_children: 0,
+            no_benefit_children: 0,
+        };
+        for (expected, (ordinal, job_id, requested_name, planned_name, collision_index)) in
+            links.into_iter().enumerate()
+        {
+            let job = self
+                .get_job(&job_id)?
+                .ok_or(DatabaseError::InvalidContractValue {
+                    field: "batch child job",
+                })?;
+            let output_shape_is_valid = job.outputs.len() == 1
+                || (job.completion_kind == Some(JobCompletionKind::NoBenefit)
+                    && job.outputs.is_empty());
+            let output_name_is_valid =
+                job.outputs.is_empty() || job.outputs[0].requested_name == planned_name;
+            if ordinal != expected as u32
+                || job.operation_id != operation_id
+                || job.operation_version != operation_version
+                || job.requested_output_name != planned_name
+                || job.inputs.len() != 1
+                || !output_shape_is_valid
+                || !output_name_is_valid
+                || crate::path_policy::validate_output_name(&requested_name).is_err()
+                || crate::path_policy::validate_output_name(&planned_name).is_err()
+                || crate::publication::collision_name(&requested_name, collision_index)
+                    != planned_name
+                || planned_names
+                    .iter()
+                    .any(|existing| windows_file_names_equal(existing, &planned_name))
+            {
+                return Err(DatabaseError::InvalidContractValue {
+                    field: "batch child contract",
+                });
+            }
+            planned_names.push(planned_name.clone());
+            accumulate_batch_progress(&mut progress, &job);
+            children.push(BatchChildRecord {
+                ordinal,
+                job_id,
+                state: job.state,
+                completion_kind: job.completion_kind,
+                reason: job.reason,
+                requested_name,
+                planned_name,
+                collision_index,
+                progress: job.progress,
+            });
+        }
+        Ok(Some(BatchRecord {
+            id: id.to_owned(),
+            schema_version,
+            operation_id,
+            operation_version,
+            state: BatchState::from_contract(&state).ok_or(
+                DatabaseError::InvalidContractValue {
+                    field: "batch state",
+                },
+            )?,
+            preview_sha256,
+            settings_sha256,
+            naming_template,
+            optimistic_version,
+            disk_estimate: BatchDiskEstimate {
+                workspace_peak_bytes,
+                destination_total_bytes,
+                combined_required_bytes,
+                workspace_and_destination_share_volume: shared_volume,
+            },
+            progress,
+            created_at,
+            updated_at,
+            version,
+            children,
+        }))
     }
 
     pub(crate) fn record_balanced_compression_audit(
@@ -1730,9 +2054,15 @@ impl Database {
                  FROM jobs
                  LEFT JOIN job_outputs ON job_outputs.job_id = jobs.id
                  LEFT JOIN job_completion_outcomes ON job_completion_outcomes.job_id = jobs.id
-                 WHERE jobs.state IN (
-                    'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying',
-                    'publishing', 'interrupted'
+                 WHERE (
+                    jobs.state IN (
+                      'queued', 'inspecting', 'preflight', 'ready', 'running', 'verifying',
+                      'publishing', 'interrupted'
+                    )
+                    AND NOT (
+                      jobs.state = 'queued'
+                      AND EXISTS(SELECT 1 FROM batch_run_jobs WHERE job_id = jobs.id)
+                    )
                  )
                  OR (jobs.operation_id = ?1 AND jobs.operation_version = ?2)
                  OR job_outputs.staging_path IS NOT NULL OR job_outputs.partial_path IS NOT NULL
@@ -1905,7 +2235,9 @@ impl Database {
         let mut deleted = 0;
         for id in ids.iter().take(200) {
             deleted += transaction.execute(
-                "DELETE FROM jobs WHERE id = ?1 AND state IN ('completed', 'failed', 'cancelled')",
+                "DELETE FROM jobs
+                 WHERE id = ?1 AND state IN ('completed', 'failed', 'cancelled')
+                   AND NOT EXISTS(SELECT 1 FROM batch_run_jobs WHERE job_id = jobs.id)",
                 [id],
             )?;
         }
@@ -1919,6 +2251,9 @@ impl Database {
                 "SELECT jobs.id FROM jobs
                  WHERE jobs.state IN ('completed', 'failed', 'cancelled')
                    AND jobs.finished_at IS NOT NULL AND jobs.finished_at < ?1
+                   AND NOT EXISTS(
+                     SELECT 1 FROM batch_run_jobs WHERE job_id = jobs.id
+                   )
                    AND NOT (
                      jobs.operation_id = ?2 AND jobs.operation_version = ?3
                      AND (
@@ -1960,7 +2295,9 @@ impl Database {
         let mut deleted = 0;
         for id in ids {
             deleted += transaction.execute(
-                "DELETE FROM jobs WHERE id = ?1 AND state IN ('completed', 'failed', 'cancelled')",
+                "DELETE FROM jobs
+                 WHERE id = ?1 AND state IN ('completed', 'failed', 'cancelled')
+                   AND NOT EXISTS(SELECT 1 FROM batch_run_jobs WHERE job_id = jobs.id)",
                 [id],
             )?;
         }
@@ -2277,6 +2614,267 @@ fn validate_loaded_completion_outcome(job: &JobRecord) -> Result<(), DatabaseErr
         }
     }
     Ok(())
+}
+
+fn validate_new_batch(
+    batch: &BatchRecord,
+    jobs: &[JobRecord],
+    specs: &[StoredOperationSpec],
+    destination_directory: &Path,
+    destination_identity: &str,
+    plan_key_sha256: &str,
+) -> Result<(), DatabaseError> {
+    let child_count = batch.children.len();
+    let destination = destination_directory.to_string_lossy();
+    let estimates_match = batch
+        .disk_estimate
+        .workspace_peak_bytes
+        .checked_add(batch.disk_estimate.destination_total_bytes)
+        == Some(batch.disk_estimate.combined_required_bytes);
+    if batch.schema_version != BATCH_PREVIEW_SCHEMA_VERSION
+        || batch.operation_id != PDF_COMPRESS_LOSSLESS_OPERATION_ID
+        || batch.operation_version != PDF_COMPRESS_LOSSLESS_VERSION
+        || batch.state != BatchState::Queued
+        || batch.version != 0
+        || child_count == 0
+        || child_count > BATCH_MAX_INPUTS
+        || child_count != jobs.len()
+        || child_count != specs.len()
+        || batch.progress.total_children as usize != child_count
+        || batch.progress.settled_children != 0
+        || batch.progress.completed_children != 0
+        || batch.progress.failed_children != 0
+        || batch.progress.cancelled_children != 0
+        || batch.progress.interrupted_children != 0
+        || batch.progress.published_children != 0
+        || batch.progress.no_benefit_children != 0
+        || !is_lower_sha256(&batch.preview_sha256)
+        || !is_lower_sha256(&batch.settings_sha256)
+        || !is_lower_sha256(plan_key_sha256)
+        || destination.is_empty()
+        || destination_identity.is_empty()
+        || destination_identity.len() > 128
+        || batch.naming_template.len() < 6
+        || batch.naming_template.len() > BATCH_NAMING_TEMPLATE_MAX_BYTES
+        || !estimates_match
+    {
+        return Err(DatabaseError::InvalidContractValue {
+            field: "new batch contract",
+        });
+    }
+
+    let mut planned_names: Vec<String> = Vec::with_capacity(child_count);
+    for (index, ((child, job), spec)) in batch.children.iter().zip(jobs).zip(specs).enumerate() {
+        let input_hash_is_valid = job
+            .inputs
+            .first()
+            .and_then(|input| input.sha256.as_deref())
+            .is_some_and(is_lower_sha256);
+        if child.ordinal != index as u32
+            || child.job_id != job.id
+            || child.state != JobState::Queued
+            || child.completion_kind.is_some()
+            || child.reason.is_some()
+            || child.progress != job.progress
+            || child.collision_index >= 1000
+            || crate::path_policy::validate_output_name(&child.requested_name).is_err()
+            || crate::path_policy::validate_output_name(&child.planned_name).is_err()
+            || crate::publication::collision_name(&child.requested_name, child.collision_index)
+                != child.planned_name
+            || planned_names
+                .iter()
+                .any(|existing| windows_file_names_equal(existing, &child.planned_name))
+            || job.operation_id != batch.operation_id
+            || job.operation_version != batch.operation_version
+            || job.state != JobState::Queued
+            || job.stage.is_some()
+            || job.sequence != 0
+            || job.version != 0
+            || job.completion_kind.is_some()
+            || job.reason.is_some()
+            || job.destination_directory != destination
+            || job.requested_output_name != child.planned_name
+            || job.resolved_output_name.is_some()
+            || job.cancellation_requested_at.is_some()
+            || job.finished_at.is_some()
+            || job.inputs.len() != 1
+            || job.outputs.len() != 1
+            || job.outputs[0].requested_name != child.planned_name
+            || job.outputs[0].status != OutputStatus::Planned
+            || job.outputs[0].resolved_name.is_some()
+            || job.outputs[0].staging_path.is_some()
+            || job.outputs[0].partial_path.is_some()
+            || job.outputs[0].final_path.is_some()
+            || job.outputs[0].size_bytes.is_some()
+            || job.outputs[0].sha256.is_some()
+            || job.outputs[0].verified_at.is_some()
+            || job.outputs[0].published_at.is_some()
+            || !job.errors.is_empty()
+            || !input_hash_is_valid
+            || !batch_spec_is_valid(job, spec)
+        {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "new batch child contract",
+            });
+        }
+        planned_names.push(child.planned_name.clone());
+    }
+    Ok(())
+}
+
+fn batch_spec_is_valid(job: &JobRecord, spec: &StoredOperationSpec) -> bool {
+    let spec_bytes = spec.canonical_json.as_bytes();
+    spec.envelope.schema_version == OPERATION_SPEC_SCHEMA_VERSION
+        && spec.envelope.operation_id == job.operation_id
+        && spec.envelope.settings == Value::Object(Default::default())
+        && (2..=OPERATION_SPEC_MAX_BYTES).contains(&spec_bytes.len())
+        && serde_json::to_string(&spec.envelope).ok().as_deref()
+            == Some(spec.canonical_json.as_str())
+        && sha256_hex(spec_bytes) == spec.sha256
+}
+
+fn insert_batch_job_rows(
+    transaction: &Transaction<'_>,
+    job: &JobRecord,
+) -> Result<(), DatabaseError> {
+    transaction.execute(
+        "INSERT INTO jobs (
+            id, operation_id, operation_version, state, stage, sequence,
+            completed_units, total_units, unit, destination_directory,
+            requested_output_name, resolved_output_name, cancellation_requested_at,
+            created_at, updated_at, finished_at, version
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            job.id,
+            job.operation_id,
+            job.operation_version,
+            job.state.as_str(),
+            job.stage.map(OperationStage::as_str),
+            metadata_i64(job.sequence, "job sequence")?,
+            metadata_i64(job.progress.completed_units, "completed units")?,
+            metadata_i64(job.progress.total_units, "total units")?,
+            job.progress.unit.as_str(),
+            job.destination_directory,
+            job.requested_output_name,
+            job.resolved_output_name,
+            job.cancellation_requested_at,
+            job.created_at,
+            job.updated_at,
+            job.finished_at,
+            metadata_i64(job.version, "job version")?,
+        ],
+    )?;
+    for input in &job.inputs {
+        transaction.execute(
+            "INSERT INTO job_inputs (
+                job_id, ordinal, display_name, source_path, canonical_path, file_identity,
+                size_bytes, modified_at, mime_type, sha256, password_reference
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                job.id,
+                input.ordinal,
+                input.display_name,
+                input.source_path,
+                input.canonical_path,
+                input.file_identity,
+                metadata_i64(input.size_bytes, "input size")?,
+                input.modified_at,
+                input.mime_type,
+                input.sha256,
+                input.password_reference,
+            ],
+        )?;
+    }
+    for output in &job.outputs {
+        transaction.execute(
+            "INSERT INTO job_outputs (
+                job_id, ordinal, requested_name, resolved_name, staging_path, partial_path,
+                final_path, size_bytes, mime_type, sha256, status, verified_at, published_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                job.id,
+                output.ordinal,
+                output.requested_name,
+                output.resolved_name,
+                output.staging_path,
+                output.partial_path,
+                output.final_path,
+                output
+                    .size_bytes
+                    .map(|value| metadata_i64(value, "output size"))
+                    .transpose()?,
+                output.mime_type,
+                output.sha256,
+                output.status.as_str(),
+                output.verified_at,
+                output.published_at,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_batch_operation_spec(
+    transaction: &Transaction<'_>,
+    job: &JobRecord,
+    spec: &StoredOperationSpec,
+) -> Result<(), DatabaseError> {
+    if !batch_spec_is_valid(job, spec) {
+        return Err(DatabaseError::OperationSpecInvalid);
+    }
+    transaction.execute(
+        "INSERT INTO job_operation_specs (
+            job_id, schema_version, operation_id, settings_json, settings_sha256, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            job.id,
+            spec.envelope.schema_version,
+            spec.envelope.operation_id,
+            spec.canonical_json,
+            spec.sha256,
+            spec.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn accumulate_batch_progress(progress: &mut BatchProgress, job: &JobRecord) {
+    match job.state {
+        JobState::Completed => {
+            progress.settled_children += 1;
+            progress.completed_children += 1;
+            match job.completion_kind {
+                Some(JobCompletionKind::Published) => progress.published_children += 1,
+                Some(JobCompletionKind::NoBenefit) => progress.no_benefit_children += 1,
+                None if !job.outputs.is_empty()
+                    && job
+                        .outputs
+                        .iter()
+                        .all(|output| output.status == OutputStatus::Published) =>
+                {
+                    progress.published_children += 1;
+                }
+                None => {}
+            }
+        }
+        JobState::Failed => {
+            progress.settled_children += 1;
+            progress.failed_children += 1;
+        }
+        JobState::Cancelled => {
+            progress.settled_children += 1;
+            progress.cancelled_children += 1;
+        }
+        JobState::Interrupted => progress.interrupted_children += 1,
+        _ => {}
+    }
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 pub fn configure_connection(connection: &Connection) -> Result<(), DatabaseError> {

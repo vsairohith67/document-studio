@@ -1,6 +1,7 @@
 pub mod app_state;
 pub mod balanced_compression;
 pub mod balanced_metrics;
+pub mod batch;
 pub mod contracts;
 pub mod database;
 pub mod diagnostic_copy;
@@ -370,6 +371,9 @@ pub fn run() {
         ipc::system_status,
         ipc::operations_list,
         ipc::files_inspect,
+        ipc::batches_preview,
+        ipc::batches_create,
+        ipc::batches_get,
         ipc::jobs_create,
         ipc::jobs_create_core_pdf,
         ipc::jobs_create_pdf_to_images,
@@ -398,6 +402,9 @@ pub fn run() {
         ipc::system_status,
         ipc::operations_list,
         ipc::files_inspect,
+        ipc::batches_preview,
+        ipc::batches_create,
+        ipc::batches_get,
         ipc::jobs_create,
         ipc::jobs_create_core_pdf,
         ipc::jobs_create_pdf_to_images,

@@ -114,6 +114,98 @@ export interface JobRecord {
   errors: OperationError[];
 }
 
+export type BatchSettings = Record<string, never>;
+
+export interface BatchPreviewRequest {
+  schemaVersion: 1;
+  operationId: 'pdf.compress-lossless';
+  operationVersion: '1.0.0';
+  settings: BatchSettings;
+  inputPaths: string[];
+  destinationDirectory: string;
+  namingTemplate: string;
+}
+
+export interface BatchCreateRequest extends BatchPreviewRequest {
+  previewSha256: string;
+  optimisticVersion: number;
+}
+
+export interface BatchPreviewRow {
+  ordinal: number;
+  sourceName: string;
+  outputName: string;
+  collisionIndex: number;
+  sizeBytes: number;
+}
+
+export interface BatchDiskEstimate {
+  workspacePeakBytes: number;
+  destinationTotalBytes: number;
+  combinedRequiredBytes: number;
+  workspaceAndDestinationShareVolume: boolean;
+}
+
+export interface BatchPreviewResponse {
+  schemaVersion: 1;
+  operationId: 'pdf.compress-lossless';
+  operationVersion: '1.0.0';
+  settingsSha256: string;
+  namingTemplate: string;
+  rows: BatchPreviewRow[];
+  diskEstimate: BatchDiskEstimate;
+  previewSha256: string;
+  canonicalSizeBytes: number;
+  optimisticVersion: number;
+}
+
+export type BatchState = 'queued' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+export interface BatchProgress {
+  settledChildren: number;
+  totalChildren: number;
+  completedChildren: number;
+  failedChildren: number;
+  cancelledChildren: number;
+  interruptedChildren: number;
+  publishedChildren: number;
+  noBenefitChildren: number;
+}
+
+export interface BatchChildRecord {
+  ordinal: number;
+  jobId: string;
+  state: JobState;
+  completionKind: JobCompletionKind | null;
+  reason: JobCompletionReason | null;
+  requestedName: string;
+  plannedName: string;
+  collisionIndex: number;
+  progress: JobProgress;
+}
+
+export interface BatchRecord {
+  id: string;
+  schemaVersion: 1;
+  operationId: 'pdf.compress-lossless';
+  operationVersion: '1.0.0';
+  state: BatchState;
+  previewSha256: string;
+  settingsSha256: string;
+  namingTemplate: string;
+  optimisticVersion: number;
+  diskEstimate: BatchDiskEstimate;
+  progress: BatchProgress;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+  children: BatchChildRecord[];
+}
+
+export interface BatchGetRequest {
+  batchId: string;
+}
+
 export interface ProgressEvent {
   schemaVersion: 1;
   sequence: number;

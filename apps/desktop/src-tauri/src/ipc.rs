@@ -11,8 +11,10 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::app_state::{AppState, CancelOutcome};
 use crate::balanced_compression::{BalancedCompressionService, BalancedPixelUploadMetadata};
+use crate::batch::BatchPreviewService;
 use crate::contracts::{
     BalancedCompressionAudit, BalancedCompressionJobCreateRequest, BalancedRenderSide,
+    BatchCreateRequest, BatchGetRequest, BatchPreviewRequest, BatchPreviewResponse, BatchRecord,
     CancelResponse, CorePdfJobCreateRequest, DestinationGrant, DestinationGrantRequest,
     FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest, JobIdRequest,
     JobRecord, JobWarning, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
@@ -45,11 +47,35 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
         .unwrap_or(0);
     Ok(SystemStatus {
         product: "Document Studio".to_owned(),
-        phase: "g04b2-pdf-to-images".to_owned(),
+        phase: "g04f1-batch-preview".to_owned(),
         offline_by_default: true,
         database_schema_version: u32::try_from(version).unwrap_or(0),
         webview2_runtime_version: tauri::webview_version().ok(),
     })
+}
+
+#[tauri::command]
+pub fn batches_preview(
+    request: BatchPreviewRequest,
+    state: State<'_, AppState>,
+) -> Result<BatchPreviewResponse, OperationError> {
+    BatchPreviewService::new(state.inner().clone()).preview(request)
+}
+
+#[tauri::command]
+pub fn batches_create(
+    request: BatchCreateRequest,
+    state: State<'_, AppState>,
+) -> Result<BatchRecord, OperationError> {
+    BatchPreviewService::new(state.inner().clone()).create(request)
+}
+
+#[tauri::command]
+pub fn batches_get(
+    request: BatchGetRequest,
+    state: State<'_, AppState>,
+) -> Result<BatchRecord, OperationError> {
+    BatchPreviewService::new(state.inner().clone()).get(&request.batch_id)
 }
 
 #[tauri::command]
