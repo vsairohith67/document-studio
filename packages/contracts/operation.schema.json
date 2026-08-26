@@ -34,7 +34,7 @@
       "required": ["mimeType", "multiplicity"],
       "properties": {
         "mimeType": { "type": "string", "minLength": 1, "maxLength": 255 },
-        "multiplicity": { "enum": ["single", "multiple"] }
+        "multiplicity": { "enum": ["single", "multiple", "zero-or-one"] }
       }
     },
     "dependencies": { "type": "array", "uniqueItems": true, "maxItems": 32, "items": { "type": "string", "pattern": "^[a-z][a-z0-9.-]{1,63}$" } },

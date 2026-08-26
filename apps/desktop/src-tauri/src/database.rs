@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::contracts::{
+    BalancedCompressionAudit, BalancedCompressionSkipCount, BalancedCompressionSkipReason,
     DependencyDiagnostic, JobCompletionKind, JobCompletionReason, JobInput, JobOutput, JobProgress,
     JobRecord, JobState, JobWarning, OperationError, OperationSpecEnvelope, OperationStage,
     OutputStatus, ProgressUnit, SettingRecord, StoredOperationPlan, StoredOperationSpec,
@@ -65,6 +66,11 @@ pub const FOUNDATION_MIGRATIONS: &[Migration] = &[
         version: 6,
         name: "job_completion_outcomes",
         sql: include_str!("../migrations/0006_job_completion_outcomes.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "balanced_compression_audits",
+        sql: include_str!("../migrations/0007_balanced_compression_audits.sql"),
     },
 ];
 
@@ -151,6 +157,278 @@ impl Database {
 
     pub fn create_job(&mut self, job: &JobRecord) -> Result<(), DatabaseError> {
         self.create_job_internal(job, None, None)
+    }
+
+    pub(crate) fn record_balanced_compression_audit(
+        &mut self,
+        job_id: &str,
+        audit: &BalancedCompressionAudit,
+    ) -> Result<(), DatabaseError> {
+        if audit.profile != crate::contracts::BALANCED_COMPRESSION_PROFILE
+            || audit.source_bytes == 0
+            || audit.candidate_bytes == 0
+            || audit.affected_pages != audit.compared_pages
+            || audit.structural_proof_sha256.len() != 64
+            || !audit
+                .structural_proof_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || audit.minimum_ssim.is_some_and(|value| !value.is_finite())
+            || audit
+                .minimum_psnr_db
+                .is_some_and(|value| !value.is_finite())
+            || audit.psnr_is_infinite == audit.minimum_psnr_db.is_some() && audit.affected_pages > 0
+            || audit.skipped_reasons.iter().any(|entry| entry.count == 0)
+            || audit
+                .skipped_reasons
+                .iter()
+                .map(|entry| u64::from(entry.count))
+                .sum::<u64>()
+                != u64::from(audit.skipped_images)
+        {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "balanced compression audit",
+            });
+        }
+        let source_bytes = metadata_i64(audit.source_bytes, "balanced source size")?;
+        let candidate_bytes = metadata_i64(audit.candidate_bytes, "balanced candidate size")?;
+        let maximum_changed_pixels =
+            metadata_i64(audit.maximum_changed_pixels, "balanced changed pixels")?;
+        let maximum_total_pixels =
+            metadata_i64(audit.maximum_total_pixels, "balanced total pixels")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let job_contract: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT operation_id, state FROM jobs WHERE id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if job_contract
+            .as_ref()
+            .map(|(operation, state)| (operation.as_str(), state.as_str()))
+            != Some((
+                crate::contracts::BALANCED_COMPRESSION_OPERATION_ID,
+                "verifying",
+            ))
+        {
+            return Err(DatabaseError::OperationSpecMismatch);
+        }
+        transaction.execute(
+            "INSERT INTO job_balanced_compression_audits (
+                job_id, profile, source_bytes, candidate_bytes, selected_images,
+                skipped_images, affected_pages, compared_pages, minimum_ssim,
+                minimum_psnr_db, psnr_is_infinite, maximum_changed_pixels,
+                maximum_total_pixels, quality_passed, size_gate_passed,
+                structural_proof_sha256, created_at
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17
+             )",
+            params![
+                job_id,
+                audit.profile,
+                source_bytes,
+                candidate_bytes,
+                audit.selected_images,
+                audit.skipped_images,
+                audit.affected_pages,
+                audit.compared_pages,
+                audit.minimum_ssim,
+                audit.minimum_psnr_db,
+                i64::from(audit.psnr_is_infinite),
+                maximum_changed_pixels,
+                maximum_total_pixels,
+                i64::from(audit.quality_passed),
+                i64::from(audit.size_gate_passed),
+                audit.structural_proof_sha256,
+                audit.created_at,
+            ],
+        )?;
+        for entry in &audit.skipped_reasons {
+            transaction.execute(
+                "INSERT INTO job_balanced_compression_skip_counts (job_id, reason, count)
+                 VALUES (?1, ?2, ?3)",
+                params![job_id, entry.reason.as_str(), entry.count],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn get_balanced_compression_audit(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<BalancedCompressionAudit>, DatabaseError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT profile, source_bytes, candidate_bytes, selected_images,
+                        skipped_images, affected_pages, compared_pages, minimum_ssim,
+                        minimum_psnr_db, psnr_is_infinite, maximum_changed_pixels,
+                        maximum_total_pixels, quality_passed, size_gate_passed,
+                        structural_proof_sha256, created_at
+                 FROM job_balanced_compression_audits WHERE job_id = ?1",
+                [job_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row_u64(row, 1)?,
+                        row_u64(row, 2)?,
+                        row.get::<_, u32>(3)?,
+                        row.get::<_, u32>(4)?,
+                        row.get::<_, u32>(5)?,
+                        row.get::<_, u32>(6)?,
+                        row.get::<_, Option<f64>>(7)?,
+                        row.get::<_, Option<f64>>(8)?,
+                        row.get::<_, bool>(9)?,
+                        row_u64(row, 10)?,
+                        row_u64(row, 11)?,
+                        row.get::<_, bool>(12)?,
+                        row.get::<_, bool>(13)?,
+                        row.get::<_, String>(14)?,
+                        row.get::<_, String>(15)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            profile,
+            source_bytes,
+            candidate_bytes,
+            selected_images,
+            skipped_images,
+            affected_pages,
+            compared_pages,
+            minimum_ssim,
+            minimum_psnr_db,
+            psnr_is_infinite,
+            maximum_changed_pixels,
+            maximum_total_pixels,
+            quality_passed,
+            size_gate_passed,
+            structural_proof_sha256,
+            created_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare(
+            "SELECT reason, count FROM job_balanced_compression_skip_counts
+             WHERE job_id = ?1 ORDER BY reason",
+        )?;
+        let skipped_reasons = statement
+            .query_map([job_id], |row| {
+                let reason: String = row.get(0)?;
+                let reason =
+                    BalancedCompressionSkipReason::from_contract(&reason).ok_or_else(|| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "reason".to_owned(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
+                Ok(BalancedCompressionSkipCount {
+                    reason,
+                    count: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let saved_bytes = source_bytes.saturating_sub(candidate_bytes);
+        let saved_percent = saved_bytes as f64 * 100.0 / source_bytes as f64;
+        Ok(Some(BalancedCompressionAudit {
+            profile,
+            source_bytes,
+            candidate_bytes,
+            saved_bytes,
+            saved_percent,
+            selected_images,
+            skipped_images,
+            affected_pages,
+            compared_pages,
+            minimum_ssim,
+            minimum_psnr_db,
+            psnr_is_infinite,
+            maximum_changed_pixels,
+            maximum_total_pixels,
+            quality_passed,
+            size_gate_passed,
+            structural_proof_sha256,
+            skipped_reasons,
+            created_at,
+        }))
+    }
+
+    pub(crate) fn register_verified_balanced_output(
+        &mut self,
+        job_id: &str,
+        expected_version: u64,
+        output: &JobOutput,
+    ) -> Result<u64, DatabaseError> {
+        if output.ordinal != 0
+            || output.status != OutputStatus::Verified
+            || output.staging_path.is_none()
+            || output.size_bytes.is_none()
+            || output.sha256.is_none()
+            || output.verified_at.is_none()
+            || output.resolved_name.is_some()
+            || output.partial_path.is_some()
+            || output.final_path.is_some()
+            || output.published_at.is_some()
+        {
+            return Err(DatabaseError::InvalidContractValue {
+                field: "balanced verified output",
+            });
+        }
+        let expected_version_i64 = metadata_i64(expected_version, "job version")?;
+        let size_bytes = metadata_i64(output.size_bytes.unwrap(), "output size")?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let output_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM job_outputs WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if output_count != 0 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.execute(
+            "INSERT INTO job_outputs (
+                job_id, ordinal, requested_name, resolved_name, staging_path,
+                partial_path, final_path, size_bytes, mime_type, sha256, status,
+                verified_at, published_at
+             ) VALUES (?1, 0, ?2, NULL, ?3, NULL, NULL, ?4, ?5, ?6,
+                       'verified', ?7, NULL)",
+            params![
+                job_id,
+                output.requested_name,
+                output.staging_path,
+                size_bytes,
+                output.mime_type,
+                output.sha256,
+                output.verified_at,
+            ],
+        )?;
+        let changed = transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = version + 1, sequence = sequence + 1
+             WHERE id = ?2 AND operation_id = ?3 AND state = 'verifying'
+               AND version = ?4 AND cancellation_requested_at IS NULL
+               AND resolved_output_name IS NULL",
+            params![
+                now(),
+                job_id,
+                crate::contracts::BALANCED_COMPRESSION_OPERATION_ID,
+                expected_version_i64,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(DatabaseError::JobConflict);
+        }
+        transaction.commit()?;
+        Ok(expected_version + 1)
     }
 
     pub fn create_job_with_plan(
@@ -744,6 +1022,28 @@ impl Database {
         expected_version: u64,
         timestamp: &str,
     ) -> Result<u64, DatabaseError> {
+        self.complete_published_from_state(id, JobState::Publishing, expected_version, timestamp)
+    }
+
+    pub(crate) fn complete_recovered_published(
+        &mut self,
+        id: &str,
+        expected_state: JobState,
+        expected_version: u64,
+    ) -> Result<u64, DatabaseError> {
+        if !matches!(expected_state, JobState::Publishing | JobState::Interrupted) {
+            return Err(DatabaseError::IllegalTransition);
+        }
+        self.complete_published_from_state(id, expected_state, expected_version, &now())
+    }
+
+    fn complete_published_from_state(
+        &mut self,
+        id: &str,
+        expected_state: JobState,
+        expected_version: u64,
+        timestamp: &str,
+    ) -> Result<u64, DatabaseError> {
         validate_completion_timestamp(timestamp)?;
         let expected_version_i64 = metadata_i64(expected_version, "job version")?;
         let transaction = self
@@ -767,7 +1067,7 @@ impl Database {
         let Some((state, version, cancellation_requested_at, resolved_output_name)) = header else {
             return Err(DatabaseError::JobConflict);
         };
-        if state != JobState::Publishing.as_str()
+        if state != expected_state.as_str()
             || version != expected_version
             || cancellation_requested_at.is_some()
         {
@@ -811,9 +1111,9 @@ impl Database {
              SET state = 'completed', stage = NULL, completed_units = total_units,
                  finished_at = ?1, updated_at = ?1,
                  version = version + 1, sequence = sequence + 1
-             WHERE id = ?2 AND state = 'publishing' AND version = ?3
+             WHERE id = ?2 AND state = ?3 AND version = ?4
                AND cancellation_requested_at IS NULL AND resolved_output_name IS NOT NULL",
-            params![timestamp, id, expected_version_i64],
+            params![timestamp, id, expected_state.as_str(), expected_version_i64],
         )?;
         if changed != 1 {
             return Err(DatabaseError::JobConflict);
@@ -2109,6 +2409,7 @@ fn validate_setting(
 mod completion_outcome_tests {
     use super::{Database, DatabaseError};
     use crate::contracts::{
+        BalancedCompressionAudit, BalancedCompressionSkipCount, BalancedCompressionSkipReason,
         JobCompletionKind, JobCompletionReason, JobInput, JobOutput, JobProgress, JobRecord,
         JobState, OperationError, OperationStage, OutputStatus, ProgressUnit,
     };
@@ -2171,6 +2472,82 @@ mod completion_outcome_tests {
             verified_at: None,
             published_at: None,
         }
+    }
+
+    fn balanced_audit() -> BalancedCompressionAudit {
+        BalancedCompressionAudit {
+            profile: "balanced-v1".to_owned(),
+            source_bytes: 200_000,
+            candidate_bytes: 180_000,
+            saved_bytes: 20_000,
+            saved_percent: 10.0,
+            selected_images: 1,
+            skipped_images: 1,
+            affected_pages: 1,
+            compared_pages: 1,
+            minimum_ssim: Some(0.99),
+            minimum_psnr_db: Some(40.0),
+            psnr_is_infinite: false,
+            maximum_changed_pixels: 2,
+            maximum_total_pixels: 10_000,
+            quality_passed: true,
+            size_gate_passed: false,
+            structural_proof_sha256: "c".repeat(64),
+            skipped_reasons: vec![BalancedCompressionSkipCount {
+                reason: BalancedCompressionSkipReason::BelowMinimum,
+                count: 1,
+            }],
+            created_at: COMPLETED_AT.to_owned(),
+        }
+    }
+
+    #[test]
+    fn balanced_audit_is_typed_atomic_and_cascade_owned() {
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000000");
+        database.create_job(&job).unwrap();
+        let audit = balanced_audit();
+        database
+            .record_balanced_compression_audit(&job.id, &audit)
+            .unwrap();
+        assert_eq!(
+            database.get_balanced_compression_audit(&job.id).unwrap(),
+            Some(audit.clone())
+        );
+        assert!(database
+            .record_balanced_compression_audit(&job.id, &audit)
+            .is_err());
+        database
+            .connection()
+            .execute("DELETE FROM jobs WHERE id = ?1", [&job.id])
+            .unwrap();
+        assert_eq!(
+            database.get_balanced_compression_audit(&job.id).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn balanced_audit_rejects_impossible_scalar_and_skip_evidence() {
+        let mut database = Database::open_in_memory().unwrap();
+        let job = outcome_job("018f0f17-2f4a-7fb1-a247-600000000010");
+        database.create_job(&job).unwrap();
+        let mut invalid = balanced_audit();
+        invalid.skipped_images = 2;
+        assert!(matches!(
+            database.record_balanced_compression_audit(&job.id, &invalid),
+            Err(DatabaseError::InvalidContractValue { .. })
+        ));
+        invalid = balanced_audit();
+        invalid.psnr_is_infinite = true;
+        assert!(matches!(
+            database.record_balanced_compression_audit(&job.id, &invalid),
+            Err(DatabaseError::InvalidContractValue { .. })
+        ));
+        assert!(database
+            .get_balanced_compression_audit(&job.id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

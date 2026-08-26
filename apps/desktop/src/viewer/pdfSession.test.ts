@@ -15,6 +15,7 @@ import {
   MAX_RANGE_READS,
   RANGE_CHUNK_BYTES,
   SessionRangeTransport,
+  createBoundedRangeReader,
   loadPdfSession,
 } from './pdfSession';
 
@@ -60,6 +61,32 @@ async function flushPromises(): Promise<void> {
 }
 
 describe('PDF.js opaque range transport', () => {
+  it('shares one four-read native ceiling across multiple PDF sessions', async () => {
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let peak = 0;
+    mocks.readRange.mockImplementation(async (request: { begin: number; end: number }) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active -= 1;
+      return new Uint8Array(request.end - request.begin);
+    });
+    const readRange = createBoundedRangeReader(MAX_RANGE_READS);
+    const pending = Array.from({ length: 8 }, (_, index) => readRange({
+      sessionId: index < 4 ? 'source-session' : 'candidate-session',
+      generation: 1,
+      begin: index * 10,
+      end: index * 10 + 10,
+    }));
+    expect(mocks.readRange).toHaveBeenCalledTimes(4);
+    for (let index = 0; index < 4; index += 1) releases.shift()?.();
+    await vi.waitFor(() => expect(mocks.readRange).toHaveBeenCalledTimes(8));
+    while (releases.length > 0) releases.shift()?.();
+    await Promise.all(pending);
+    expect(peak).toBe(MAX_RANGE_READS);
+  });
+
   it('splits normal reads into 256 KiB chunks and keeps at most four in flight', async () => {
     const releases: Array<() => void> = [];
     let active = 0;

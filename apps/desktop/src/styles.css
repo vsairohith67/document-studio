@@ -135,6 +135,12 @@ h2 { margin-bottom: var(--ds-core-space-2); font-size: 1.15rem; letter-spacing: 
 .page-only-notice { margin-top: var(--ds-core-space-4); padding: var(--ds-core-space-4); border-left: var(--ds-core-space-1) solid var(--ds-core-color-warning); background: var(--ds-light-background); }
 .page-only-notice p { margin: var(--ds-core-space-1) 0 0; color: var(--ds-core-color-muted); font-size: .84rem; line-height: 1.5; }
 .optimize-source-card { display: grid; gap: var(--ds-core-space-4); }
+.compression-profile { display: flex; gap: var(--ds-core-space-2); }
+.compression-profile .secondary.active {
+  border-color: var(--ds-core-color-accent);
+  background: var(--ds-core-color-accent-soft);
+  color: var(--ds-core-color-accent);
+}
 .optimize-source-card .drop-zone, .optimize-source-card .selection-row { margin-top: 0; }
 .preflight-ready, .lossless-note, .signature-warning {
   display: grid; gap: var(--ds-core-space-1); padding: var(--ds-core-space-4);
@@ -143,6 +149,17 @@ h2 { margin-bottom: var(--ds-core-space-2); font-size: 1.15rem; letter-spacing: 
 .lossless-note { border-left-color: var(--ds-core-color-accent); }
 .signature-warning { border-left-color: var(--ds-core-color-warning); }
 .preflight-ready span, .lossless-note p, .signature-warning p { margin: 0; color: var(--ds-core-color-muted); font-size: .84rem; line-height: 1.5; }
+.balanced-audit {
+  display: grid;
+  gap: var(--ds-core-space-2);
+  margin-top: var(--ds-core-space-3);
+  padding: var(--ds-core-space-3);
+  border: 1px solid var(--ds-core-color-border);
+  border-left: 3px solid var(--ds-core-color-accent);
+  border-radius: var(--ds-core-radius-md);
+  background: var(--ds-light-background);
+}
+.balanced-audit span, .balanced-audit small { color: var(--ds-core-color-muted); }
 .compression-result { gap: var(--ds-core-space-3); }
 .size-comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ds-core-space-2); }
 .size-comparison > span { display: grid; gap: var(--ds-core-space-1); padding: var(--ds-core-space-3); border: 1px solid var(--ds-light-border); border-radius: var(--ds-core-radius-sm); }

@@ -71,6 +71,10 @@ Older `diagnostic.copy` and `pdf.merge` jobs have no plan row and remain valid. 
 
 `0006_job_completion_outcomes.sql` adds one optional strict row keyed to `jobs.id`. `completion_kind` is only `published` or `no-benefit`; `reason` is null for published and exactly `savings-threshold-not-met` for no-benefit. The null-safe SQLite constraint rejects missing and arbitrary no-benefit reasons. The table stores only the job ID, enum values and creation time—no path, generic JSON, document content, candidate bytes or backfill.
 
+## G04C2B migration 7
+
+`0007_balanced_compression_audits.sql` adds one optional strict scalar audit per balanced job plus closed, positive skip counts. It stores source/candidate sizes, selected/skipped counts, affected/compared pages, minimum metrics, maximum changed-pixel evidence, quality/size gate booleans, one structural-proof SHA-256 and a timestamp. Foreign keys cascade with the owning job. The repository writes the audit atomically while the job is verifying and rejects duplicate, malformed, mismatched aggregate or non-balanced evidence. No qpdf JSON, image/PDF bytes, raw pixels, document content, arbitrary JSON or new path is stored, and migration 7 performs no backfill.
+
 Loading an explicit outcome validates the full cross-table contract. Published requires completed state, a finish time, a resolved output name, at least one fully published output, accepted final evidence and no staging/partial ownership. No-benefit requires completed state, a finish time, zero outputs, zero errors, no resolved output name and no temporary output ownership. Existing rows without an outcome load as `null`/`null` and keep their prior evidence rules.
 
 No-benefit completion is one `IMMEDIATE` transaction: exact state/version/cancellation/output/error/outcome/name preconditions, exact outcome insertion, and the terminal state/progress/time/sequence update. A failed insert or update rolls back both. The internal published helper likewise records the published outcome in the same transaction as the future operation's truthful terminal update. Neither helper is exposed through IPC.

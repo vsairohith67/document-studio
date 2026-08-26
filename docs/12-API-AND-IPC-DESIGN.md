@@ -29,6 +29,12 @@ Migration 6 extends every `JobRecord` response with required nullable `completio
 
 G04C2A adds no command. In particular, React cannot invoke the specialized no-benefit or published completion transactions and cannot create terminal evidence. Existing IPC names, capabilities, path redaction and local-only boundaries remain unchanged.
 
+## G04C2B authenticated visual gate
+
+`jobs_create_balanced` accepts the fixed typed request and starts the registered native worker. Rust emits `document-studio-balanced-visual-ready-v1` only after private candidate creation and structural proof. Its payload contains opaque source/candidate viewer metadata, a render-session ID, ordered page tickets and one nonce per affected page; it contains no filesystem path.
+
+`balanced_compression_submit_page` is bounded raw IPC. Authenticated headers bind job, render session, page ordinal/index, nonce, side and dimensions. Rust accepts exactly source then candidate for each ticket, rejects stale/duplicate/out-of-order/non-opaque payloads and never stores pixels. `jobs_balanced_audit` returns only the closed scalar evidence for a balanced job. React cannot register outputs, set an audit or call either terminal completion helper.
+
 `jobs_resolve_interrupted` performs one evidence-based, non-resuming reconciliation. It completes only already-published output with matching durable evidence, otherwise fails after exact cleanup, and remains interrupted on cleanup failure. It rejects ambiguous `1.0.0` records with `LEGACY_CLEANUP_UNPROVEN`. `history_delete` exposes the same safe error instead of deleting a mixed request partially. Settings IPC permits retention only at `application/history.retention_days`.
 
 ## Future cloud API

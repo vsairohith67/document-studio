@@ -63,7 +63,7 @@ foreach ($forbiddenDependency in @('libvips', 'pdfium', 'libreoffice', 'reqwest'
     throw "G04A added forbidden dependency $forbiddenDependency."
   }
 }
-foreach ($forbiddenUi in @('balanced compression', 'aggressive compression', 'batch mode')) {
+foreach ($forbiddenUi in @('aggressive compression', 'batch mode')) {
   if ($optimizeSource -match [regex]::Escape($forbiddenUi)) {
     throw "The G04A UI contains excluded scope: $forbiddenUi"
   }

@@ -33,8 +33,9 @@ foreach ($entry in $expectedMigrationHashes.GetEnumerator()) {
 
 $migrationNames = @(Get-ChildItem -LiteralPath $migrationRoot -File | Sort-Object Name | ForEach-Object Name)
 $expectedNames = @($expectedMigrationHashes.Keys) + '0006_job_completion_outcomes.sql'
-if (($migrationNames -join '|') -ne ($expectedNames -join '|')) {
-  throw "G04C2A migration inventory is not exactly migrations 1-6: $($migrationNames -join ', ')."
+if ($migrationNames.Count -lt $expectedNames.Count -or
+    (($migrationNames[0..($expectedNames.Count - 1)] -join '|') -ne ($expectedNames -join '|'))) {
+  throw "G04C2A accepted migration prefix is not exactly migrations 1-6: $($migrationNames -join ', ')."
 }
 
 $migration = Get-Content -Raw (Join-Path $migrationRoot '0006_job_completion_outcomes.sql')
@@ -56,7 +57,6 @@ $database = Get-Content -Raw (Join-Path $tauriRoot 'src\database.rs')
 $rustContracts = Get-Content -Raw (Join-Path $tauriRoot 'src\contracts.rs')
 $stateMachine = Get-Content -Raw (Join-Path $tauriRoot 'src\job_engine.rs')
 $ipc = Get-Content -Raw (Join-Path $tauriRoot 'src\ipc.rs')
-$registry = Get-Content -Raw (Join-Path $tauriRoot 'src\operation_registry.rs')
 $typescriptContracts = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\src\index.ts')
 $schema = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\job.schema.json')
 $outcomeUi = Get-Content -Raw (Join-Path $desktopRoot 'src\JobCompletionOutcome.tsx')
@@ -122,11 +122,8 @@ if (!$optimizeUi.Contains("job.completionKind === 'no-benefit'")) {
   throw 'G04C2A generic optimize outcome rendering is missing.'
 }
 
-if ($ipc -match '(?i)complete[_-]no[_-]benefit' -or $registry -match 'pdf\.compress-balanced') {
-  throw 'G04C2A exposed terminalization through IPC or registered balanced compression.'
-}
-if ($optimizeUi -match '>Balanced<') {
-  throw 'G04C2A exposed a Balanced control before G04C2B.'
+if ($ipc -match '(?i)complete[_-]no[_-]benefit') {
+  throw 'G04C2A exposed its internal terminalization helper directly through IPC.'
 }
 
 $capability = Get-Content -Raw (Join-Path $tauriRoot 'capabilities\default.json') | ConvertFrom-Json
@@ -134,4 +131,4 @@ if (($capability.permissions -join '|') -ne 'core:default|dialog:allow-open') {
   throw 'G04C2A changed the accepted minimum Tauri capability set.'
 }
 
-Write-Output 'G04C2A migration immutability, strict outcomes, internal CAS, legacy-null contracts, fail-closed loading, no-output UI, no operation/IPC/capability expansion verified.'
+Write-Output 'G04C2A accepted migration 1-6 prefix, strict outcomes, internal CAS, legacy-null contracts, fail-closed loading, no-output UI, internal-only terminalization and capability boundary verified.'

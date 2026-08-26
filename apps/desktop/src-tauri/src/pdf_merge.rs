@@ -2191,7 +2191,7 @@ pub(crate) fn run_qpdf(
     )
 }
 
-fn run_qpdf_with_capture_limit(
+pub(crate) fn run_qpdf_with_capture_limit(
     runtime: &VerifiedQpdfRuntime,
     workspace: &JobWorkspace,
     arguments: &[OsString],

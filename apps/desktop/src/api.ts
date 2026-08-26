@@ -3,6 +3,11 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import type {
+  BalancedCompressionAudit,
+  BalancedCompressionJobCreateRequest,
+  BalancedCompressionVisualSession,
+  BalancedRenderPageTicket,
+  BalancedRenderSide,
   CancelResponse,
   CorePdfJobCreateRequest,
   DependencyDiagnostic,
@@ -27,7 +32,10 @@ import type {
   ViewerRangeRequest,
   ViewerSessionRequest,
 } from '@document-studio/contracts';
-import { JOB_PROGRESS_EVENT_NAME } from '@document-studio/contracts';
+import {
+  BALANCED_VISUAL_READY_EVENT_NAME,
+  JOB_PROGRESS_EVENT_NAME,
+} from '@document-studio/contracts';
 import { browserTestMode, browserTestTransport } from './viewer/browserTestTransport';
 
 export const api = {
@@ -122,6 +130,37 @@ export const api = {
       if (transport?.createPdfToImages) return transport.createPdfToImages(request);
       return invoke<PdfToImagesJobSession>('jobs_create_pdf_to_images', { request });
     },
+    createBalanced: (request: BalancedCompressionJobCreateRequest) =>
+      invoke<JobRecord>('jobs_create_balanced', { request }),
+    submitBalancedPixels(
+      session: BalancedCompressionVisualSession,
+      ticket: BalancedRenderPageTicket,
+      side: BalancedRenderSide,
+      width: number,
+      height: number,
+      rgba: Uint8Array,
+    ): Promise<JobRecord> {
+      return invoke<JobRecord>('balanced_compression_submit_page', rgba, {
+        headers: {
+          'x-document-studio-job-id': session.jobId,
+          'x-document-studio-render-session-id': session.renderSessionId,
+          'x-document-studio-page-ordinal': String(ticket.pageOrdinal),
+          'x-document-studio-source-page-index': String(ticket.sourcePageIndex),
+          'x-document-studio-page-nonce': ticket.nonce,
+          'x-document-studio-render-side': side,
+          'x-document-studio-expected-width': String(width),
+          'x-document-studio-expected-height': String(height),
+        },
+      });
+    },
+    balancedAudit: (request: JobIdRequest) =>
+      invoke<BalancedCompressionAudit | null>('jobs_balanced_audit', { request }),
+    onBalancedVisualReady: (
+      handler: (session: BalancedCompressionVisualSession) => void,
+    ): Promise<UnlistenFn> => listen<BalancedCompressionVisualSession>(
+      BALANCED_VISUAL_READY_EVENT_NAME,
+      (event) => handler(event.payload),
+    ),
     submitPdfPixels(
       session: PdfToImagesJobSession,
       ticket: PdfPixelTransferTicket,

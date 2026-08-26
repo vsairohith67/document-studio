@@ -9,6 +9,13 @@ pub const PDF_MERGE_MIN_INPUTS: usize = 2;
 pub const PDF_MERGE_MAX_INPUTS: usize = 128;
 pub const PDF_COMPRESS_LOSSLESS_OPERATION_ID: &str = "pdf.compress-lossless";
 pub const PDF_COMPRESS_LOSSLESS_VERSION: &str = "1.0.0";
+pub const BALANCED_COMPRESSION_OPERATION_ID: &str = "pdf.compress-balanced";
+pub const BALANCED_COMPRESSION_VERSION: &str = "1.0.0";
+pub const BALANCED_COMPRESSION_PROFILE: &str = "balanced-v1";
+pub const BALANCED_COMPRESSION_JPEG_QUALITY: u8 = 82;
+pub const BALANCED_COMPRESSION_MAX_AFFECTED_PAGES: usize = 128;
+pub const BALANCED_COMPRESSION_MAX_TOTAL_PIXELS: u64 = 268_435_456;
+pub const BALANCED_VISUAL_READY_EVENT_NAME: &str = "document-studio-balanced-visual-ready-v1";
 pub const IMAGE_TO_PDF_OPERATION_ID: &str = "image.to-pdf";
 pub const IMAGE_TO_PDF_VERSION: &str = "1.0.0";
 pub const IMAGE_TO_PDF_MAX_INPUTS: usize = 128;
@@ -452,6 +459,22 @@ pub struct JobsCreateRequest {
     pub requested_output_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BalancedCompressionSettings {
+    pub profile: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BalancedCompressionJobCreateRequest {
+    pub operation_id: String,
+    pub input_paths: Vec<String>,
+    pub destination_directory: String,
+    pub requested_output_name: String,
+    pub settings: BalancedCompressionSettings,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationSpecEnvelope {
@@ -601,6 +624,138 @@ pub struct ViewerDocumentMetadata {
     pub modified_at: String,
     pub mime_type: String,
     pub file_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BalancedRenderPageTicket {
+    pub page_ordinal: u32,
+    pub source_page_index: u32,
+    pub nonce: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BalancedCompressionVisualSession {
+    pub job_id: String,
+    pub render_session_id: String,
+    pub source: ViewerDocumentMetadata,
+    pub candidate: ViewerDocumentMetadata,
+    pub pages: Vec<BalancedRenderPageTicket>,
+    pub selected_image_count: u32,
+    pub skipped_image_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BalancedRenderSide {
+    Source,
+    Candidate,
+}
+
+impl BalancedRenderSide {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Candidate => "candidate",
+        }
+    }
+
+    pub fn from_contract(value: &str) -> Option<Self> {
+        Some(match value {
+            "source" => Self::Source,
+            "candidate" => Self::Candidate,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BalancedCompressionSkipReason {
+    BelowMinimum,
+    UnsupportedFilter,
+    DecodeParameters,
+    UnsupportedColorspace,
+    NonRgb8,
+    MaskOrTransparency,
+    ExternalOrAlternate,
+    UnsafeResourceAncestry,
+    AmbiguousSharedUse,
+    InlineImage,
+    CandidateNotSmaller,
+    CandidateQuality,
+    CandidateDecode,
+}
+
+impl BalancedCompressionSkipReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BelowMinimum => "below-minimum",
+            Self::UnsupportedFilter => "unsupported-filter",
+            Self::DecodeParameters => "decode-parameters",
+            Self::UnsupportedColorspace => "unsupported-colorspace",
+            Self::NonRgb8 => "non-rgb8",
+            Self::MaskOrTransparency => "mask-or-transparency",
+            Self::ExternalOrAlternate => "external-or-alternate",
+            Self::UnsafeResourceAncestry => "unsafe-resource-ancestry",
+            Self::AmbiguousSharedUse => "ambiguous-shared-use",
+            Self::InlineImage => "inline-image",
+            Self::CandidateNotSmaller => "candidate-not-smaller",
+            Self::CandidateQuality => "candidate-quality",
+            Self::CandidateDecode => "candidate-decode",
+        }
+    }
+
+    pub fn from_contract(value: &str) -> Option<Self> {
+        Some(match value {
+            "below-minimum" => Self::BelowMinimum,
+            "unsupported-filter" => Self::UnsupportedFilter,
+            "decode-parameters" => Self::DecodeParameters,
+            "unsupported-colorspace" => Self::UnsupportedColorspace,
+            "non-rgb8" => Self::NonRgb8,
+            "mask-or-transparency" => Self::MaskOrTransparency,
+            "external-or-alternate" => Self::ExternalOrAlternate,
+            "unsafe-resource-ancestry" => Self::UnsafeResourceAncestry,
+            "ambiguous-shared-use" => Self::AmbiguousSharedUse,
+            "inline-image" => Self::InlineImage,
+            "candidate-not-smaller" => Self::CandidateNotSmaller,
+            "candidate-quality" => Self::CandidateQuality,
+            "candidate-decode" => Self::CandidateDecode,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BalancedCompressionSkipCount {
+    pub reason: BalancedCompressionSkipReason,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BalancedCompressionAudit {
+    pub profile: String,
+    pub source_bytes: u64,
+    pub candidate_bytes: u64,
+    pub saved_bytes: u64,
+    pub saved_percent: f64,
+    pub selected_images: u32,
+    pub skipped_images: u32,
+    pub affected_pages: u32,
+    pub compared_pages: u32,
+    pub minimum_ssim: Option<f64>,
+    pub minimum_psnr_db: Option<f64>,
+    pub psnr_is_infinite: bool,
+    pub maximum_changed_pixels: u64,
+    pub maximum_total_pixels: u64,
+    pub quality_passed: bool,
+    pub size_gate_passed: bool,
+    pub structural_proof_sha256: String,
+    pub skipped_reasons: Vec<BalancedCompressionSkipCount>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

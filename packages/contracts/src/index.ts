@@ -42,6 +42,11 @@ export type OutputStatus = 'planned' | 'staged' | 'verified' | 'publishing' | 'p
 export type JobCompletionKind = 'published' | 'no-benefit';
 export type JobCompletionReason = 'savings-threshold-not-met';
 
+export const BALANCED_COMPRESSION_OPERATION_ID = 'pdf.compress-balanced';
+export const BALANCED_COMPRESSION_VERSION = '1.0.0';
+export const BALANCED_COMPRESSION_PROFILE = 'balanced-v1';
+export const BALANCED_VISUAL_READY_EVENT_NAME = 'document-studio-balanced-visual-ready-v1';
+
 export interface OperationError {
   code: string;
   title: string;
@@ -214,7 +219,7 @@ export interface OperationManifest {
   settingsSchema: Record<string, unknown>;
   outputs: {
     mimeType: string;
-    multiplicity: 'single' | 'multiple';
+    multiplicity: 'single' | 'multiple' | 'zero-or-one';
   };
   dependencies: string[];
   verification: string[];
@@ -244,6 +249,63 @@ export interface PdfCompressLosslessCreateRequest {
   inputPaths: [string];
   destinationDirectory: string;
   requestedOutputName: string;
+}
+
+export interface BalancedCompressionJobCreateRequest {
+  operationId: 'pdf.compress-balanced';
+  inputPaths: [string];
+  destinationDirectory: string;
+  requestedOutputName: string;
+  settings: { profile: 'balanced-v1' };
+}
+
+export type BalancedRenderSide = 'source' | 'candidate';
+
+export interface BalancedRenderPageTicket {
+  pageOrdinal: number;
+  sourcePageIndex: number;
+  nonce: string;
+}
+
+export interface BalancedCompressionVisualSession {
+  jobId: string;
+  renderSessionId: string;
+  source: ViewerDocumentMetadata;
+  candidate: ViewerDocumentMetadata;
+  pages: BalancedRenderPageTicket[];
+  selectedImageCount: number;
+  skippedImageCount: number;
+}
+
+export interface BalancedCompressionSkipCount {
+  reason: 'below-minimum' | 'unsupported-filter' | 'decode-parameters'
+    | 'unsupported-colorspace' | 'non-rgb8' | 'mask-or-transparency'
+    | 'external-or-alternate' | 'unsafe-resource-ancestry'
+    | 'ambiguous-shared-use' | 'inline-image' | 'candidate-not-smaller'
+    | 'candidate-quality' | 'candidate-decode';
+  count: number;
+}
+
+export interface BalancedCompressionAudit {
+  profile: 'balanced-v1';
+  sourceBytes: number;
+  candidateBytes: number;
+  savedBytes: number;
+  savedPercent: number;
+  selectedImages: number;
+  skippedImages: number;
+  affectedPages: number;
+  comparedPages: number;
+  minimumSsim: number | null;
+  minimumPsnrDb: number | null;
+  psnrIsInfinite: boolean;
+  maximumChangedPixels: number;
+  maximumTotalPixels: number;
+  qualityPassed: boolean;
+  sizeGatePassed: boolean;
+  structuralProofSha256: string;
+  skippedReasons: BalancedCompressionSkipCount[];
+  createdAt: string;
 }
 
 export interface ImageToPdfCreateRequest {

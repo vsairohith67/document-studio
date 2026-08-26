@@ -51,6 +51,8 @@ required = [
     'apps/desktop/src-tauri/migrations/0003_workflows.sql',
     'apps/desktop/src-tauri/migrations/0004_job_operation_plans.sql',
     'apps/desktop/src-tauri/migrations/0005_job_operation_specs_and_warnings.sql',
+    'apps/desktop/src-tauri/migrations/0006_job_completion_outcomes.sql',
+    'apps/desktop/src-tauri/migrations/0007_balanced_compression_audits.sql',
     'docs/adr/ADR-005-storage-ownership-and-provider-persistence.md',
     'docs/adr/ADR-006-foundation-dependencies-and-sqlite.md',
     'docs/adr/ADR-007-durable-publication-and-recovery.md',
@@ -65,6 +67,8 @@ required = [
     'docs/implementation-log/G04C2-corpus-recovery.md',
     'scripts/g04c2_corpus.py',
     'apps/desktop/scripts/verify-g04c2-corpus.ps1',
+    'apps/desktop/scripts/verify-g04c2b-boundaries.ps1',
+    'packages/contracts/fixtures/pdf-compress-balanced-contracts.json',
     'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/README.md',
     'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/corpus-manifest.json',
     'apps/desktop/src-tauri/tests/g04c2_corpus.rs',
@@ -715,6 +719,39 @@ for required_ci in [
 ]:
     if required_ci not in ci_text:
         raise SystemExit(f'G04C2 corpus exact-head CI is missing: {required_ci}')
+
+g04c2b_contracts = (ROOT / 'apps/desktop/src-tauri/src/contracts.rs').read_text(encoding='utf-8')
+g04c2b_backend = (ROOT / 'apps/desktop/src-tauri/src/balanced_compression.rs').read_text(encoding='utf-8')
+g04c2b_metrics = (ROOT / 'apps/desktop/src-tauri/src/balanced_metrics.rs').read_text(encoding='utf-8')
+g04c2b_migration = (ROOT / 'apps/desktop/src-tauri/migrations/0007_balanced_compression_audits.sql').read_text(encoding='utf-8')
+for required_boundary in [
+    'BALANCED_COMPRESSION_OPERATION_ID: &str = "pdf.compress-balanced"',
+    'BALANCED_COMPRESSION_PROFILE: &str = "balanced-v1"',
+    'BALANCED_COMPRESSION_JPEG_QUALITY: u8 = 82',
+    'BALANCED_COMPRESSION_MAX_AFFECTED_PAGES: usize = 128',
+]:
+    if required_boundary not in g04c2b_contracts:
+        raise SystemExit(f'G04C2B fixed contract is missing: {required_boundary}')
+for required_boundary in [
+    'OsString::from("--stream-data=preserve")',
+    'OsString::from("--object-streams=preserve")',
+    'OsString::from("--preserve-unreferenced")',
+    'document_savings_gate_passes(active.source_size, active.candidate_size)',
+    'frozen_corpus_completes_no_benefit_without_visual_or_output',
+]:
+    if required_boundary not in g04c2b_backend:
+        raise SystemExit(f'G04C2B backend boundary is missing: {required_boundary}')
+for required_boundary in [
+    'BALANCED_SSIM_MINIMUM: f64 = 0.985',
+    'BALANCED_PSNR_MINIMUM_DB: f64 = 36.0',
+    'BALANCED_CHANGED_DELTA_THRESHOLD: u8 = 12',
+]:
+    if required_boundary not in g04c2b_metrics:
+        raise SystemExit(f'G04C2B exact metric is missing: {required_boundary}')
+if ') STRICT;' not in g04c2b_migration or "CHECK (profile = 'balanced-v1')" not in g04c2b_migration:
+    raise SystemExit('G04C2B audit migration must remain strict and profile-bound')
+if 'npm run verify:g04c2b --workspace @document-studio/desktop' not in ci_text:
+    raise SystemExit('G04C2B boundary verifier is not wired into exact-head CI')
 
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):

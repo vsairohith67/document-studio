@@ -83,3 +83,11 @@ Visual cover-up is not redaction. The operation must remove underlying text/obje
 - Normal local mode.
 - Strict offline mode (all network disabled, including update/model checks).
 - External-provider mode enabled per feature/provider with explicit scope.
+# G04C2B balanced-compression threats
+
+- **Object substitution or unsafe shared use:** bounded raw qpdf traversal follows only page and ordinary Form resources, tracks cycles/depth/object limits, and changes a shared XObject only when every global reference is a proven safe edge.
+- **Protected image mutation:** masks, decode arrays/parameters, alternate/external streams, unsupported filters/colour spaces, inline images, annotation/pattern/transparency ancestry and ambiguous graph uses are skipped or refused and covered by the protected semantic inventory.
+- **Signature, encryption or repair ambiguity:** strict no-recovery qpdf preflight, the encryption exit contract and conservative signature/ByteRange search fail before candidate generation.
+- **Renderer spoofing or replay:** opaque retained-handle sessions, a job-scoped render-session ID, per-page nonce, exact side/ordinal order, raw byte length, opaque alpha and aggregate pixel bounds reject stale or malformed evidence. At most four native range reads are active across both sessions.
+- **Quality or savings overclaim:** deterministic Rust metrics verify every affected page. No output row exists before both exact size thresholds pass; no-benefit publishes nothing.
+- **Crash, cancellation or leakage:** pixels and qpdf JSON remain transient, SQLite receives scalar evidence only, marker-owned cleanup is proven, ambiguous cleanup becomes interrupted, and the publication commit boundary never deletes a published user file.

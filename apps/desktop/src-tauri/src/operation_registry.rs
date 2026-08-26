@@ -2,7 +2,8 @@ use serde_json::json;
 
 use crate::contracts::{
     JobsCreateRequest, OperationError, OperationInputs, OperationManifest, OperationOutputs,
-    OperationStage, CORE_PDF_OPERATION_VERSION, DIAGNOSTIC_COPY_OPERATION_ID,
+    OperationStage, BALANCED_COMPRESSION_OPERATION_ID, BALANCED_COMPRESSION_PROFILE,
+    BALANCED_COMPRESSION_VERSION, CORE_PDF_OPERATION_VERSION, DIAGNOSTIC_COPY_OPERATION_ID,
     DIAGNOSTIC_COPY_VERSION, IMAGE_TO_PDF_MAX_INPUTS, IMAGE_TO_PDF_OPERATION_ID,
     IMAGE_TO_PDF_VERSION, PDF_COMPRESS_LOSSLESS_OPERATION_ID, PDF_COMPRESS_LOSSLESS_VERSION,
     PDF_EXTRACT_OPERATION_ID, PDF_MERGE_MAX_INPUTS, PDF_MERGE_MIN_INPUTS, PDF_MERGE_OPERATION_ID,
@@ -25,6 +26,7 @@ pub fn all_manifests() -> Vec<OperationManifest> {
         diagnostic_copy_manifest(),
         pdf_merge_manifest(),
         pdf_compress_lossless_manifest(),
+        pdf_compress_balanced_manifest(),
         image_to_pdf_manifest(),
         pdf_to_images_manifest(),
         extract_pages_manifest(),
@@ -183,6 +185,46 @@ pub fn pdf_compress_lossless_manifest() -> OperationManifest {
             "source-immutability",
         ],
     )
+}
+
+pub fn pdf_compress_balanced_manifest() -> OperationManifest {
+    let mut value = manifest(
+        BALANCED_COMPRESSION_OPERATION_ID,
+        BALANCED_COMPRESSION_VERSION,
+        "Balanced PDF Compression",
+        "optimize",
+        "Conservatively recompresses safe RGB images and publishes only a verified, meaningfully smaller PDF.",
+        vec!["application/pdf"],
+        1,
+        1,
+        "application/pdf",
+        vec!["document-studio-core", "pdfjs", QPDF_DEPENDENCY_ID],
+        vec![
+            "regular-file",
+            "pdf-magic",
+            "sha256",
+            "qpdf-strict-check",
+            "unencrypted",
+            "unsigned",
+            "bounded-resource-graph",
+            "rgb8-image-allow-list",
+            "structural-inventory",
+            "pdfjs-page-visual-gate",
+            "ssim",
+            "psnr",
+            "changed-pixel-ratio",
+            "source-immutability",
+            "publication-hash",
+        ],
+    );
+    value.settings_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["profile"],
+        "properties": { "profile": { "const": BALANCED_COMPRESSION_PROFILE } }
+    });
+    value.outputs.multiplicity = "zero-or-one".to_owned();
+    value
 }
 
 pub fn image_to_pdf_manifest() -> OperationManifest {
@@ -480,9 +522,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_exposes_accepted_and_g04b2_manifests() {
+    fn registry_exposes_accepted_g04b2_and_g04c2b_manifests() {
         let manifests = all_manifests();
-        assert_eq!(manifests.len(), 10);
+        assert_eq!(manifests.len(), 11);
         assert_eq!(manifests[0].id, "diagnostic.copy");
         assert_eq!(manifests[1].id, "pdf.merge");
         assert_eq!(manifests[1].inputs.minimum, 2);
@@ -495,23 +537,29 @@ mod tests {
         assert!(manifests[2]
             .verification
             .contains(&"structural-inventory".to_owned()));
-        assert_eq!(manifests[3].id, "image.to-pdf");
-        assert_eq!(manifests[3].inputs.minimum, 1);
-        assert_eq!(manifests[3].inputs.maximum, 128);
+        assert_eq!(manifests[3].id, "pdf.compress-balanced");
+        assert_eq!(manifests[3].outputs.multiplicity, "zero-or-one");
         assert_eq!(
-            manifests[3].inputs.accepted_mime_types,
+            manifests[3].dependencies,
+            ["document-studio-core", "pdfjs", "qpdf"]
+        );
+        assert_eq!(manifests[4].id, "image.to-pdf");
+        assert_eq!(manifests[4].inputs.minimum, 1);
+        assert_eq!(manifests[4].inputs.maximum, 128);
+        assert_eq!(
+            manifests[4].inputs.accepted_mime_types,
             ["image/jpeg", "image/png", "image/webp"]
         );
-        assert_eq!(manifests[3].dependencies, ["document-studio-core", "qpdf"]);
-        assert_eq!(manifests[4].id, "pdf.to-images");
-        assert_eq!(manifests[4].version, "1.0.0");
-        assert_eq!(manifests[4].outputs.multiplicity, "multiple");
+        assert_eq!(manifests[4].dependencies, ["document-studio-core", "qpdf"]);
+        assert_eq!(manifests[5].id, "pdf.to-images");
+        assert_eq!(manifests[5].version, "1.0.0");
+        assert_eq!(manifests[5].outputs.multiplicity, "multiple");
         assert_eq!(
-            manifests[4].dependencies,
+            manifests[5].dependencies,
             ["document-studio-core", "pdfjs", "qpdf"]
         );
         assert_eq!(
-            manifests[5..]
+            manifests[6..]
                 .iter()
                 .map(|manifest| manifest.id.as_str())
                 .collect::<Vec<_>>(),
@@ -523,7 +571,7 @@ mod tests {
                 "pdf.split",
             ]
         );
-        assert!(manifests[5..]
+        assert!(manifests[6..]
             .iter()
             .all(|manifest| { manifest.version == "1.0.0" && manifest.dependencies == ["qpdf"] }));
     }

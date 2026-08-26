@@ -1,4 +1,6 @@
 pub mod app_state;
+pub mod balanced_compression;
+pub mod balanced_metrics;
 pub mod contracts;
 pub mod database;
 pub mod diagnostic_copy;
@@ -371,10 +373,13 @@ pub fn run() {
         ipc::jobs_create,
         ipc::jobs_create_core_pdf,
         ipc::jobs_create_pdf_to_images,
+        ipc::jobs_create_balanced,
         ipc::pdf_to_images_submit_page,
+        ipc::balanced_compression_submit_page,
         ipc::jobs_cancel,
         ipc::jobs_resolve_interrupted,
         ipc::jobs_get,
+        ipc::jobs_balanced_audit,
         ipc::jobs_warnings,
         ipc::history_list,
         ipc::history_delete,
@@ -396,10 +401,13 @@ pub fn run() {
         ipc::jobs_create,
         ipc::jobs_create_core_pdf,
         ipc::jobs_create_pdf_to_images,
+        ipc::jobs_create_balanced,
         ipc::pdf_to_images_submit_page,
+        ipc::balanced_compression_submit_page,
         ipc::jobs_cancel,
         ipc::jobs_resolve_interrupted,
         ipc::jobs_get,
+        ipc::jobs_balanced_audit,
         ipc::jobs_warnings,
         ipc::history_list,
         ipc::history_delete,
