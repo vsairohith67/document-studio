@@ -3,6 +3,7 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use thiserror::Error;
+use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
 use crate::windows_security::{file_identity, FileIdentity};
@@ -86,6 +87,22 @@ pub fn validate_output_name(name: &str) -> Result<(), PathPolicyError> {
     Ok(())
 }
 
+pub fn windows_file_names_equal(left: &str, right: &str) -> bool {
+    let left: Vec<u16> = left.encode_utf16().collect();
+    let right: Vec<u16> = right.encode_utf16().collect();
+    // SAFETY: both slices remain alive for the call and their explicit lengths exclude
+    // terminators, which is the contract required by CompareStringOrdinal.
+    unsafe {
+        CompareStringOrdinal(
+            left.as_ptr(),
+            i32::try_from(left.len()).unwrap_or(i32::MAX),
+            right.as_ptr(),
+            i32::try_from(right.len()).unwrap_or(i32::MAX),
+            1,
+        ) == CSTR_EQUAL
+    }
+}
+
 pub fn ensure_different_files(input: &Path, output: &Path) -> Result<(), PathPolicyError> {
     if !output.exists() {
         return Ok(());
@@ -164,4 +181,25 @@ fn canonicalize_local(path: &Path) -> Result<PathBuf, PathPolicyError> {
         return Ok(PathBuf::from(local));
     }
     Ok(canonical)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_output_name, windows_file_names_equal};
+
+    #[test]
+    fn windows_ordinal_ignore_case_handles_ascii_and_unicode_without_locale_folding() {
+        assert!(windows_file_names_equal("REPORT.pdf", "report.PDF"));
+        assert!(windows_file_names_equal("ЖУРНАЛ.pdf", "журнал.PDF"));
+        assert!(!windows_file_names_equal("I.pdf", "ı.pdf"));
+        assert!(!windows_file_names_equal("resume.pdf", "résumé.pdf"));
+    }
+
+    #[test]
+    fn output_component_limit_is_exact_utf16_units() {
+        assert!(validate_output_name(&format!("{}.pdf", "a".repeat(251))).is_ok());
+        assert!(validate_output_name(&format!("{}.pdf", "a".repeat(252))).is_err());
+        assert!(validate_output_name(&format!("{}a.pdf", "😀".repeat(125))).is_ok());
+        assert!(validate_output_name(&format!("{}aa.pdf", "😀".repeat(125))).is_err());
+    }
 }

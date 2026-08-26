@@ -21,6 +21,24 @@ pub enum OperationKind {
     ImageToPdf,
 }
 
+pub fn validate_batch_eligibility(
+    operation_id: &str,
+    operation_version: &str,
+) -> Result<(), OperationError> {
+    if operation_id == PDF_COMPRESS_LOSSLESS_OPERATION_ID
+        && operation_version == PDF_COMPRESS_LOSSLESS_VERSION
+    {
+        return Ok(());
+    }
+    Err(OperationError::safe(
+        "BATCH_OPERATION_INELIGIBLE",
+        "This operation is not eligible for batch preview",
+        "Batch V1 supports only pdf.compress-lossless@1.0.0.",
+        OperationStage::Inspect,
+        false,
+    ))
+}
+
 pub fn all_manifests() -> Vec<OperationManifest> {
     vec![
         diagnostic_copy_manifest(),

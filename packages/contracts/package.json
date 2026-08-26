@@ -8,7 +8,9 @@
     "./job.schema.json": "./job.schema.json",
     "./operation.schema.json": "./operation.schema.json",
     "./ipc.schema.json": "./ipc.schema.json",
-    "./fixtures/foundation-contracts.json": "./fixtures/foundation-contracts.json"
+    "./batch.schema.json": "./batch.schema.json",
+    "./fixtures/foundation-contracts.json": "./fixtures/foundation-contracts.json",
+    "./fixtures/batch-preview-contracts.json": "./fixtures/batch-preview-contracts.json"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

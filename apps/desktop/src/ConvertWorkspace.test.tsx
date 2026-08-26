@@ -96,6 +96,23 @@ describe('G04B Convert workspace', () => {
     expect(accessibility.violations).toEqual([]);
   });
 
+  it('exposes the enabled Batch navigation route', async () => {
+    const user = userEvent.setup();
+    const onOpenBatch = vi.fn();
+    render(
+      <ConvertWorkspace
+        system={system}
+        dependencies={dependencies}
+        onOpenMerge={vi.fn()}
+        onOpenViewer={vi.fn()}
+        onOpenOptimize={vi.fn()}
+        onOpenBatch={onOpenBatch}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Batch' }));
+    expect(onOpenBatch).toHaveBeenCalledTimes(1);
+  });
+
   it('preserves the displayed order, supports keyboard reordering, and reports verified completion', async () => {
     const user = userEvent.setup();
     renderWorkspace();

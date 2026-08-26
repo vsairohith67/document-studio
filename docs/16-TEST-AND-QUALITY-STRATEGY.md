@@ -1,5 +1,11 @@
 # Test and Quality Strategy
 
+## G04F1 batch preview evidence
+
+Contract tests pin exact lossless eligibility, 1/128/129 limits, empty settings, closed sanitized response shapes and outcome compatibility. Native tests cover ordered canonical hashes, the restricted naming grammar and escapes, Unicode Windows ordinal-ignore-case behavior, reserved names, exact UTF-16 component limits, source/destination/collision/hash/version/CAS staleness, qpdf availability without workspace creation, exact disk threshold/overflow, every insert-boundary rollback, zero worker/workspace/destination mutation and published/no-benefit aggregation. Migration tests upgrade every accepted prior version 1–7 to 8 without checksum drift or backfill.
+
+React/API tests cover exact command payloads, ordered rows/output names/estimates, truthful no-start confirmation, keyboard-only controls, deterministic focus after removal and creation, axe, narrow/200% layout, reduced motion and forced-colors selectors. Heavy PDF.js, WebView2, single-instance and Tauri gates remain serialized with other lanes and are reported separately.
+
 ## Layers
 
 - Unit tests: schemas, range parsing, naming, path validation, job transitions, settings migrations.

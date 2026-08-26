@@ -176,14 +176,14 @@ fn insert_version_three_job(connection: &Connection, job: &JobRecord) {
 }
 
 #[test]
-fn fresh_database_migrates_to_version_seven_and_reopens_idempotently() {
+fn fresh_database_migrates_to_version_eight_and_reopens_idempotently() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("metadata.sqlite3");
     {
         let database = Database::open(&path).unwrap();
         assert_eq!(
             database.migration_versions().unwrap(),
-            vec![1, 2, 3, 4, 5, 6, 7]
+            vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
         let integrity: String = database
             .connection()
@@ -195,12 +195,12 @@ fn fresh_database_migrates_to_version_seven_and_reopens_idempotently() {
     let reopened = Database::open(&path).unwrap();
     assert_eq!(
         reopened.migration_versions().unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
 }
 
 #[test]
-fn migrations_one_through_three_upgrade_to_seven_preserves_legacy_jobs_without_backfill() {
+fn migrations_one_through_three_upgrade_to_eight_preserves_legacy_jobs_without_backfill() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("version-three.sqlite3");
     let mut connection = Connection::open(&path).unwrap();
@@ -247,7 +247,7 @@ fn migrations_one_through_three_upgrade_to_seven_preserves_legacy_jobs_without_b
     let database = Database::open(&path).unwrap();
     assert_eq!(
         database.migration_versions().unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
     let checksums_after = database
         .connection()
@@ -296,6 +296,15 @@ fn migrations_one_through_three_upgrade_to_seven_preserves_legacy_jobs_without_b
         )
         .unwrap();
     assert_eq!(migration_seven_count, 1);
+    let migration_eight_count: i64 = database
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 8",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migration_eight_count, 1);
     assert_eq!(
         database.get_job(&diagnostic.id).unwrap(),
         Some(diagnostic.clone())
@@ -356,6 +365,15 @@ fn migrations_one_through_three_upgrade_to_seven_preserves_legacy_jobs_without_b
         balanced_audit_count, 0,
         "migration 7 must not invent balanced-compression evidence"
     );
+    for table in ["batch_runs", "batch_run_jobs"] {
+        let count: i64 = database
+            .connection()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "migration 8 must not invent batch metadata");
+    }
     let preserved_stage_runs: i64 = database
         .connection()
         .query_row(
@@ -409,7 +427,7 @@ fn migrations_one_through_three_upgrade_to_seven_preserves_legacy_jobs_without_b
 }
 
 #[test]
-fn real_migrations_one_through_five_upgrade_to_seven_without_backfill_or_checksum_drift() {
+fn real_migrations_one_through_five_upgrade_to_eight_without_backfill_or_checksum_drift() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("version-five.sqlite3");
     let mut connection = Connection::open(&path).unwrap();
@@ -442,7 +460,7 @@ fn real_migrations_one_through_five_upgrade_to_seven_without_backfill_or_checksu
     assert_eq!(checksums_after, checksums_before);
     assert_eq!(
         database.migration_versions().unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7]
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
     );
     assert_eq!(database.get_job(&job.id).unwrap(), Some(job));
     let outcome_count: i64 = database
@@ -452,6 +470,49 @@ fn real_migrations_one_through_five_upgrade_to_seven_without_backfill_or_checksu
         })
         .unwrap();
     assert_eq!(outcome_count, 0);
+}
+
+#[test]
+fn every_accepted_prior_version_upgrades_to_eight_without_checksum_drift_or_batch_backfill() {
+    for accepted_version in 1..=7 {
+        let mut connection = Connection::open_in_memory().unwrap();
+        configure_connection(&connection).unwrap();
+        apply_migrations(&mut connection, &FOUNDATION_MIGRATIONS[..accepted_version]).unwrap();
+        let checksums_before = connection
+            .prepare("SELECT version, sql_checksum FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        apply_migrations(&mut connection, FOUNDATION_MIGRATIONS).unwrap();
+        let checksums_after = connection
+            .prepare(
+                "SELECT version, sql_checksum FROM schema_migrations WHERE version <= ?1 ORDER BY version",
+            )
+            .unwrap()
+            .query_map([accepted_version as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            checksums_after, checksums_before,
+            "version {accepted_version}"
+        );
+        for table in ["batch_runs", "batch_run_jobs"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "version {accepted_version} -> {table}");
+        }
+    }
 }
 
 #[test]

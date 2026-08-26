@@ -2,6 +2,20 @@ $ErrorActionPreference = 'Stop'
 
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $desktopRoot '..\..')).Path
+$migrationRoot = Join-Path $desktopRoot 'src-tauri\migrations'
+
+function Get-Sha256Hex([string]$Path) {
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+  } finally { $stream.Dispose() }
+}
+
+function Test-ExactMigrationInventory([string[]]$Actual, [string[]]$Expected) {
+  return ($Actual -join '|') -eq ($Expected -join '|')
+}
 $packageText = Get-Content -Raw (Join-Path $desktopRoot 'package.json')
 $package = $packageText | ConvertFrom-Json
 $cargo = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\Cargo.toml')
@@ -22,29 +36,49 @@ $session = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.ts')
 $typedContracts = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\src\index.ts')
 $operationSchema = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\operation.schema.json')
 $ipcSchema = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\ipc.schema.json')
-$migration = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\migrations\0007_balanced_compression_audits.sql')
+$migration = Get-Content -Raw (Join-Path $migrationRoot '0007_balanced_compression_audits.sql')
+$f1Migration = Get-Content -Raw (Join-Path $migrationRoot '0008_batch_preview_foundation.sql')
 $ci = Get-Content -Raw (Join-Path $repoRoot '.github\workflows\ci.yml')
 $nativeTests = $backend
 $rendererTests = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\balancedCompression.test.ts')
 $contractFixture = Get-Content -Raw (Join-Path $repoRoot 'packages\contracts\fixtures\pdf-compress-balanced-contracts.json')
 
-$migrationNames = @(Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'src-tauri\migrations') -File |
+$acceptedMigrations = [ordered]@{
+  '0001_metadata.sql' = '0c6dd547dd13b33ceedf7e6488d27748dd472587f85a29fe61c1abe51c23a59e'
+  '0002_jobs.sql' = '0c813621ab174456f20c697e975c5e0174674340244e47bb114b6c2f4d3ac7b6'
+  '0003_workflows.sql' = 'bed67e0bbfa4cc04821d2a1f423596a4ca93203b3aa4944938cb92e7fe262592'
+  '0004_job_operation_plans.sql' = '72ae58cbfbf9e4a26c417222d606f90335aff3647f6933bab7058e74d0d206eb'
+  '0005_job_operation_specs_and_warnings.sql' = '750753c6ec832909798fc358c534144105b0de5f0d8d2646771045cdd88f61b1'
+  '0006_job_completion_outcomes.sql' = '94ea0eaf4fa3963a0807a7597890c70ec60acdee776530607a2fcf1ff226364c'
+  '0007_balanced_compression_audits.sql' = '6e22a3751ce49c52d6ac2b8cb57aad65820ee0fb5d7af383a06c613e7dc9f27e'
+}
+foreach ($entry in $acceptedMigrations.GetEnumerator()) {
+  if ((Get-Sha256Hex (Join-Path $migrationRoot $entry.Key)) -ne $entry.Value) {
+    throw "G04C2B accepted migration changed: $($entry.Key)."
+  }
+}
+
+$migrationNames = @(Get-ChildItem -LiteralPath $migrationRoot -File |
   Sort-Object Name | ForEach-Object Name)
-$expectedMigrations = @(
-  '0001_metadata.sql',
-  '0002_jobs.sql',
-  '0003_workflows.sql',
-  '0004_job_operation_plans.sql',
-  '0005_job_operation_specs_and_warnings.sql',
-  '0006_job_completion_outcomes.sql',
-  '0007_balanced_compression_audits.sql'
-)
-if (($migrationNames -join '|') -ne ($expectedMigrations -join '|')) {
-  throw 'G04C2B requires exactly accepted migrations 1 through 7.'
+$expectedMigrations = @($acceptedMigrations.Keys) + '0008_batch_preview_foundation.sql'
+if (!(Test-ExactMigrationInventory $migrationNames $expectedMigrations)) {
+  throw 'G04C2B requires exact accepted migrations 1-7 followed only by G04F1 migration 8.'
+}
+$unexpectedInventory = @($expectedMigrations) + '0009_unexpected.sql'
+$renumberedInventory = @($expectedMigrations)
+$renumberedInventory[-1] = '0009_batch_preview_foundation.sql'
+if ((Test-ExactMigrationInventory $unexpectedInventory $expectedMigrations) -or
+    (Test-ExactMigrationInventory $renumberedInventory $expectedMigrations)) {
+  throw 'G04C2B migration inventory negative probes did not fail closed.'
 }
 if (!$database.Contains('name: "balanced_compression_audits"') -or
     !$database.Contains('include_str!("../migrations/0007_balanced_compression_audits.sql")')) {
   throw 'G04C2B migration 7 is not registered in the immutable migration list.'
+}
+if (!$database.Contains('name: "batch_preview_foundation"') -or
+    !$database.Contains('include_str!("../migrations/0008_batch_preview_foundation.sql")') -or
+    !$f1Migration.Contains('CREATE TABLE batch_runs')) {
+  throw 'G04C2B allows only the registered additive G04F1 migration 8 after its frozen migration 7.'
 }
 
 if (!$package.scripts.'verify:g04c2b' -or

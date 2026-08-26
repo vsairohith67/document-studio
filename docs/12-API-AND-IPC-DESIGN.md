@@ -1,5 +1,13 @@
 # API and IPC Design
 
+## G04F1 commands
+
+- `batches_preview(request) -> BatchPreviewResponse`: bounded local inspection, qpdf availability proof and a sanitized canonical preview.
+- `batches_create(request + previewSha256 + optimisticVersion) -> BatchRecord`: full recomputation plus all-or-nothing metadata creation.
+- `batches_get({batchId}) -> BatchRecord`: sanitized batch/child status with settled counts and preserved completion outcomes.
+
+None accepts executable child payloads, starts a worker, registers a cancellation token, calls the ordinary `jobs_create` IPC or emits document progress. Paths exist only in the trusted Rust request/local metadata boundary; the preview response excludes paths, identities, source hashes and modification times. Unknown or extra request/settings fields fail closed.
+
 ## Desktop IPC
 
 The React app may call only named Tauri commands with serializable typed payloads. It cannot execute arbitrary binaries or write unrestricted paths.

@@ -18,5 +18,6 @@
 | [ADR-014](ADR-014-webview2-startup-environment-policy.md) | Remove inherited WebView2 controls before Tauri startup and retain only the app-owned profile/test builder boundaries | Accepted for SEC1C implementation |
 | [ADR-015](ADR-015-durable-successful-job-outcomes-without-publication.md) | Represent successful no-publication completion with strict durable outcome metadata | Accepted for G04C2A implementation |
 | [ADR-016](ADR-016-conservative-object-aware-balanced-compression.md) | Use a fixed object-aware qpdf/PDF.js pipeline for conservative balanced compression | Accepted for G04C2B implementation; owner merge pending |
+| [ADR-017](ADR-017-canonical-batch-preview-and-atomic-metadata.md) | Use a private canonical preview proof and one atomic metadata transaction for batch planning | Accepted for G04F1 implementation |
 
 Create a new ADR for decisions that are expensive to reverse, affect security/privacy, change the operation contract, add a production dependency/model or alter the platform sequence. Never rewrite an accepted ADR to hide history; supersede it with a new record.

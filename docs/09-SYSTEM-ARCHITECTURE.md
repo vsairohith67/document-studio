@@ -37,6 +37,12 @@ Output stays in the owned workspace until Rust file checks, a new SHA-256/size r
 
 G04C2A preserves that publication path while adding a distinct successful no-publication outcome. The generic state graph continues to reject `Verifying → Completed`; an internal immediate CAS transaction may take that edge only after marker-owned cleanup and zero-output/error/name checks. Startup recovery validates all explicit outcomes, leaves valid completed no-benefit metadata untouched and never treats it as a path or deletion instruction.
 
+## G04F1 batch preview foundation
+
+The local Rust coordinator exposes preview, metadata creation and read-back only. It hashes a private canonical envelope over ordered source fingerprints, destination identity, exact operation/version and settings hash, the restricted naming template, Windows collision decisions, optimistic version and checked disk requirements. The React response contains only safe display/output names, collision indexes, sizes, estimates and proof fields. Metadata creation repeats every filesystem check and uses one immediate SQLite transaction for the batch, ordinary queued jobs, inputs, planned outputs, operation specs and links. No code path schedules or executes those jobs.
+
+Batch progress stays separate from ordinary job progress: the batch reports settled child counts while a child retains its native bytes/items/steps unit. Recovery preserves unstarted queued batch metadata and never resumes document work; any future active children remain governed by existing evidence-based ordinary-job recovery.
+
 ## G03 viewer and organizer path
 
 The Viewer is a second workbench mode; it does not replace PDF Merge or any IPC v1 command. A backend native dialog or Rust-side Tauri drop opens one validated PDF through a retained read-only Windows handle that denies write/delete sharing. An opaque session/generation maps to that handle and identity record. PDF.js receives only raw bounded range responses and same-origin packaged assets; neither PDF.js nor React receives the source path.

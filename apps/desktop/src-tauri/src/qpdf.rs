@@ -92,12 +92,22 @@ impl QpdfRuntimeManager {
         *slot = Some(runtime.clone());
         Ok(runtime)
     }
+
+    /// Verifies that the packaged runtime is available without materializing or
+    /// repairing the private execution cache. Batch preview uses this boundary
+    /// because it must remain read-only.
+    pub fn verify_available_read_only(&self) -> Result<(), QpdfDependencyError> {
+        let manifest = parse_manifest()?;
+        verify_bundle(&self.bundle_root, &manifest)?;
+        let cache_root = self.cache_parent.join(QPDF_CACHE_DIRECTORY);
+        if cache_root.exists() {
+            verify_cache(&cache_root, &manifest)?;
+        }
+        Ok(())
+    }
 }
 
-fn prepare_runtime(
-    bundle_root: &Path,
-    cache_parent: &Path,
-) -> Result<VerifiedQpdfRuntime, QpdfDependencyError> {
+fn parse_manifest() -> Result<BundleManifest, QpdfDependencyError> {
     let manifest: BundleManifest = serde_json::from_str(QPDF_BUNDLE_MANIFEST_JSON)
         .map_err(|_| QpdfDependencyError::Manifest)?;
     if manifest.schema_version != 1
@@ -107,6 +117,14 @@ fn prepare_runtime(
     {
         return Err(QpdfDependencyError::Manifest);
     }
+    Ok(manifest)
+}
+
+fn prepare_runtime(
+    bundle_root: &Path,
+    cache_parent: &Path,
+) -> Result<VerifiedQpdfRuntime, QpdfDependencyError> {
+    let manifest = parse_manifest()?;
     verify_bundle(bundle_root, &manifest)?;
 
     fs::create_dir_all(cache_parent)?;

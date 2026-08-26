@@ -96,6 +96,34 @@ describe('typed Tauri API', () => {
     );
   });
 
+  it('keeps batch preview and metadata creation on explicit non-worker commands', async () => {
+    const request = {
+      schemaVersion: 1 as const,
+      operationId: 'pdf.compress-lossless' as const,
+      operationVersion: '1.0.0' as const,
+      settings: {},
+      inputPaths: ['C:\\input\\a.pdf'],
+      destinationDirectory: 'C:\\output',
+      namingTemplate: '{stem}-compressed.pdf',
+    };
+    await api.batches.preview(request);
+    await api.batches.create({
+      ...request,
+      previewSha256: 'a'.repeat(64),
+      optimisticVersion: 0,
+    });
+    await api.batches.get({ batchId: '018f0f17-2f4a-7fb1-a247-303030303030' });
+
+    expect(native.invoke).toHaveBeenNthCalledWith(1, 'batches_preview', { request });
+    expect(native.invoke).toHaveBeenNthCalledWith(2, 'batches_create', {
+      request: { ...request, previewSha256: 'a'.repeat(64), optimisticVersion: 0 },
+    });
+    expect(native.invoke).toHaveBeenNthCalledWith(3, 'batches_get', {
+      request: { batchId: '018f0f17-2f4a-7fb1-a247-303030303030' },
+    });
+    expect(native.invoke).not.toHaveBeenCalledWith('jobs_create', expect.anything());
+  });
+
   it('normalizes Tauri raw range responses without accepting base64 or objects', async () => {
     native.invoke.mockResolvedValueOnce([0x25, 0x50, 0x44, 0x46]);
     await expect(api.viewer.readRange({

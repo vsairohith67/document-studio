@@ -41,6 +41,11 @@ pub const OPERATION_PLAN_SCHEMA_VERSION: u8 = 1;
 pub const OPERATION_PLAN_MAX_BYTES: usize = 65_536;
 pub const OPERATION_SPEC_SCHEMA_VERSION: u8 = 1;
 pub const OPERATION_SPEC_MAX_BYTES: usize = 65_536;
+pub const BATCH_PREVIEW_SCHEMA_VERSION: u8 = 1;
+pub const BATCH_PREVIEW_MAX_BYTES: usize = 262_144;
+pub const BATCH_NAMING_TEMPLATE_MAX_BYTES: usize = 1_024;
+pub const BATCH_MAX_INPUTS: usize = 128;
+pub const BATCH_DEFAULT_NAMING_TEMPLATE: &str = "{stem}-compressed.pdf";
 pub const QPDF_DEPENDENCY_ID: &str = "qpdf";
 pub const QPDF_VERSION: &str = "12.3.2";
 pub const LEGACY_DIAGNOSTIC_COPY_VERSION: &str = "1.0.0";
@@ -457,6 +462,173 @@ pub struct JobsCreateRequest {
     pub input_paths: Vec<String>,
     pub destination_directory: String,
     pub requested_output_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchSettings {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchPreviewRequest {
+    pub schema_version: u8,
+    pub operation_id: String,
+    pub operation_version: String,
+    pub settings: BatchSettings,
+    pub input_paths: Vec<String>,
+    pub destination_directory: String,
+    pub naming_template: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchCreateRequest {
+    pub schema_version: u8,
+    pub operation_id: String,
+    pub operation_version: String,
+    pub settings: BatchSettings,
+    pub input_paths: Vec<String>,
+    pub destination_directory: String,
+    pub naming_template: String,
+    pub preview_sha256: String,
+    pub optimistic_version: u64,
+}
+
+impl From<&BatchCreateRequest> for BatchPreviewRequest {
+    fn from(request: &BatchCreateRequest) -> Self {
+        Self {
+            schema_version: request.schema_version,
+            operation_id: request.operation_id.clone(),
+            operation_version: request.operation_version.clone(),
+            settings: request.settings.clone(),
+            input_paths: request.input_paths.clone(),
+            destination_directory: request.destination_directory.clone(),
+            naming_template: request.naming_template.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchPreviewRow {
+    pub ordinal: u32,
+    pub source_name: String,
+    pub output_name: String,
+    pub collision_index: u32,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchDiskEstimate {
+    pub workspace_peak_bytes: u64,
+    pub destination_total_bytes: u64,
+    pub combined_required_bytes: u64,
+    pub workspace_and_destination_share_volume: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchPreviewResponse {
+    pub schema_version: u8,
+    pub operation_id: String,
+    pub operation_version: String,
+    pub settings_sha256: String,
+    pub naming_template: String,
+    pub rows: Vec<BatchPreviewRow>,
+    pub disk_estimate: BatchDiskEstimate,
+    pub preview_sha256: String,
+    pub canonical_size_bytes: u32,
+    pub optimistic_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchState {
+    Queued,
+    Active,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+impl BatchState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn from_contract(value: &str) -> Option<Self> {
+        Some(match value {
+            "queued" => Self::Queued,
+            "active" => Self::Active,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "interrupted" => Self::Interrupted,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchProgress {
+    pub settled_children: u32,
+    pub total_children: u32,
+    pub completed_children: u32,
+    pub failed_children: u32,
+    pub cancelled_children: u32,
+    pub interrupted_children: u32,
+    pub published_children: u32,
+    pub no_benefit_children: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchChildRecord {
+    pub ordinal: u32,
+    pub job_id: String,
+    pub state: JobState,
+    pub completion_kind: Option<JobCompletionKind>,
+    pub reason: Option<JobCompletionReason>,
+    pub requested_name: String,
+    pub planned_name: String,
+    pub collision_index: u32,
+    pub progress: JobProgress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchRecord {
+    pub id: String,
+    pub schema_version: u8,
+    pub operation_id: String,
+    pub operation_version: String,
+    pub state: BatchState,
+    pub preview_sha256: String,
+    pub settings_sha256: String,
+    pub naming_template: String,
+    pub optimistic_version: u64,
+    pub disk_estimate: BatchDiskEstimate,
+    pub progress: BatchProgress,
+    pub created_at: String,
+    pub updated_at: String,
+    pub version: u64,
+    pub children: Vec<BatchChildRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BatchGetRequest {
+    pub batch_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

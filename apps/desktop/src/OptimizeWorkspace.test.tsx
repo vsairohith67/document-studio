@@ -208,7 +208,7 @@ async function prepareBalanced(user: ReturnType<typeof userEvent.setup>) {
 }
 
 function NavigationHarness() {
-  const [route, setRoute] = useState<'optimize' | 'merge' | 'viewer' | 'convert'>('optimize');
+  const [route, setRoute] = useState<'optimize' | 'merge' | 'viewer' | 'convert' | 'batch'>('optimize');
   return route === 'optimize' ? (
     <OptimizeWorkspace
       system={system}
@@ -216,6 +216,7 @@ function NavigationHarness() {
       onOpenMerge={() => setRoute('merge')}
       onOpenViewer={() => setRoute('viewer')}
       onOpenConvert={() => setRoute('convert')}
+      onOpenBatch={() => setRoute('batch')}
     />
   ) : <div>{route} route</div>;
 }
@@ -435,6 +436,7 @@ describe('G04A Optimize workspace', () => {
     ['Merge', 'merge route'],
     ['Viewer', 'viewer route'],
     ['Convert', 'convert route'],
+    ['Batch', 'batch route'],
   ])('reconciles a pre-visual job through the enabled %s navigation route', async (button, routeText) => {
     const user = userEvent.setup();
     mocks.get.mockResolvedValue(balancedJob('cancelled'));

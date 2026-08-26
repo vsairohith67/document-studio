@@ -1,5 +1,13 @@
 # Unified Operation Contract
 
+## G04F1 batch preview contract
+
+Batch preview schema version 1 is closed and supports exactly `pdf.compress-lossless@1.0.0` with `{}` settings and 1–128 ordered inputs. The naming grammar requires exactly one `{stem}`, permits one optional one-based three-digit `{index}`, and recognizes `{{`/`}}` escapes. Rust rejects malformed braces, unknown tokens, unsafe/reserved/non-PDF names, traversal/ADS syntax, UTF-16 components over 255 units and Windows ordinal-ignore-case duplicates. JSON Schema `maxLength` counts Unicode code points, so it is only an early shape bound; the Rust boundary remains authoritative for the exact 255 UTF-16-unit Windows component policy.
+
+The private canonical preview contains ordered source identity/size/mtime/SHA-256 fingerprints, destination identity, naming/collision decisions, checked disk estimate and optimistic version, but no path. The IPC response omits identities, hashes and times. SHA-256 covers the exact compact canonical UTF-8 bytes, capped at 262,144 bytes.
+
+Creation resubmits the typed request plus the exact preview hash and optimistic version. Rust recreates the complete proof and returns `BATCH_PLAN_STALE` for any mismatch before metadata insertion. Batch creation means only queued/planned metadata exists; it is not authority to schedule, execute, cancel or resume children. Batch progress counts settled outcomes, never combines unlike child work units, and preserves both published and no-benefit completion truth.
+
 Every tool must implement the same lifecycle.
 
 ## Durable completion outcomes

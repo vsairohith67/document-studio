@@ -36,8 +36,10 @@ required = [
     'packages/contracts/operation.schema.json',
     'packages/contracts/job.schema.json',
     'packages/contracts/ipc.schema.json',
+    'packages/contracts/batch.schema.json',
     'packages/contracts/package.json',
     'packages/contracts/fixtures/foundation-contracts.json',
+    'packages/contracts/fixtures/batch-preview-contracts.json',
     'packages/tokens/document-studio.tokens.json',
     'packages/tokens/package.json',
     'models/models.yaml',
@@ -53,6 +55,7 @@ required = [
     'apps/desktop/src-tauri/migrations/0005_job_operation_specs_and_warnings.sql',
     'apps/desktop/src-tauri/migrations/0006_job_completion_outcomes.sql',
     'apps/desktop/src-tauri/migrations/0007_balanced_compression_audits.sql',
+    'apps/desktop/src-tauri/migrations/0008_batch_preview_foundation.sql',
     'docs/adr/ADR-005-storage-ownership-and-provider-persistence.md',
     'docs/adr/ADR-006-foundation-dependencies-and-sqlite.md',
     'docs/adr/ADR-007-durable-publication-and-recovery.md',
@@ -65,9 +68,12 @@ required = [
     'docs/implementation-log/G04B-image-pdf-conversion.md',
     'docs/implementation-log/G04B2-pdf-to-images.md',
     'docs/implementation-log/G04C2-corpus-recovery.md',
+    'docs/adr/ADR-017-canonical-batch-preview-and-atomic-metadata.md',
+    'docs/implementation-log/G04F1-batch-preview-foundation.md',
     'scripts/g04c2_corpus.py',
     'apps/desktop/scripts/verify-g04c2-corpus.ps1',
     'apps/desktop/scripts/verify-g04c2b-boundaries.ps1',
+    'apps/desktop/scripts/verify-g04f1-boundaries.ps1',
     'packages/contracts/fixtures/pdf-compress-balanced-contracts.json',
     'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/README.md',
     'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/corpus-manifest.json',
@@ -100,7 +106,9 @@ for p in [
     'package.json',
     'package-lock.json',
     'packages/contracts/ipc.schema.json',
+    'packages/contracts/batch.schema.json',
     'packages/contracts/fixtures/foundation-contracts.json',
+    'packages/contracts/fixtures/batch-preview-contracts.json',
     'packages/contracts/package.json',
     'packages/contracts/operation.schema.json',
     'packages/contracts/job.schema.json',
@@ -752,6 +760,47 @@ if ') STRICT;' not in g04c2b_migration or "CHECK (profile = 'balanced-v1')" not 
     raise SystemExit('G04C2B audit migration must remain strict and profile-bound')
 if 'npm run verify:g04c2b --workspace @document-studio/desktop' not in ci_text:
     raise SystemExit('G04C2B boundary verifier is not wired into exact-head CI')
+
+g04f1_batch = (ROOT / 'apps/desktop/src-tauri/src/batch.rs').read_text(encoding='utf-8')
+g04f1_database = (ROOT / 'apps/desktop/src-tauri/src/database.rs').read_text(encoding='utf-8')
+g04f1_migration = (ROOT / 'apps/desktop/src-tauri/migrations/0008_batch_preview_foundation.sql').read_text(encoding='utf-8')
+g04f1_schema = json.loads((ROOT / 'packages/contracts/batch.schema.json').read_text(encoding='utf-8'))
+g04f1_ipc_schema = json.loads((ROOT / 'packages/contracts/ipc.schema.json').read_text(encoding='utf-8'))
+for request_name in ['batchPreviewRequest', 'batchCreateRequest', 'batchGetRequest']:
+    expected_ref = f"{g04f1_schema['$id']}#/$defs/{request_name}"
+    if g04f1_ipc_schema.get('$defs', {}).get(request_name) != {'$ref': expected_ref}:
+        raise SystemExit(f'G04F1 IPC schema ref is missing or not exact: {request_name}')
+for required_boundary in [
+    'BATCH_PLAN_STALE', 'parse_naming_template', 'windows_file_names_equal',
+    'verify_available_read_only', 'require_preview_proof', 'TransactionBehavior::Immediate',
+    'canonical_path_sha256', 'destination_entry_names', 'plan_collisions_against_names',
+]:
+    if required_boundary not in g04f1_batch and required_boundary not in g04f1_database:
+        raise SystemExit(f'G04F1 backend boundary is missing: {required_boundary}')
+for forbidden_boundary in ['request.requested_names', '.to_lowercase()', 'BATCH_PREVIEW_STALE']:
+    if forbidden_boundary in g04f1_batch:
+        raise SystemExit(f'G04F1 retained obsolete batch behavior: {forbidden_boundary}')
+g04f1_production_batch = g04f1_batch.split('#[cfg(test)]', 1)[0]
+if '.get_or_prepare()' in g04f1_production_batch:
+    raise SystemExit('G04F1 preview may not materialize the qpdf runtime cache')
+if 'FILE_SHARE_DELETE' in g04f1_production_batch:
+    raise SystemExit('G04F1 destination guard may not allow delete sharing')
+preview_response = json.dumps(g04f1_schema['$defs']['batchPreviewResponse'], sort_keys=True)
+for forbidden_field in ['sourcePath', 'canonicalPath', 'destinationDirectory', 'fileIdentity', 'modifiedAt']:
+    if forbidden_field in preview_response:
+        raise SystemExit(f'G04F1 preview response leaks a private field: {forbidden_field}')
+for required_sql in [
+    'CREATE TABLE batch_runs', 'CREATE TABLE batch_run_jobs',
+    'batch_runs_one_live_plan_idx', "WHERE state IN ('queued', 'active')",
+]:
+    if required_sql not in g04f1_migration:
+        raise SystemExit(f'G04F1 migration boundary is missing: {required_sql}')
+if desktop_scripts.get('verify:g04f1') != 'powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04f1-boundaries.ps1':
+    raise SystemExit('G04F1 boundary verifier is not registered exactly')
+if 'npm run verify:g04f1 --workspace @document-studio/desktop' not in ci_text:
+    raise SystemExit('G04F1 boundary verifier is not wired into exact-head CI')
+if 'Rust is authoritative for the Windows limit of 255 UTF-16 code units.' not in json.dumps(g04f1_schema):
+    raise SystemExit('G04F1 schema must document the authoritative Rust UTF-16 filename gate')
 
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):

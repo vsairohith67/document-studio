@@ -32,6 +32,7 @@ interface ConvertWorkspaceProps {
   onOpenMerge: () => void;
   onOpenViewer: () => void;
   onOpenOptimize: () => void;
+  onOpenBatch?: () => void;
 }
 
 export function ConvertWorkspace({
@@ -40,6 +41,7 @@ export function ConvertWorkspace({
   onOpenMerge,
   onOpenViewer,
   onOpenOptimize,
+  onOpenBatch = () => undefined,
 }: ConvertWorkspaceProps) {
   const [images, setImages] = useState<SelectedImage[]>([]);
   const [destination, setDestination] = useState<string | null>(null);
@@ -219,6 +221,7 @@ export function ConvertWorkspace({
         <button className="rail-button" onClick={onOpenViewer}>Viewer</button>
         <button className="rail-button" onClick={onOpenOptimize}>Optimize</button>
         <button className="rail-button active" aria-current="page">Convert</button>
+        <button className="rail-button" onClick={onOpenBatch}>Batch</button>
         <button className="rail-button" disabled>Settings</button>
       </aside>
       <main className="workspace">

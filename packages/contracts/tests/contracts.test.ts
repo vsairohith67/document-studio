@@ -6,6 +6,8 @@ import pdfMergeFixtures from '../fixtures/pdf-merge-contracts.json';
 import pdfCompressLosslessFixtures from '../fixtures/pdf-compress-lossless-contracts.json';
 import pdfCompressBalancedFixtures from '../fixtures/pdf-compress-balanced-contracts.json';
 import pdfToImagesFixtures from '../fixtures/pdf-to-images-contracts.json';
+import batchFixtures from '../fixtures/batch-preview-contracts.json';
+import batchSchema from '../batch.schema.json';
 import ipcSchema from '../ipc.schema.json';
 import jobSchema from '../job.schema.json';
 import operationSchema from '../operation.schema.json';
@@ -13,6 +15,7 @@ import operationSchema from '../operation.schema.json';
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 addFormats(ajv);
 ajv.addSchema(ipcSchema);
+ajv.addSchema(batchSchema);
 
 const validateJob = ajv.compile(jobSchema);
 const validateOperation = ajv.compile(operationSchema);
@@ -27,6 +30,38 @@ const validateJobsCreateRequest = ajv.compile({
 const validatePdfToImagesRequest = ajv.compile({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $ref: `${ipcSchema.$id}#/$defs/pdfToImagesJobCreateRequest`,
+});
+const validateBatchPreviewRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${batchSchema.$id}#/$defs/batchPreviewRequest`,
+  $defs: batchSchema.$defs,
+});
+const validateBatchCreateRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${batchSchema.$id}#/$defs/batchCreateRequest`,
+  $defs: batchSchema.$defs,
+});
+const validateBatchPreviewResponse = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${batchSchema.$id}#/$defs/batchPreviewResponse`,
+  $defs: batchSchema.$defs,
+});
+const validateBatchRecord = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${batchSchema.$id}#/$defs/batchRecord`,
+  $defs: batchSchema.$defs,
+});
+const validateIpcBatchPreviewRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${ipcSchema.$id}#/$defs/batchPreviewRequest`,
+});
+const validateIpcBatchCreateRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${ipcSchema.$id}#/$defs/batchCreateRequest`,
+});
+const validateIpcBatchGetRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${ipcSchema.$id}#/$defs/batchGetRequest`,
 });
 describe('foundation contracts', () => {
   it('accepts the shared golden job, operation, and event', () => {
@@ -187,5 +222,61 @@ describe('pdf.to-images contracts', () => {
     ['oversized width', { ...pdfToImagesFixtures.request, pages: [{ sourcePageIndex: 0, width: 8193, height: 1 }] }],
   ])('rejects %s', (_label, candidate) => {
     expect(validatePdfToImagesRequest(candidate)).toBe(false);
+  });
+});
+
+describe('G04F1 batch preview contracts', () => {
+  it('documents Rust as authoritative for the Windows UTF-16 filename limit', () => {
+    expect(batchSchema.$defs.pdfName.maxLength).toBe(255);
+    expect(batchSchema.$defs.pdfName.$comment).toContain('Rust is authoritative');
+    expect(batchSchema.$defs.pdfName.$comment).toContain('UTF-16 code units');
+  });
+
+  it('accepts the closed preview, create, response, and durable record shapes', () => {
+    expect(
+      validateBatchPreviewRequest(batchFixtures.previewRequest),
+      JSON.stringify(validateBatchPreviewRequest.errors),
+    ).toBe(true);
+    expect(validateBatchCreateRequest({
+      ...batchFixtures.previewRequest,
+      previewSha256: batchFixtures.previewResponse.previewSha256,
+      optimisticVersion: batchFixtures.previewResponse.optimisticVersion,
+    }), JSON.stringify(validateBatchCreateRequest.errors)).toBe(true);
+    expect(
+      validateBatchPreviewResponse(batchFixtures.previewResponse),
+      JSON.stringify(validateBatchPreviewResponse.errors),
+    ).toBe(true);
+    expect(
+      validateBatchRecord(batchFixtures.batchRecord),
+      JSON.stringify(validateBatchRecord.errors),
+    ).toBe(true);
+    const createRequest = {
+      ...batchFixtures.previewRequest,
+      previewSha256: batchFixtures.previewResponse.previewSha256,
+      optimisticVersion: batchFixtures.previewResponse.optimisticVersion,
+    };
+    expect(validateIpcBatchPreviewRequest(batchFixtures.previewRequest)).toBe(true);
+    expect(validateIpcBatchCreateRequest(createRequest)).toBe(true);
+    expect(validateIpcBatchGetRequest({ batchId: batchFixtures.batchRecord.id })).toBe(true);
+  });
+
+  it.each([
+    ['unknown request field', { ...batchFixtures.previewRequest, requestedNames: ['leak.pdf'] }],
+    ['unknown settings field', { ...batchFixtures.previewRequest, settings: { quality: 80 } }],
+    ['wrong operation version', { ...batchFixtures.previewRequest, operationVersion: '2.0.0' }],
+    ['129 inputs', { ...batchFixtures.previewRequest, inputPaths: Array.from({ length: 129 }, (_, index) => `C:\\private\\${index}.pdf`) }],
+  ])('rejects %s', (_label, candidate) => {
+    expect(validateBatchPreviewRequest(candidate)).toBe(false);
+  });
+
+  it('keeps canonical fingerprints and local paths out of the preview response', () => {
+    const serialized = JSON.stringify(batchFixtures.previewResponse);
+    for (const forbidden of ['sourcePath', 'destinationDirectory', 'fileIdentity', 'modifiedAt', 'sha256":"aaaa', 'C:\\\\private']) {
+      expect(serialized).not.toContain(forbidden);
+    }
+    expect(validateBatchPreviewResponse({
+      ...batchFixtures.previewResponse,
+      sourcePath: 'C:\\private\\alpha.pdf',
+    })).toBe(false);
   });
 });

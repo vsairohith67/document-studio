@@ -24,7 +24,8 @@ G01 proved the safety architecture before a production document engine was adopt
 - G04A adds accepted lossless structural PDF compression through the existing qpdf sandbox and publication boundary.
 - G04B adds accepted bounded local `image.to-pdf@1.0.0` for JPEG/JPG, PNG and WebP.
 - G04B2 adds `pdf.to-images@1.0.0` for ordered JPEG, PNG and lossless WebP output at 72/150/300 DPI through sequential private PDF.js canvases, authenticated raw IPC and Rust encoding.
-- G04C2B adds the owner-gated `balanced-v1` Optimize profile: safe photographic streams may be recompressed locally, every affected page is verified, and no file is created unless both 5% and 64 KiB are saved. It is not accepted or merged until the separate owner gate. G04D Office conversion, G04E text/Markdown/local-HTML conversion and G04F batch work remain later slices. OCR, repair, PDF/A, editing, redaction, cloud, accounts and AI remain later goals.
+- G04C2B is accepted on the starting main and adds the fixed `balanced-v1` Optimize profile: safe photographic streams may be recompressed locally, every affected page is verified, and no file is created unless both 5% and 64 KiB are saved. G04D Office conversion, G04E text/Markdown/local-HTML conversion and G04F scheduling/execution remain later slices. OCR, repair, PDF/A, editing, redaction, cloud, accounts and AI remain later goals.
+- G04F1 adds a branch-only, metadata-only preview foundation for 1–128 ordered `pdf.compress-lossless@1.0.0` jobs. It recomputes a private canonical proof and atomically creates queued/planned metadata, but has no scheduler, execution, automatic resume or batch progress engine. It remains pending the owner merge gate.
 
 ## Start here
 
@@ -36,6 +37,7 @@ G01 proved the safety architecture before a production document engine was adopt
 6. Read `docs/implementation-log/G03-viewer-core-pdf.md` for the viewer, page operations and real-browser evidence.
 7. Read `docs/implementation-log/G04B-image-pdf-conversion.md`, `docs/implementation-log/G04B2-pdf-to-images.md` and ADR-013 for the independently gated conversion paths.
 8. Read `docs/implementation-log/G04C2-corpus-recovery.md`, `docs/implementation-log/G04C2B-balanced-compression.md` and ADR-016 for the frozen corpus and owner-gated balanced path.
+9. Read `docs/implementation-log/G04F1-batch-preview-foundation.md` and ADR-017 for the batch preview/atomic metadata boundary.
 
 ## Validate and run on Windows
 

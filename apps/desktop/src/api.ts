@@ -8,6 +8,11 @@ import type {
   BalancedCompressionVisualSession,
   BalancedRenderPageTicket,
   BalancedRenderSide,
+  BatchCreateRequest,
+  BatchGetRequest,
+  BatchPreviewRequest,
+  BatchPreviewResponse,
+  BatchRecord,
   CancelResponse,
   CorePdfJobCreateRequest,
   DependencyDiagnostic,
@@ -118,6 +123,14 @@ export const api = {
       const selected = await open({ directory: true, multiple: false });
       return typeof selected === 'string' ? selected : null;
     },
+  },
+  batches: {
+    preview: (request: BatchPreviewRequest) =>
+      invoke<BatchPreviewResponse>('batches_preview', { request }),
+    create: (request: BatchCreateRequest) =>
+      invoke<BatchRecord>('batches_create', { request }),
+    get: (request: BatchGetRequest) =>
+      invoke<BatchRecord>('batches_get', { request }),
   },
   jobs: {
     create: (request: JobsCreateRequest) =>
