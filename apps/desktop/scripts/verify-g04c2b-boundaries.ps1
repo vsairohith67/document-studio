@@ -164,8 +164,13 @@ foreach ($prohibited in @('toBlob(', 'convertToBlob(', 'Promise.all(', 'fetch(',
   if ($renderer.Contains($prohibited)) { throw "G04C2B renderer contains prohibited path $prohibited." }
 }
 if (!$workspace.Contains('const snapshot = await operation.dispose().catch(() => null)') -or
-    !$lifecycle.Contains('this.cancellationRequest = (async () =>') -or
+    !$workspace.Contains('pendingVisual.current.get(created.id)') -or
+    !$lifecycle.Contains('request = (async () =>') -or
     !$lifecycle.Contains('await this.jobs.cancel({ jobId })') -or
+    !$lifecycle.Contains('!this.cancellationRequested') -or
+    !$backend.Contains('let token = active.token.clone();') -or
+    !$backend.Contains('&& token.is_cancelled()') -or
+    !$backend.Contains('copy_rgb8_with_cancellation') -or
     !$workspaceTests.Contains('cancels and reloads the private job when browser visual verification fails') -or
     !$lifecycleTests.Contains('deduplicates known-job reconciliation across unmount, render abort, and repeated requests')) {
   throw 'G04C2B browser-render failure and unmount paths do not reconcile the private backend job exactly once.'

@@ -605,6 +605,39 @@ describe('G04A Optimize workspace', () => {
     expect(screen.queryByText(/1 image replaced/i)).toBeNull();
   });
 
+  it('retires old progress and buffers visual-ready by exact job while replacement create is held', async () => {
+    const user = userEvent.setup();
+    const first = balancedJob('queued', { id: 'replacement-old-job' });
+    const firstCompleted = balancedJob('completed', { id: first.id });
+    const second = balancedJob('queued', { id: 'replacement-new-job' });
+    const secondCompleted = balancedJob('completed', { id: second.id });
+    const heldSecondCreate = deferred<JobRecord>();
+    mocks.createBalanced
+      .mockResolvedValueOnce(first)
+      .mockReturnValueOnce(heldSecondCreate.promise);
+    mocks.renderBalanced
+      .mockResolvedValueOnce(firstCompleted)
+      .mockResolvedValueOnce(secondCompleted);
+    renderWorkspace();
+    await prepareBalanced(user);
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    await act(async () => { mocks.balancedVisualHandler?.(visualSession(first.id)); });
+    expect(await screen.findByText('Verified compressed PDF')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Compress with Balanced' }));
+    await act(async () => {
+      mocks.progressHandler?.(balancedEvent(firstCompleted, firstCompleted.sequence + 1));
+      mocks.balancedVisualHandler?.(visualSession(second.id));
+      mocks.balancedVisualHandler?.(visualSession(first.id));
+    });
+
+    expect((screen.getByRole('button', { name: 'Balanced' }) as HTMLButtonElement).disabled).toBe(true);
+    heldSecondCreate.resolve(second);
+    await waitFor(() => expect(mocks.renderBalanced).toHaveBeenCalledTimes(2));
+    expect(mocks.renderBalanced.mock.calls[1]?.[0]).toEqual(visualSession(second.id));
+    expect(await screen.findByText('Verified compressed PDF')).toBeTruthy();
+  });
+
   it('performs no stale write or cancellation when unmounted during terminal audit read', async () => {
     const user = userEvent.setup();
     const auditRead = deferred<BalancedCompressionAudit | null>();

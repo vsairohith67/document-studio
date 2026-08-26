@@ -97,6 +97,7 @@ export class BalancedCompressionOperation {
 
   canStartVisual(jobId: string): boolean {
     return !this.disposeRequested
+      && !this.cancellationRequested
       && this.ownsJob(jobId)
       && this.state !== 'publishing'
       && (this.state === null || !terminalStates.has(this.state));
@@ -129,10 +130,12 @@ export class BalancedCompressionOperation {
     }
     if (this.cancellationRequest === null) {
       const jobId = this.ownedJobId;
-      this.cancellationRequested = true;
-      this.cancellationRequest = (async () => {
+      const sendCancellation = !this.cancellationRequested;
+      if (sendCancellation) this.cancellationRequested = true;
+      let request!: Promise<JobRecord | null>;
+      request = (async () => {
         try {
-          await this.jobs.cancel({ jobId });
+          if (sendCancellation) await this.jobs.cancel({ jobId });
         } catch (reason) {
           const snapshot = await this.jobs.get({ jobId }).catch(() => null);
           if (snapshot) this.observeJob(snapshot);
@@ -143,12 +146,26 @@ export class BalancedCompressionOperation {
             return snapshot;
           }
           if (cancellationIsTooLate(reason) && snapshot) return snapshot;
+          this.cancellationRequested = false;
+          this.cancellationRequest = null;
           throw reason;
         }
-        const snapshot = await this.jobs.get({ jobId });
-        this.observeJob(snapshot);
-        return snapshot;
+        try {
+          const snapshot = await this.jobs.get({ jobId });
+          this.observeJob(snapshot);
+          return snapshot;
+        } finally {
+          if (
+            this.cancellationRequest === request
+            && this.state !== null
+            && !terminalStates.has(this.state)
+            && this.state !== 'publishing'
+          ) {
+            this.cancellationRequest = null;
+          }
+        }
       })();
+      this.cancellationRequest = request;
     }
     return this.cancellationRequest;
   }

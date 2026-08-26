@@ -65,7 +65,10 @@ export function OptimizeWorkspace({
   const jobId = useRef<string | null>(null);
   const renderAbort = useRef<AbortController | null>(null);
   const renderTask = useRef<RenderTask | null>(null);
-  const pendingVisual = useRef<BalancedCompressionVisualSession | null>(null);
+  const pendingVisual = useRef(new Map<string, {
+    generation: number;
+    session: BalancedCompressionVisualSession;
+  }>());
   const visualRunning = useRef(false);
   const mounted = useRef(true);
   const operationGeneration = useRef(0);
@@ -114,7 +117,7 @@ export function OptimizeWorkspace({
       || !operation.canStartVisual(session.jobId)
     ) return;
     visualRunning.current = true;
-    pendingVisual.current = null;
+    pendingVisual.current.delete(session.jobId);
     const controller = new AbortController();
     renderAbort.current = controller;
     try {
@@ -158,7 +161,8 @@ export function OptimizeWorkspace({
       (id) => api.jobs.get({ jobId: id }),
       (snapshot) => {
         const operation = balancedOperation.current;
-        if (snapshot.operationId === 'pdf.compress-balanced' && operation?.ownsJob(snapshot.id)) {
+        if (snapshot.operationId === 'pdf.compress-balanced') {
+          if (!operation?.ownsJob(snapshot.id)) return;
           operation.observeJob(snapshot);
           if (active && acceptsBalancedCallback(operation, snapshot.id)) setJob(snapshot);
           return;
@@ -168,9 +172,12 @@ export function OptimizeWorkspace({
       (event) => {
         if (!active || !mounted.current || event.jobId !== jobId.current) return;
         const operation = balancedOperation.current;
-        const balancedEvent = operation?.ownsJob(event.jobId) === true;
-        if (balancedEvent && !operation.observeProgress(event)) return;
-        if (balancedEvent && !acceptsBalancedCallback(operation, event.jobId)) return;
+        const balancedEvent = event.operationId === 'pdf.compress-balanced';
+        if (balancedEvent) {
+          if (!operation?.ownsJob(event.jobId)) return;
+          if (!operation.observeProgress(event)) return;
+          if (!acceptsBalancedCallback(operation, event.jobId)) return;
+        }
         setProgress(event);
         setAnnouncement(event.message);
         if (terminalStates.has(event.state)) {
@@ -218,9 +225,19 @@ export function OptimizeWorkspace({
     let unlisten: (() => void) | undefined;
     void api.jobs.onBalancedVisualReady((session) => {
       if (!active) return;
-      pendingVisual.current = session;
       const operation = balancedOperation.current;
-      if (operation?.canStartVisual(session.jobId)) void runBalancedVisual(session, operation);
+      if (!operation || operation.isDisposed) return;
+      if (operation.canStartVisual(session.jobId)) {
+        void runBalancedVisual(session, operation);
+      } else if (
+        operation.createState === 'pending'
+        && operation.generation === operationGeneration.current
+      ) {
+        pendingVisual.current.set(session.jobId, {
+          generation: operation.generation,
+          session,
+        });
+      }
     }).then((stop) => { if (active) unlisten = stop; else stop(); });
     return () => { active = false; unlisten?.(); };
   }, []);
@@ -309,10 +326,13 @@ export function OptimizeWorkspace({
     if (previousOperation && !previousOperation.canBeReplaced) return;
     const generation = operationGeneration.current + 1;
     operationGeneration.current = generation;
+    jobId.current = null;
+    pendingVisual.current.clear();
     setBusy(true);
     setError(null);
     setAudit(null);
     setProgress(null);
+    setJob(null);
     if (profile === 'balanced') {
       const operation = new BalancedCompressionOperation(generation, api.jobs);
       balancedOperation.current = operation;
@@ -332,8 +352,11 @@ export function OptimizeWorkspace({
         if (operation.isDisposed || !ownsCurrentBalancedOperation(operation)) return;
         setJob(reconciled ?? created);
         setAnnouncement('Balanced compression job queued with the fixed balanced-v1 profile.');
-        const pending = pendingVisual.current;
-        if (pending?.jobId === created.id) void runBalancedVisual(pending, operation);
+        const pending = pendingVisual.current.get(created.id);
+        pendingVisual.current.clear();
+        if (pending?.generation === operation.generation) {
+          void runBalancedVisual(pending.session, operation);
+        }
       } catch (reason) {
         if (operation.createState === 'pending') operation.failCreate();
         if (ownsCurrentBalancedOperation(operation)) {

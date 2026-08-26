@@ -136,6 +136,25 @@ describe('balanced compression frontend/native operation ownership', () => {
     expect(operation.cancellationWasRequested).toBe(true);
   });
 
+  it('refreshes a nonterminal accepted-cancellation snapshot without sending cancellation twice', async () => {
+    const cancel = vi.fn(async () => ({ outcome: 'requested' as const }));
+    const get = vi.fn()
+      .mockResolvedValueOnce(job('upload-active', 'verifying', 5))
+      .mockResolvedValueOnce(job('upload-active', 'cancelled', 6));
+    const operation = new BalancedCompressionOperation(1, { cancel, get });
+    operation.beginCreate();
+    await operation.registerCreatedJob(job('upload-active', 'verifying', 4));
+
+    const first = await operation.reconcileOwnedJob();
+    expect(first?.state).toBe('verifying');
+    expect(operation.canStartVisual('upload-active')).toBe(false);
+
+    const terminal = await operation.reconcileOwnedJob();
+    expect(terminal?.state).toBe('cancelled');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
   it('reconciles the known pre-visual unmount race repeatedly with deterministic scheduling', async () => {
     for (let attempt = 0; attempt < 32; attempt += 1) {
       const jobId = `pre-visual-balanced-${attempt}`;

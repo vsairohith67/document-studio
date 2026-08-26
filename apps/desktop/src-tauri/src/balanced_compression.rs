@@ -574,8 +574,18 @@ impl BalancedCompressionService {
         }
         let active = self.state.balanced_compression_jobs.get(&metadata.job_id)?;
         let mut active = active.lock().map_err(|_| metadata_error())?;
+        let token = active.token.clone();
         let result = self.submit_page_locked(&metadata, rgba, &mut active, &mut on_event);
         drop(active);
+        if result.as_ref().is_ok_and(|job| !job.state.is_terminal()) && token.is_cancelled() {
+            let error = cancelled();
+            self.finish_unsuccessful(&metadata.job_id, &error, &mut on_event)?;
+            self.state
+                .balanced_compression_jobs
+                .remove(&metadata.job_id);
+            self.state.cancellations.unregister(&metadata.job_id);
+            return Err(error);
+        }
         match result {
             Ok(job) if job.state.is_terminal() => {
                 self.state
@@ -634,12 +644,8 @@ impl BalancedCompressionService {
         if rgba.len() != expected || rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
             return Err(pixel_error());
         }
-        let mut rgb = Vec::new();
-        rgb.try_reserve_exact(expected / 4 * 3)
-            .map_err(|_| pixel_error())?;
-        for pixel in rgba.chunks_exact(4) {
-            rgb.extend_from_slice(&pixel[..3]);
-        }
+        let mut checkpoint = || check_cancelled(&active.token, OperationStage::Verify);
+        let rgb = copy_rgb8_with_cancellation(&rgba, expected / 4 * 3, &mut checkpoint)?;
         match metadata.side {
             BalancedRenderSide::Source => {
                 active.source_rgb = Some(rgb);
@@ -671,6 +677,7 @@ impl BalancedCompressionService {
                     metadata.expected_width,
                     metadata.expected_height,
                 )?;
+                check_cancelled(&active.token, OperationStage::Verify)?;
                 drop(source);
                 drop(rgb);
                 if !metrics.passes() {
@@ -2231,6 +2238,25 @@ fn check_cancelled(token: &CancellationToken, stage: OperationStage) -> Result<(
     }
 }
 
+fn copy_rgb8_with_cancellation<F>(
+    rgba: &[u8],
+    rgb_bytes: usize,
+    checkpoint: &mut F,
+) -> Result<Vec<u8>, OperationError>
+where
+    F: FnMut() -> Result<(), OperationError>,
+{
+    checkpoint()?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(rgb_bytes)
+        .map_err(|_| pixel_error())?;
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    checkpoint()?;
+    Ok(rgb)
+}
+
 fn emit<F>(
     job: &JobRecord,
     stage: OperationStage,
@@ -2799,6 +2825,25 @@ mod tests {
             Err(ImageReplacementFailure::Abort(error)) => assert_eq!(error.code, "CANCELLED"),
             other => panic!("expected cancellation after source decode, got {other:?}"),
         }
+        assert_eq!(checkpoints, 2);
+    }
+
+    #[test]
+    fn pixel_upload_copy_observes_cancellation_after_cpu_work() {
+        let rgba = vec![255_u8; 512 * 512 * 4];
+        let mut checkpoints = 0_u32;
+        let mut checkpoint = || {
+            checkpoints += 1;
+            if checkpoints == 2 {
+                Err(cancelled())
+            } else {
+                Ok(())
+            }
+        };
+
+        let result = copy_rgb8_with_cancellation(&rgba, 512 * 512 * 3, &mut checkpoint);
+
+        assert_eq!(result.unwrap_err().code, "CANCELLED");
         assert_eq!(checkpoints, 2);
     }
 
