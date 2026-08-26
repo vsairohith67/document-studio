@@ -56,6 +56,16 @@ Focused regressions cover balanced crash recovery, reference swaps, object-conte
 
 Repair-cycle re-review found one remaining MEDIUM scoped-resource collision: different nested Forms may legally reuse `/Im0` on the same page. Cycle 2 removed page/name masking and binds the allowed mutation set directly to the exact indirect image object reference selected for the qpdf patch. Its regression models two Forms with separate `/Im0` objects, proves the selected object may change, and proves the same-named unselected object may not. The superseded second CI run was cancelled and is not final acceptance evidence.
 
+## Final frontend lifecycle remediation
+
+The exact-head review of `0919df65ed0178650a9d4f1d4748a2e7486e27a2` identified two remaining frontend lifecycle defects. A balanced job could outlive `OptimizeWorkspace` when unmount occurred before visual rendering, and a supplemental audit-read failure could enter the fatal visual-error path after durable terminal success.
+
+The remediation gives each balanced frontend operation one generation-bound owner that records native-create state, dispose intent, its returned job ID, the latest sequenced state and one deduplicated reconciliation request. Unmount intent now survives a pending native create; known nonterminal jobs are cancelled and reloaded exactly once; visual-ready and other stale callbacks are rejected after disposal; active render abort uses the existing `RenderTask` cancellation path; and known publishing, published and no-benefit states are preserved. A cancellation that loses the publication race reloads the authoritative job and never deletes the accepted output.
+
+Terminal `JobRecord` display and busy-state completion now happen before a separately bound, non-fatal audit read. An audit failure cannot cancel the job, change `completionKind`, hide published actions, invent output for no-benefit or expose the underlying IPC/database error. Audit responses are accepted only for the exact current job and generation.
+
+The focused lifecycle/UI matrix passes 29 tests, including 32 deterministic held-create/unmount races, 32 deterministic pre-visual/unmount races, all three enabled rail exits, active render abort, publication-too-late preservation, remount-and-run, direct and progress-path audit failures, delayed old audits and unmount during audit. The one-time local regression pass also passes 128 desktop tests, 29 contract tests, 200 executed Rust tests with the two existing manual performance probes ignored, 22 real-Chromium cases, nine PDF.js asset cases, repository and link validation, the G04C2 corpus substitution probes, the G04C2B boundary verifier, strict Clippy, the production frontend build and the optimized Tauri no-bundle build. Fresh repaired-head CI and focused independent re-review remain required before the owner merge gate; PR #17 remains open and unmerged.
+
 ## Bounded performance evidence
 
 The reference machine was Microsoft Windows 11 Home Single Language build 26200, Intel Core i7-11800H (8 cores/16 logical processors), 42,636,668,928 bytes visible RAM and Samsung MZVL21T0HCLR-00B00 NVMe. The local toolchain was Rust 1.97.1, qpdf 12.3.2, project Chromium 151.0.7922.34 and WebView2 151.0.4129.107.

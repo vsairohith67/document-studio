@@ -14,6 +14,8 @@ $ipc = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\ipc.rs')
 $lib = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\src\lib.rs')
 $api = Get-Content -Raw (Join-Path $desktopRoot 'src\api.ts')
 $renderer = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\balancedCompression.ts')
+$lifecycle = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\balancedCompressionLifecycle.ts')
+$lifecycleTests = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\balancedCompressionLifecycle.test.ts')
 $workspace = Get-Content -Raw (Join-Path $desktopRoot 'src\OptimizeWorkspace.tsx')
 $workspaceTests = Get-Content -Raw (Join-Path $desktopRoot 'src\OptimizeWorkspace.test.tsx')
 $session = Get-Content -Raw (Join-Path $desktopRoot 'src\viewer\pdfSession.ts')
@@ -161,9 +163,12 @@ if (!$session.Contains('MAX_RANGE_READS') -or !$session.Contains('MAX_RANGE_BYTE
 foreach ($prohibited in @('toBlob(', 'convertToBlob(', 'Promise.all(', 'fetch(', 'http://', 'https://')) {
   if ($renderer.Contains($prohibited)) { throw "G04C2B renderer contains prohibited path $prohibited." }
 }
-if (!$workspace.Contains('await api.jobs.cancel({ jobId: activeJobId }).catch(() => undefined)') -or
-    !$workspaceTests.Contains('cancels and reloads the private job when browser visual verification fails')) {
-  throw 'G04C2B browser-render failure does not reconcile the private backend job.'
+if (!$workspace.Contains('const snapshot = await operation.dispose().catch(() => null)') -or
+    !$lifecycle.Contains('this.cancellationRequest = (async () =>') -or
+    !$lifecycle.Contains('await this.jobs.cancel({ jobId })') -or
+    !$workspaceTests.Contains('cancels and reloads the private job when browser visual verification fails') -or
+    !$lifecycleTests.Contains('deduplicates known-job reconciliation across unmount, render abort, and repeated requests')) {
+  throw 'G04C2B browser-render failure and unmount paths do not reconcile the private backend job exactly once.'
 }
 
 foreach ($required in @(

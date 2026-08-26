@@ -12,6 +12,7 @@ import type { RenderTask } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
 import { NoBenefitResult } from './JobCompletionOutcome';
 import { renderBalancedCompression } from './viewer/balancedCompression';
+import { BalancedCompressionOperation } from './viewer/balancedCompressionLifecycle';
 import {
   calculateSizeReport,
   formatBytes,
@@ -66,9 +67,52 @@ export function OptimizeWorkspace({
   const renderTask = useRef<RenderTask | null>(null);
   const pendingVisual = useRef<BalancedCompressionVisualSession | null>(null);
   const visualRunning = useRef(false);
+  const mounted = useRef(true);
+  const operationGeneration = useRef(0);
+  const balancedOperation = useRef<BalancedCompressionOperation | null>(null);
 
-  const runBalancedVisual = async (session: BalancedCompressionVisualSession) => {
-    if (visualRunning.current || session.jobId !== jobId.current) return;
+  const ownsCurrentBalancedOperation = (operation: BalancedCompressionOperation) => (
+    mounted.current
+    && balancedOperation.current === operation
+    && operation.generation === operationGeneration.current
+  );
+
+  const acceptsBalancedCallback = (
+    operation: BalancedCompressionOperation,
+    callbackJobId: string,
+  ) => ownsCurrentBalancedOperation(operation)
+    && operation.acceptsCallback(operationGeneration.current, callbackJobId);
+
+  const cancelVisualResources = () => {
+    const controller = renderAbort.current;
+    if (controller) {
+      if (!controller.signal.aborted) controller.abort();
+    } else {
+      renderTask.current?.cancel();
+    }
+  };
+
+  const loadBalancedAudit = async (
+    completed: JobRecord,
+    operation: BalancedCompressionOperation,
+  ) => {
+    try {
+      const value = await api.jobs.balancedAudit({ jobId: completed.id });
+      if (acceptsBalancedCallback(operation, completed.id)) setAudit(value);
+    } catch {
+      // The durable terminal JobRecord is authoritative. Audit is display-only evidence.
+    }
+  };
+
+  const runBalancedVisual = async (
+    session: BalancedCompressionVisualSession,
+    operation: BalancedCompressionOperation,
+  ) => {
+    if (
+      visualRunning.current
+      || !acceptsBalancedCallback(operation, session.jobId)
+      || !operation.canStartVisual(session.jobId)
+    ) return;
     visualRunning.current = true;
     pendingVisual.current = null;
     const controller = new AbortController();
@@ -77,28 +121,32 @@ export function OptimizeWorkspace({
       setAnnouncement(`Verifying ${session.pages.length} affected page${session.pages.length === 1 ? '' : 's'} at 144 DPI.`);
       const completed = await renderBalancedCompression(session, controller.signal, {
         onRenderTask: (task) => { renderTask.current = task; },
-        onJob: setJob,
+        onJob: (snapshot) => {
+          operation.observeJob(snapshot);
+          if (acceptsBalancedCallback(operation, snapshot.id)) setJob(snapshot);
+        },
       });
+      operation.observeJob(completed);
+      if (!acceptsBalancedCallback(operation, completed.id)) return;
       setJob(completed);
-      setAudit(await api.jobs.balancedAudit({ jobId: completed.id }));
       setBusy(false);
       setAnnouncement(completed.completionKind === 'no-benefit'
         ? 'Balanced verification passed, but the candidate did not save both 5% and 64 KiB. No output was created.'
         : 'Balanced verification passed and one verified PDF was published.');
+      void loadBalancedAudit(completed, operation);
     } catch (reason) {
-      const activeJobId = jobId.current;
-      if (activeJobId) {
-        await api.jobs.cancel({ jobId: activeJobId }).catch(() => undefined);
-        const snapshot = await api.jobs.get({ jobId: activeJobId }).catch(() => null);
-        if (snapshot) setJob(snapshot);
-      }
-      if (!controller.signal.aborted) {
+      const shouldUpdate = ownsCurrentBalancedOperation(operation);
+      const snapshot = await operation.dispose().catch(() => null);
+      if (shouldUpdate && mounted.current && snapshot) setJob(snapshot);
+      if (shouldUpdate && mounted.current && !controller.signal.aborted) {
         setError(operationErrorMessage(reason));
       }
-      setBusy(false);
+      if (shouldUpdate && mounted.current) setBusy(false);
     } finally {
-      renderTask.current = null;
-      renderAbort.current = null;
+      if (renderAbort.current === controller) {
+        renderTask.current = null;
+        renderAbort.current = null;
+      }
       visualRunning.current = false;
     }
   };
@@ -109,32 +157,56 @@ export function OptimizeWorkspace({
     const reconcile = createProgressReconciler(
       (id) => api.jobs.get({ jobId: id }),
       (snapshot) => {
-        if (active && snapshot.id === jobId.current) setJob(snapshot);
+        const operation = balancedOperation.current;
+        if (snapshot.operationId === 'pdf.compress-balanced' && operation?.ownsJob(snapshot.id)) {
+          operation.observeJob(snapshot);
+          if (active && acceptsBalancedCallback(operation, snapshot.id)) setJob(snapshot);
+          return;
+        }
+        if (active && mounted.current && snapshot.id === jobId.current) setJob(snapshot);
       },
       (event) => {
-        if (!active || event.jobId !== jobId.current) return;
+        if (!active || !mounted.current || event.jobId !== jobId.current) return;
+        const operation = balancedOperation.current;
+        const balancedEvent = operation?.ownsJob(event.jobId) === true;
+        if (balancedEvent && !operation.observeProgress(event)) return;
+        if (balancedEvent && !acceptsBalancedCallback(operation, event.jobId)) return;
         setProgress(event);
         setAnnouncement(event.message);
         if (terminalStates.has(event.state)) {
           setBusy(false);
           void api.jobs.get({ jobId: event.jobId }).then((snapshot) => {
-            if (!active) return;
+            if (!active || !mounted.current) return;
+            if (snapshot.operationId === 'pdf.compress-balanced') {
+              if (
+                !operation
+                || balancedOperation.current !== operation
+                || !operation.ownsJob(snapshot.id)
+              ) return;
+              operation.observeJob(snapshot);
+              if (!acceptsBalancedCallback(operation, snapshot.id)) return;
+            } else if (snapshot.id !== jobId.current) {
+              return;
+            }
             setJob(snapshot);
             if (
               snapshot.operationId === 'pdf.compress-balanced'
               && typeof api.jobs.balancedAudit === 'function'
+              && operation
             ) {
-              void api.jobs.balancedAudit({ jobId: snapshot.id })
-                .then((value) => { if (active) setAudit(value); })
-                .catch(() => undefined);
+              void loadBalancedAudit(snapshot, operation);
             }
+          }).catch((reason: unknown) => {
+            if (active && mounted.current) setError(operationErrorMessage(reason));
           });
         }
       },
     );
     void api.jobs.onProgress((event) => {
       if (event.jobId === jobId.current) {
-        void reconcile(event).catch((reason: unknown) => active && setError(operationErrorMessage(reason)));
+        void reconcile(event).catch((reason: unknown) => {
+          if (active && mounted.current) setError(operationErrorMessage(reason));
+        });
       }
     }).then((stop) => { if (active) unlisten = stop; else stop(); });
     return () => { active = false; unlisten?.(); };
@@ -147,17 +219,20 @@ export function OptimizeWorkspace({
     void api.jobs.onBalancedVisualReady((session) => {
       if (!active) return;
       pendingVisual.current = session;
-      if (session.jobId === jobId.current) void runBalancedVisual(session);
+      const operation = balancedOperation.current;
+      if (operation?.canStartVisual(session.jobId)) void runBalancedVisual(session, operation);
     }).then((stop) => { if (active) unlisten = stop; else stop(); });
     return () => { active = false; unlisten?.(); };
   }, []);
 
-  useEffect(() => () => {
-    renderTask.current?.cancel();
-    renderAbort.current?.abort();
-    if (jobId.current && visualRunning.current) {
-      void api.jobs.cancel({ jobId: jobId.current }).catch(() => undefined);
-    }
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      cancelVisualResources();
+      const operation = balancedOperation.current;
+      if (operation) void operation.dispose().catch(() => undefined);
+    };
   }, []);
 
   useEffect(() => {
@@ -230,43 +305,77 @@ export function OptimizeWorkspace({
           : null;
   const startCompression = async () => {
     if (!source || !destination || validation) return;
+    const previousOperation = balancedOperation.current;
+    if (previousOperation && !previousOperation.canBeReplaced) return;
+    const generation = operationGeneration.current + 1;
+    operationGeneration.current = generation;
     setBusy(true);
     setError(null);
+    setAudit(null);
     setProgress(null);
-    try {
-      const created = profile === 'balanced'
-        ? await api.jobs.createBalanced({
+    if (profile === 'balanced') {
+      const operation = new BalancedCompressionOperation(generation, api.jobs);
+      balancedOperation.current = operation;
+      operation.beginCreate();
+      try {
+        const creation = api.jobs.createBalanced({
           operationId: 'pdf.compress-balanced',
           inputPaths: [source.path],
           destinationDirectory: destination,
           requestedOutputName: outputName,
           settings: { profile: 'balanced-v1' },
-        })
-        : await api.jobs.create({
-          operationId: 'pdf.compress-lossless',
-          inputPaths: [source.path],
-          destinationDirectory: destination,
-          requestedOutputName: outputName,
         });
+        const created = await creation;
+        const reconciliation = operation.registerCreatedJob(created);
+        jobId.current = created.id;
+        const reconciled = await reconciliation;
+        if (operation.isDisposed || !ownsCurrentBalancedOperation(operation)) return;
+        setJob(reconciled ?? created);
+        setAnnouncement('Balanced compression job queued with the fixed balanced-v1 profile.');
+        const pending = pendingVisual.current;
+        if (pending?.jobId === created.id) void runBalancedVisual(pending, operation);
+      } catch (reason) {
+        if (operation.createState === 'pending') operation.failCreate();
+        if (ownsCurrentBalancedOperation(operation)) {
+          setBusy(false);
+          setError(operationErrorMessage(reason));
+        }
+      }
+      return;
+    }
+    balancedOperation.current = null;
+    try {
+      const created = await api.jobs.create({
+        operationId: 'pdf.compress-lossless',
+        inputPaths: [source.path],
+        destinationDirectory: destination,
+        requestedOutputName: outputName,
+      });
+      if (!mounted.current || generation !== operationGeneration.current) return;
       jobId.current = created.id;
       setJob(created);
-      setAnnouncement(profile === 'balanced'
-        ? 'Balanced compression job queued with the fixed balanced-v1 profile.'
-        : 'Lossless compression job queued.');
-      const pending = pendingVisual.current;
-      if (profile === 'balanced' && pending?.jobId === created.id) {
-        void runBalancedVisual(pending);
-      }
+      setAnnouncement('Lossless compression job queued.');
     } catch (reason) {
-      setBusy(false);
-      setError(operationErrorMessage(reason));
+      if (mounted.current && generation === operationGeneration.current) {
+        setBusy(false);
+        setError(operationErrorMessage(reason));
+      }
     }
   };
   const cancel = async () => {
     if (!job) return;
     try {
-      renderTask.current?.cancel();
-      renderAbort.current?.abort();
+      cancelVisualResources();
+      const operation = balancedOperation.current;
+      if (operation?.ownsJob(job.id)) {
+        const snapshot = await operation.reconcileOwnedJob();
+        if (ownsCurrentBalancedOperation(operation)) {
+          if (snapshot) setJob(snapshot);
+          if (snapshot && terminalStates.has(snapshot.state)) setBusy(false);
+          setAnnouncement('Cancellation requested. Owned temporary data is being reconciled.');
+        }
+        return;
+      }
       await api.jobs.cancel({ jobId: job.id });
       setAnnouncement('Cancellation requested. Owned temporary data is being reconciled.');
     } catch (reason) {
