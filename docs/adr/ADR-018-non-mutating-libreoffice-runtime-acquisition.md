@@ -1,0 +1,49 @@
+# ADR-018: Prove non-mutating LibreOffice runtime acquisition before adoption
+
+Status: Proposed; proof-only and pending exact-head disposable-runner evidence
+
+## Context
+
+The G04D-B admission attempt proved the exact official LibreOffice 26.2.5.2 x64 MSI identity, then rejected its ordinary system-wide installation model. That installation changed three ODF defaults, registered 135 machine-wide fonts and installed `LibreOfficeMaintenance`. Those effects are outside Document Studio's local, least-privilege document-engine boundary.
+
+G04D-C does not add LibreOffice to production. It compares two acquisition candidates on fresh GitHub-hosted Windows runners: an official Windows Installer administrative image and a feature-minimal MSI installation derived from the exact package database. URL, filename and a successful `msiexec` exit are not provenance or safety evidence.
+
+## Decision gate
+
+Only the exact official MSI at version 26.2.5.2 is admissible to this proof. Every runner independently requires its exact 372,948,992 bytes, SHA-256, Authenticode signer and full bounded certificate chain, timestamp signer and chain, x64 summary template, ProductCode, UpgradeCode and PackageCode before Windows Installer is invoked. Acquisition disables automatic redirects and requires every effective URI to remain HTTPS on `download.documentfoundation.org`. A redirect to a mirror or any other origin is an owner-policy provenance failure: the bytes are not downloaded or used, neither candidate is classified, and `LIBREOFFICE_RUNTIME_UNSUPPORTED` is not emitted.
+
+The proof exports and hashes every relevant MSI table that exists, including both install and administrative sequences. The minimal feature model is computed from the live `Feature` and `FeatureComponents` graph. It explicitly excludes the font, desktop integration, update, Explorer extension, quickstarter, scripting, Python, Java/Firebird/Base, dictionary, help and unrelated extension features. Shared component ownership or selected Font-table components fail closed as ambiguous. `Registry`, `RemoveRegistry`, `ServiceInstall`, `ServiceControl`, `Font`, `Extension`, `ProgId`, `MIME`, `Verb`, `Class`, `AppId`, `Shortcut` and `Environment` rows are mapped to exact component ownership. Any row without resolvable ownership, any enabled mutation row, or any non-property install-sequence custom action rejects the minimal model before Windows Installer runs. Administrative extraction is similarly prohibited when its administrative sequence contains an unbounded custom action.
+
+The exact selected component conditions are evaluated through the Windows Installer API under the same public-property vector that will be passed to `msiexec`. `FALSE` means expected absent, `TRUE` or no condition means expected local, and an error or unknown condition rejects the model before installation. The exact package currently selects 29 VC runtime components targeting `SystemFolder`/`System64Folder` when its default `VC_REDIST=1`; the candidate explicitly derives `VC_REDIST=0`, requires all 29 conditions to evaluate false, seals the exact pre-existing system DLL targets before/after/uninstall, and requires every external component to remain absent. `CREATEDESKTOPLINK=0` and `WRITE_REGISTRY=0` are evaluated the same way.
+
+The current exact read-only package analysis does not close the minimal model: 20 selected `Registry` rows and five selected `Shortcut` rows remain enabled, and 34 non-property custom-action sequence entries are not statically bounded. The minimal lane must therefore seal a truthful pre-install `REJECTED` result; it must not invoke MSI merely to collect a predictable mutation.
+
+The two modes run on separate fresh runners:
+
+- Administrative image uses `msiexec /a` into a GUID-named runner-temporary root. It must register no product and change no protected machine boundary. The digest-only seal includes the full Services registry/configuration, class-registration, environment, desktop/start-menu shortcut, Windows Installer cache, startup, task, firewall, App Paths, protected registry, association, font, product and reboot boundaries.
+- Minimal MSI uses `INSTALLLEVEL=0`, then ordered exact `ADDLOCAL` and defensive `REMOVE` lists derived from the package. It must introduce none of the rejected host mutations, every selected feature must report local while every unselected feature reports absent, every installed component must match the evaluated condition model, and the installed tree must exactly equal the selected local File-table targets. `MsiEnumProducts`-style ARP evidence is insufficient: the proof also requires authoritative Windows Installer `ProductState`, the signed cached `LocalPackage`, Installer `Products`, `Features`, `UpgradeCodes`, and every exact MSI `Components` registration. Exact ProductCode uninstall must exit 0 without reboot, leave the runtime root absent before marker-owned cleanup, remove all authoritative registration state, restore the complete Installer-cache digest and restore the complete captured pre-state.
+
+A candidate that passes acquisition runs its exact-version probe and one tiny synthetic ODT-to-PDF smoke only inside the zero-capability AppContainer/Job boundary. Each probe uses independent fresh owned `TEMP`, `TMP`, `APPDATA`, `LOCALAPPDATA`, staging and `-env:UserInstallation` roots, never a runner's ordinary LibreOffice profile. qpdf 12.3.2 performs a strict reopen and encryption check; PDF.js 6.2.108 opens the output, bounds its page count and confirms the synthetic canary text. This proves only bounded viability.
+
+The proof-only AppContainer profile is `DocumentStudio.OfficeEngine.LibreOffice.G04DC.Proof` and has zero capabilities. The launcher follows the accepted process-sandbox shape: direct `CreateProcessW`, suspended start, AppContainer token validation, assignment to an owned Job Object before resume, no breakaway flag, bounded process count, 2 GiB aggregate job memory, kill-on-close and exact owned-tree observation. Job accounting must equal the number of resolved observed identities, closing the short-lived-child sampling gap. Every dynamically loaded module must resolve beneath the exact candidate runtime or canonical Windows `System32`, `SysWOW64` or `WinSxS` roots. Runtime modules require the exact accepted Document Foundation leaf thumbprint and a valid chain; Windows modules require a valid Microsoft Corporation chain. The whole-tree manifest hashes all files and records PE-like signatures, but does not mislabel unused bundled Firebird/Python files as load-bearing.
+
+Candidate runtime and fixture paths are read/execute only; only owned profile, temporary and staging roots receive explicit write grants. Bounded writable-root inventories, immutable runtime/fixture hashes, and absence of the AppContainer package-storage folder and registry mapping after profile deletion are useful boundary observations, but ACL intent and before/after inventories are not empirical file-access telemetry. Candidate admission therefore additionally requires observed effective access plus proof that no write occurred outside the allowed roots. The current proof launcher does not collect that telemetry and deliberately raises `FILE_ACCESS_BOUNDARY_INVALID`; it cannot produce either runtime candidate until a separately reviewed telemetry mechanism closes this gap. The deterministic AppContainer SID must also have no loopback exemption before or after either probe, and sampled TCP and UDP owned sockets/listeners must remain empty. This is not denied-attempt telemetry. Any observed owned socket, unresolved or out-of-root descendant/module identity, ordinary-profile creation, timeout, missing output or cleanup mismatch rejects the candidate. There is no unsandboxed fallback.
+
+## Classification
+
+When provenance and workflow infrastructure succeed, the workflow returns exactly one evidence classification:
+
+- `ADMIN_IMAGE_CANDIDATE` when the administrative image alone satisfies provenance, non-mutation, isolated smoke, AppContainer/Job, network, output and cleanup gates. This is preferred because it has less host lifecycle ownership.
+- `MINIMAL_MSI_CANDIDATE` only when administrative image fails and the minimal MSI satisfies the same gates plus exact uninstall restoration.
+- `LIBREOFFICE_RUNTIME_UNSUPPORTED` when neither candidate passes.
+
+An acquisition/provenance or workflow-infrastructure failure is sealed separately and fails the workflow without producing one of these candidate classifications. This prevents an untested engine from being mislabeled unsupported.
+
+None of these results declares production support. A candidate still requires the later owner-authorized G04D-B2 macro, active-content, multilingual/font-fidelity, full nine-format corpus, cancellation, timeout, crash and recovery matrix before a production dependency decision.
+
+## Consequences
+
+- The expensive workflow is `workflow_dispatch` only and downloads no production runtime.
+- Evidence artifacts exclude the MSI, extracted runtime, ordinary profiles, secrets and broad unrelated runner data.
+- No operation contract, adapter, UI, database, migration, package, runtime bundle or publication path changes in G04D-C.
+- A failed candidate is useful evidence and does not justify weakening non-mutation, AppContainer, network or cleanup controls.

@@ -69,7 +69,23 @@ required = [
     'docs/implementation-log/G04B2-pdf-to-images.md',
     'docs/implementation-log/G04C2-corpus-recovery.md',
     'docs/adr/ADR-017-canonical-batch-preview-and-atomic-metadata.md',
+    'docs/adr/ADR-018-non-mutating-libreoffice-runtime-acquisition.md',
     'docs/implementation-log/G04F1-batch-preview-foundation.md',
+    'docs/implementation-log/G04D-C-libreoffice-runtime-admission.md',
+    '.github/workflows/g04d-c-libreoffice-runtime-proof.yml',
+    'scripts/g04d-c/G04DC.Common.psm1',
+    'scripts/g04d-c/G04DC.Sandbox.cs',
+    'scripts/g04d-c/G04DC.MsiCondition.cs',
+    'scripts/g04d-c/Invoke-G04DCAdminImageProof.ps1',
+    'scripts/g04d-c/Invoke-G04DCLocalMsiReadOnlyValidation.ps1',
+    'scripts/g04d-c/Invoke-G04DCMinimalMsiProof.ps1',
+    'scripts/g04d-c/Invoke-G04DCSandboxSmoke.ps1',
+    'scripts/g04d-c/New-G04DCCandidateDecision.ps1',
+    'scripts/g04d-c/New-G04DCRuntimeManifest.ps1',
+    'scripts/g04d-c/New-G04DCSyntheticOdt.ps1',
+    'scripts/g04d-c/Test-G04DCBoundaries.ps1',
+    'scripts/g04d-c/verify-g04d-c-boundaries.ps1',
+    'scripts/g04d-c/verify-pdfjs.mjs',
     'scripts/g04c2_corpus.py',
     'apps/desktop/scripts/verify-g04c2-corpus.ps1',
     'apps/desktop/scripts/verify-g04c2b-boundaries.ps1',
@@ -801,6 +817,114 @@ if 'npm run verify:g04f1 --workspace @document-studio/desktop' not in ci_text:
     raise SystemExit('G04F1 boundary verifier is not wired into exact-head CI')
 if 'Rust is authoritative for the Windows limit of 255 UTF-16 code units.' not in json.dumps(g04f1_schema):
     raise SystemExit('G04F1 schema must document the authoritative Rust UTF-16 filename gate')
+
+g04dc_workflow = (ROOT / '.github/workflows/g04d-c-libreoffice-runtime-proof.yml').read_text(encoding='utf-8')
+g04dc_common = (ROOT / 'scripts/g04d-c/G04DC.Common.psm1').read_text(encoding='utf-8')
+g04dc_sandbox = (ROOT / 'scripts/g04d-c/G04DC.Sandbox.cs').read_text(encoding='utf-8')
+g04dc_sandbox_wrapper = (ROOT / 'scripts/g04d-c/Invoke-G04DCSandboxSmoke.ps1').read_text(encoding='utf-8')
+g04dc_admin = (ROOT / 'scripts/g04d-c/Invoke-G04DCAdminImageProof.ps1').read_text(encoding='utf-8')
+g04dc_minimal = (ROOT / 'scripts/g04d-c/Invoke-G04DCMinimalMsiProof.ps1').read_text(encoding='utf-8')
+g04dc_manifest = (ROOT / 'scripts/g04d-c/New-G04DCRuntimeManifest.ps1').read_text(encoding='utf-8')
+g04dc_decision = (ROOT / 'scripts/g04d-c/New-G04DCCandidateDecision.ps1').read_text(encoding='utf-8')
+g04dc_tests = (ROOT / 'scripts/g04d-c/Test-G04DCBoundaries.ps1').read_text(encoding='utf-8')
+if 'workflow_dispatch:' not in g04dc_workflow or re.search(r'^\s+(push|pull_request|schedule):', g04dc_workflow, re.MULTILINE):
+    raise SystemExit('G04D-C proof workflow must remain workflow_dispatch only')
+for job in ['admin-image:', 'minimal-msi:', 'decision:']:
+    if job not in g04dc_workflow:
+        raise SystemExit(f'G04D-C fresh-runner workflow job is missing: {job}')
+for action in re.findall(r'^\s*-\s+uses:\s*([^\s]+)', g04dc_workflow, re.MULTILINE):
+    if not re.search(r'@[0-9a-f]{40}$', action):
+        raise SystemExit(f'G04D-C workflow action is not pinned: {action}')
+if len(re.findall(r'persist-credentials:\s*false', g04dc_workflow)) != 3:
+    raise SystemExit('G04D-C checkout credentials must not persist onto proof runners')
+for identity in [
+    '372948992', 'f15ba07bfcb0186986cf3171063506f5d207c11f8cc051ba0d135209e9e915f9',
+    '{3B467719-C25B-478C-8F4C-8E2EDA0E2093}', '{4B17E523-5D91-4E69-BD96-7FD81CFA81BB}',
+    '{5D7F0329-EE50-4638-9909-70F6CEB181D0}', '6480532A562B36D1BFFFC5B5EACF7C31E74E9B28',
+    '571468410CA85AF3424EF9164A513610F4D38D98',
+]:
+    if identity not in g04dc_common:
+        raise SystemExit(f'G04D-C exact MSI identity is missing: {identity}')
+for boundary in [
+    'CreateAppContainerProfile', 'CREATE_SUSPENDED', 'AssignProcessToJobObject',
+    'JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE', 'JOB_OBJECT_LIMIT_ACTIVE_PROCESS',
+    'JOB_OBJECT_LIMIT_JOB_MEMORY', 'DocumentStudio.OfficeEngine.LibreOffice.G04DC.Proof',
+]:
+    if boundary not in g04dc_sandbox + g04dc_sandbox_wrapper:
+        raise SystemExit(f'G04D-C sandbox boundary is missing: {boundary}')
+if (ROOT / 'scripts/g04d-c/Invoke-G04DCDirectSmoke.ps1').exists() or 'Invoke-G04DCDirectSmoke' in g04dc_admin + g04dc_minimal:
+    raise SystemExit('G04D-C must not retain an unsandboxed LibreOffice runtime path')
+for boundary in ['--version', '--convert-to', 'Invoke-G04DCZeroCapabilityProbe']:
+    if boundary not in g04dc_sandbox_wrapper:
+        raise SystemExit(f'G04D-C sandbox-only runtime probe is missing: {boundary}')
+for boundary in [
+    'allRegistryRows', 'serviceCatalogSha256', 'scheduledTaskCatalogSha256',
+    'firewallCatalogSha256', 'installedProductCatalogSha256', 'otherInstalledProductCatalogSha256', 'installerCacheCatalogSha256', 'serviceRegistryCatalogSha256',
+    'classRegistryCatalogSha256', 'shortcutCatalogSha256', 'environmentCatalogSha256', 'pendingReboot',
+]:
+    if boundary not in g04dc_common + g04dc_admin + g04dc_minimal:
+        raise SystemExit(f'G04D-C full non-mutation seal is missing: {boundary}')
+for boundary in ['RunOnce', r'WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'SpecialFolder]::Startup', 'ProgramData']:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C startup catalog seal is missing: {boundary}')
+for boundary in ['$process.ExitCode -eq 0', '$uninstall.ExitCode -eq 0', 'exactProductRegistration', 'REBOOT_REQUIRED', 'post-uninstall-install-root-residue.json']:
+    if boundary not in g04dc_minimal:
+        raise SystemExit(f'G04D-C minimal-MSI lifecycle gate is missing: {boundary}')
+for boundary in ['INSTALLLEVEL=0', 'REMOVE=$removeFeatureList', 'MsiConditionEvaluator', 'Resolve-G04DCExpectedComponentStates', 'Get-G04DCMutationClosure', 'Assert-G04DCMinimalMutationClosure', 'Get-G04DCInstalledFeatureStates', 'Assert-G04DCInstalledFeatureStates', 'Assert-G04DCInstalledComponentStates', 'Assert-G04DCInstalledFileOwnership', 'Assert-G04DCMsiRegistrationInstalled']:
+    if boundary not in g04dc_minimal:
+        raise SystemExit(f'G04D-C minimal installed feature/file gate is missing: {boundary}')
+for boundary in ['TotalAssignedProcesses', 'totalAssignedProcesses', 'SandboxRunException']:
+    if boundary not in g04dc_sandbox + g04dc_common:
+        raise SystemExit(f'G04D-C complete process evidence is missing: {boundary}')
+for boundary in ['loadedModules', 'moduleInventoryComplete', 'Get-G04DCLoadBearingModuleEvidence', 'sandbox-load-bearing-modules.json', 'O=Microsoft Corporation']:
+    if boundary not in g04dc_sandbox + g04dc_sandbox_wrapper + g04dc_common:
+        raise SystemExit(f'G04D-C dynamic module provenance boundary is missing: {boundary}')
+if 'potentialExecutable' not in g04dc_manifest or 'staticallyAdmittedEntryPoint' not in g04dc_manifest or 'invalidLoadBearing' in g04dc_manifest:
+    raise SystemExit('G04D-C runtime manifest blurs static PE inventory with dynamically loaded modules')
+for boundary in ['signerChainElements', 'timestampChainElements', '@($Identity.signerChain).Count -ge 2']:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C MSI chain evidence is missing: {boundary}')
+for boundary in ["'LoopbackExempt' '-s'", 'TCP and UDP owned sockets/listeners sampled']:
+    if boundary not in g04dc_sandbox_wrapper:
+        raise SystemExit(f'G04D-C network boundary is missing: {boundary}')
+for boundary in ['ownedWritablePathInventory', 'appContainerExternalStorageAbsent', 'appContainerRegistryResidueAbsent', 'runtimeTreeUnchanged', 'GetAppContainerFolderPath', 'actualAccessTelemetryCaptured', 'effectiveDenialOutsideAllowedRootsProven']:
+    if boundary not in g04dc_sandbox_wrapper + g04dc_common:
+        raise SystemExit(f'G04D-C file-access boundary is missing: {boundary}')
+if 'actualAccessTelemetryCaptured = $false' not in g04dc_sandbox_wrapper or 'effectiveDenialOutsideAllowedRootsProven = $false' not in g04dc_sandbox_wrapper or 'Assert-G04DCFileAccessEvidence' not in g04dc_sandbox_wrapper:
+    raise SystemExit('G04D-C must reject admission when empirical effective file-access telemetry is unavailable')
+for boundary in ['ProductState', 'LocalPackage', r'Installer\Products', r'Installer\Features', r'Installer\UpgradeCodes', r'Installer\UserData\S-1-5-18\Components', 'Assert-G04DCMsiRegistrationAbsent']:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C authoritative Windows Installer boundary is missing: {boundary}')
+for boundary in ['RemoveRegistry', 'Extension', 'ProgId', 'MIME', 'Verb', 'Class', 'AppId', 'Shortcut', 'Environment', 'AdminExecuteSequence', 'AdminUISequence', 'unboundedInstallCustomActions', 'unboundedAdminCustomActions']:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C MSI effect/action model is missing: {boundary}')
+for boundary in ['markerOwnedPathsOnly', 'reparseEntryCount', 'markerSha256', 'Remove-G04DCOwnedRoot']:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C marker-owned cleanup boundary is missing: {boundary}')
+if 'Remove-G04DCOwnedRoot' not in g04dc_admin or 'Remove-G04DCOwnedRoot' not in g04dc_minimal:
+    raise SystemExit('G04D-C modes do not share exact owned-root cleanup on every terminal path')
+post_smoke = '$smokeComparison = Compare-G04DCMachineState -Before $before -After $afterSmoke'
+sandbox_pass = '$sandboxPassed = $true'
+if post_smoke not in g04dc_minimal or sandbox_pass not in g04dc_minimal or g04dc_minimal.index(post_smoke) > g04dc_minimal.index(sandbox_pass):
+    raise SystemExit('G04D-C minimal proof sets sandboxPassed before post-smoke machine reconciliation')
+if 'post-uninstall-install-root-residue.json' not in g04dc_minimal or '-and ![bool]$installRootResidue.present' not in g04dc_minimal:
+    raise SystemExit('G04D-C minimal proof does not reject install-root residue before cleanup')
+for boundary in ['AllowAutoRedirect = $false', "Host -cne 'download.documentfoundation.org'", 'Uri.Port -ne 443', 'MSI_ACQUISITION_SOURCE_REJECTED', 'mirrors are prohibited']:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C same-origin acquisition gate is missing: {boundary}')
+if 'Invoke-WebRequest' in g04dc_common:
+    raise SystemExit('G04D-C acquisition may not silently follow mirrors')
+if 'if: ${{ always() }}' not in g04dc_workflow or 'PROOF_PROVENANCE_OR_INFRASTRUCTURE_FAILURE' not in g04dc_workflow or 'Assert-G04DCArtifactManifest' not in g04dc_decision:
+    raise SystemExit('G04D-C terminal decision does not separate evidence rejection from infrastructure/provenance failure')
+for regression in [
+    'MSI condition evaluation error', 'loaded module root or signature rejected', 'artifact manifest hash mismatch',
+    'ambiguous MSI effect ownership', 'enabled MSI shortcut mutation', 'unbounded install custom action',
+    'unbounded administrative custom action', 'Windows Installer registration residue', 'Windows Installer cache residue',
+    'service registry configuration change', 'full classes registry change',
+    'desktop or start-menu shortcut change', 'environment registry change', 'file-access observation incomplete',
+]:
+    if regression not in g04dc_tests:
+        raise SystemExit(f'G04D-C failure regression is missing: {regression}')
 
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):
