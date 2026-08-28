@@ -56,6 +56,8 @@ const QPDF_NORMALIZE_TIMEOUT: Duration = Duration::from_secs(300);
 const QPDF_VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 const QPDF_JSON_CAPTURE_LIMIT: usize = 32 * 1024 * 1024;
 const TOTAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
+const RENDERER_UDF_CLEANUP_MAX_WAIT: Duration = Duration::from_secs(10);
+const RENDERER_UDF_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const UDF_MARKER: &str = ".document-studio-txt-renderer-v1";
 const TOTAL_PROGRESS_STEPS: u64 = 18;
 
@@ -1566,14 +1568,19 @@ fn cleanup_renderer_workspace(
     if marker != renderer.marker_value {
         return Err(cleanup_error());
     }
-    for attempt in 0..=20 {
+    let cleanup_deadline = Instant::now()
+        .checked_add(RENDERER_UDF_CLEANUP_MAX_WAIT)
+        .ok_or_else(cleanup_error)?;
+    loop {
         match fs::remove_dir_all(&renderer.path) {
             Ok(()) => return Ok(()),
-            Err(_) if attempt < 20 => thread::sleep(Duration::from_millis(100)),
+            Err(_) if Instant::now() < cleanup_deadline => {
+                let remaining = cleanup_deadline.saturating_duration_since(Instant::now());
+                thread::sleep(RENDERER_UDF_CLEANUP_RETRY_INTERVAL.min(remaining));
+            }
             Err(_) => return Err(cleanup_error()),
         }
     }
-    Err(cleanup_error())
 }
 
 pub fn validate_recovery_renderer_workspaces(
