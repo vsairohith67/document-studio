@@ -1,0 +1,153 @@
+name: G04D-C LibreOffice runtime admission proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  admin-image:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+          cache: npm
+      - name: Install locked PDF.js dependency tree
+        shell: powershell
+        run: npm ci --ignore-scripts
+      - name: Validate proof boundaries with Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\g04d-c\verify-g04d-c-boundaries.ps1
+      - name: Prove official-MSI administrative image
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-admin-evidence'
+          .\scripts\g04d-c\Invoke-G04DCAdminImageProof.ps1 `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -EvidenceDirectory $evidence
+      - name: Seal bounded administrative-image artifact manifest
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-admin-evidence'
+          if ((Test-Path -LiteralPath $evidence) -and !(Test-Path -LiteralPath (Join-Path $evidence 'artifact-manifest.json'))) {
+            Import-Module .\scripts\g04d-c\G04DC.Common.psm1 -Force
+            New-G04DCArtifactManifest -EvidenceDirectory $evidence | Out-Null
+          }
+      - name: Upload bounded administrative-image evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g04d-c-admin-image-evidence
+          path: ${{ runner.temp }}/g04d-c-admin-evidence
+          if-no-files-found: error
+          retention-days: 7
+
+  minimal-msi:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+          cache: npm
+      - name: Install locked PDF.js dependency tree
+        shell: powershell
+        run: npm ci --ignore-scripts
+      - name: Validate proof boundaries with Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\g04d-c\verify-g04d-c-boundaries.ps1
+      - name: Prove exact minimal MSI feature selection
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-minimal-evidence'
+          .\scripts\g04d-c\Invoke-G04DCMinimalMsiProof.ps1 `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -EvidenceDirectory $evidence
+      - name: Seal bounded minimal-MSI artifact manifest
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-minimal-evidence'
+          if ((Test-Path -LiteralPath $evidence) -and !(Test-Path -LiteralPath (Join-Path $evidence 'artifact-manifest.json'))) {
+            Import-Module .\scripts\g04d-c\G04DC.Common.psm1 -Force
+            New-G04DCArtifactManifest -EvidenceDirectory $evidence | Out-Null
+          }
+      - name: Upload bounded minimal-MSI evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g04d-c-minimal-msi-evidence
+          path: ${{ runner.temp }}/g04d-c-minimal-evidence
+          if-no-files-found: error
+          retention-days: 7
+
+  decision:
+    needs: [admin-image, minimal-msi]
+    if: ${{ always() }}
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Seal provenance or infrastructure failure
+        if: ${{ needs.admin-image.result != 'success' || needs.minimal-msi.result != 'success' }}
+        shell: powershell
+        env:
+          ADMIN_RESULT: ${{ needs.admin-image.result }}
+          MINIMAL_RESULT: ${{ needs.minimal-msi.result }}
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'g04d-c-decision'
+          New-Item -ItemType Directory -Path $output | Out-Null
+          [IO.File]::WriteAllText(
+            (Join-Path $output 'g04d-c-proof-status.json'),
+            (@{
+              schemaVersion = 1
+              status = 'PROOF_PROVENANCE_OR_INFRASTRUCTURE_FAILURE'
+              adminImageJob = $env:ADMIN_RESULT
+              minimalMsiJob = $env:MINIMAL_RESULT
+              candidateClassificationProduced = $false
+            } | ConvertTo-Json) + [Environment]::NewLine,
+            [Text.UTF8Encoding]::new($false)
+          )
+          Import-Module .\scripts\g04d-c\G04DC.Common.psm1 -Force
+          New-G04DCArtifactManifest -EvidenceDirectory $output | Out-Null
+          throw 'Candidate classification prohibited because a fresh-runner proof job failed provenance or infrastructure.'
+      - name: Download administrative-image evidence
+        if: ${{ needs.admin-image.result == 'success' && needs.minimal-msi.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: g04d-c-admin-image-evidence
+          path: ${{ runner.temp }}/g04d-c-input/admin
+      - name: Download minimal-MSI evidence
+        if: ${{ needs.admin-image.result == 'success' && needs.minimal-msi.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: g04d-c-minimal-msi-evidence
+          path: ${{ runner.temp }}/g04d-c-input/minimal
+      - name: Classify exact candidate evidence
+        if: ${{ needs.admin-image.result == 'success' && needs.minimal-msi.result == 'success' }}
+        shell: powershell
+        run: |
+          .\scripts\g04d-c\New-G04DCCandidateDecision.ps1 `
+            -AdminEvidenceDirectory (Join-Path $env:RUNNER_TEMP 'g04d-c-input\admin') `
+            -MinimalEvidenceDirectory (Join-Path $env:RUNNER_TEMP 'g04d-c-input\minimal') `
+            -OutputDirectory (Join-Path $env:RUNNER_TEMP 'g04d-c-decision')
+      - name: Upload bounded candidate decision
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g04d-c-candidate-decision
+          path: ${{ runner.temp }}/g04d-c-decision
+          if-no-files-found: error
+          retention-days: 7
