@@ -450,8 +450,8 @@ fn validate_joiner(chars: &[char], index: usize) -> Result<AdmittedScript, Opera
         0x0c4d => AdmittedScript::Telugu,
         _ => return Err(shaping_error()),
     };
-    if admitted_script(u32::from(chars[index - 2])) != Some(script)
-        || admitted_script(u32::from(chars[index + 1])) != Some(script)
+    if !has_shaping_base_before_virama(chars, index, script)
+        || !is_shaping_base(u32::from(chars[index + 1]), script)
     {
         return Err(shaping_error());
     }
@@ -479,9 +479,38 @@ fn validate_joiner(chars: &[char], index: usize) -> Result<AdmittedScript, Opera
 
 fn joiner_cluster_member(character: char, script: AdmittedScript) -> bool {
     let code = u32::from(character);
-    admitted_script(code) == Some(script)
+    is_shaping_base(code, script)
         || matches!(code, 0x200c | 0x200d)
         || is_combining_or_default_ignorable(code)
+}
+
+fn has_shaping_base_before_virama(
+    chars: &[char],
+    joiner_index: usize,
+    script: AdmittedScript,
+) -> bool {
+    let before_virama = u32::from(chars[joiner_index - 2]);
+    if is_shaping_base(before_virama, script) {
+        return true;
+    }
+    let nukta = match script {
+        AdmittedScript::Devanagari => 0x093c,
+        AdmittedScript::Telugu => 0x0c3c,
+        AdmittedScript::LatinCommon => return false,
+    };
+    before_virama == nukta
+        && joiner_index >= 3
+        && is_shaping_base(u32::from(chars[joiner_index - 3]), script)
+}
+
+fn is_shaping_base(code: u32, script: AdmittedScript) -> bool {
+    match script {
+        AdmittedScript::Devanagari => {
+            matches!(code, 0x0915..=0x0939 | 0x0958..=0x095f | 0x0978..=0x097f)
+        }
+        AdmittedScript::Telugu => matches!(code, 0x0c15..=0x0c39 | 0x0c58..=0x0c5a),
+        AdmittedScript::LatinCommon => false,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1030,6 +1059,10 @@ mod tests {
             "क\u{200d}ष",
             "क्\u{200d}A",
             "క్\u{200c}ష\u{200d}క",
+            "१्\u{200d}क",
+            "क्\u{200d}१",
+            "౧్\u{200d}క",
+            "క్\u{200d}౧",
         ] {
             assert_eq!(
                 preflight_text(invalid.as_bytes()).unwrap_err().code,
@@ -1090,8 +1123,9 @@ mod tests {
 
     #[test]
     fn english_hindi_telugu_and_bounded_joiners_are_admitted() {
-        let value = preflight_text("English हिन्दी తెలుగు क्\u{200d}ष క్\u{200c}ష".as_bytes())
-            .expect("admitted scripts");
+        let value =
+            preflight_text("English हिन्दी తెలుగు क्\u{200d}ष क़्\u{200d}ष క్\u{200c}ష".as_bytes())
+                .expect("admitted scripts");
         assert!(value.used_scripts.contains(&AdmittedScript::LatinCommon));
         assert!(value.used_scripts.contains(&AdmittedScript::Devanagari));
         assert!(value.used_scripts.contains(&AdmittedScript::Telugu));

@@ -43,18 +43,43 @@ use crate::contracts::{OperationError, OperationStage};
 use crate::text_to_pdf::{
     AdmittedScript, TextToPdfSettings, CONTENT_SECURITY_POLICY, CSS_URL, DOCUMENT_URL,
     NOTO_DEVANAGARI_BYTES, NOTO_DEVANAGARI_URL, NOTO_SANS_BYTES, NOTO_SANS_URL, NOTO_TELUGU_BYTES,
-    NOTO_TELUGU_URL,
+    NOTO_TELUGU_URL, TXT_MAX_SERVED_BYTES,
 };
 
 const CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 const PRINT_TIMEOUT: Duration = Duration::from_secs(180);
-const ENTIRE_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const PUMP_INTERVAL: Duration = Duration::from_millis(5);
+const MAX_RETAINED_RESPONSES: usize = 8;
 const RENDERER_BROWSER_ARGUMENTS: &str = "--no-proxy-server --disable-background-networking --disable-component-update --disable-sync --disable-features=msSmartScreenProtection,OptimizationHints,MediaRouter,AutofillServerCommunication";
 
 static RENDERER_MANAGER: OnceLock<Mutex<()>> = OnceLock::new();
 type EventRegistrationToken = i64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererCheckpoint {
+    StaInitialized,
+    EnvironmentCreated,
+    ControllerCreated,
+    BoundaryInstalled,
+    NavigationStarted,
+    ReadinessCompleted,
+    PrintStarted,
+    PrintCompleted,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererTestAction {
+    Fail,
+    Timeout,
+    Crash,
+    Cancel,
+}
+
+#[cfg(test)]
+static RENDERER_TEST_FAULT: OnceLock<Mutex<Option<(RendererCheckpoint, RendererTestAction)>>> =
+    OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct TextRenderRequest {
@@ -67,6 +92,7 @@ pub struct TextRenderRequest {
     pub css: Arc<[u8]>,
     pub used_scripts: BTreeSet<AdmittedScript>,
     pub settings: TextToPdfSettings,
+    pub operation_deadline: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,10 +179,45 @@ impl CallbackGuard {
 
     fn owns_current_generation(&self) -> bool {
         self.renderer.upgrade().is_some_and(|authority| {
-            authority.owns_generation(&self.job_id, &self.generation, self.lifecycle_version)
+            authority.is_current(&self.job_id, &self.generation, self.lifecycle_version)
                 && authority.completion_token == self.completion_token
         })
     }
+}
+
+#[cfg(test)]
+fn test_checkpoint(
+    authority: &Arc<CallbackAuthority>,
+    checkpoint: RendererCheckpoint,
+) -> Result<(), RendererFailure> {
+    let fault = *RENDERER_TEST_FAULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| RendererFailure::Native)?;
+    let Some((expected, action)) = fault else {
+        return Ok(());
+    };
+    if expected != checkpoint {
+        return Ok(());
+    }
+    match action {
+        RendererTestAction::Fail => Err(RendererFailure::Native),
+        RendererTestAction::Timeout => Err(RendererFailure::Timeout),
+        RendererTestAction::Crash => panic!("injected renderer crash at {checkpoint:?}"),
+        RendererTestAction::Cancel => {
+            authority.cancellation.request_for_test();
+            authority.invalidate();
+            Err(RendererFailure::Cancelled)
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn test_checkpoint(
+    _authority: &Arc<CallbackAuthority>,
+    _checkpoint: RendererCheckpoint,
+) -> Result<(), RendererFailure> {
+    Ok(())
 }
 
 pub fn render_text_pdf(
@@ -168,6 +229,9 @@ pub fn render_text_pdf(
     let _lease = loop {
         if cancellation.is_cancelled() {
             return Err(cancelled_error());
+        }
+        if Instant::now() >= request.operation_deadline {
+            return Err(renderer_error("TXT_OPERATION_TIMEOUT"));
         }
         match manager.try_lock() {
             Ok(lease) => break lease,
@@ -195,9 +259,10 @@ pub fn render_text_pdf(
     });
     let thread_authority = callback_authority.clone();
     let thread_generation = generation.clone();
+    let operation_deadline = request.operation_deadline;
     let worker = thread::Builder::new()
         .name(format!("txt-renderer-{generation}"))
-        .spawn(move || render_on_sta(request, thread_authority, started))
+        .spawn(move || render_on_sta(request, thread_authority, operation_deadline))
         .map_err(|_| renderer_error("TXT_RENDERER_START_FAILED"))?;
     let result = worker
         .join()
@@ -214,13 +279,14 @@ pub fn render_text_pdf(
 fn render_on_sta(
     request: TextRenderRequest,
     authority: Arc<CallbackAuthority>,
-    entire_started: Instant,
+    operation_deadline: Instant,
 ) -> Result<TextRenderEvidence, RendererFailure> {
     // SAFETY: this dedicated thread owns the STA and uninitializes it before exit.
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
         .ok()
         .map_err(|_| RendererFailure::Native)?;
-    let result = render_on_initialized_sta(&request, &authority, entire_started);
+    let result = test_checkpoint(&authority, RendererCheckpoint::StaInitialized)
+        .and_then(|()| render_on_initialized_sta(&request, &authority, operation_deadline));
     authority.invalidate();
     // SAFETY: paired with the successful initialization on this thread.
     unsafe { CoUninitialize() };
@@ -230,7 +296,7 @@ fn render_on_sta(
 fn render_on_initialized_sta(
     request: &TextRenderRequest,
     authority: &Arc<CallbackAuthority>,
-    entire_started: Instant,
+    operation_deadline: Instant,
 ) -> Result<TextRenderEvidence, RendererFailure> {
     if !request.user_data_directory.is_dir()
         || request.raw_pdf_path.exists()
@@ -242,10 +308,12 @@ fn render_on_initialized_sta(
         return Err(RendererFailure::Native);
     }
     let host = HiddenHostWindow::create(&authority.generation)?;
-    let environment = create_environment(request, authority, entire_started)?;
+    let environment = create_environment(request, authority, operation_deadline)?;
+    test_checkpoint(authority, RendererCheckpoint::EnvironmentCreated)?;
     let runtime_version = browser_version(&environment)?;
-    let controller = create_controller(&environment, host.hwnd(), authority, entire_started)?;
+    let controller = create_controller(&environment, host.hwnd(), authority, operation_deadline)?;
     let _controller_owner = ControllerOwner(controller.clone());
+    test_checkpoint(authority, RendererCheckpoint::ControllerCreated)?;
     if authority.cancellation.is_cancelled() {
         // SAFETY: this controller belongs to the current STA and generation.
         let _ = unsafe { controller.Close() };
@@ -286,9 +354,11 @@ fn render_on_initialized_sta(
         resource_state.clone(),
         callback_guard,
     )?;
+    test_checkpoint(authority, RendererCheckpoint::BoundaryInstalled)?;
 
     // SAFETY: exact navigation occurs only after every filter, handler, setting, and denial.
     unsafe { webview.Navigate(&HSTRING::from(DOCUMENT_URL)) }?;
+    test_checkpoint(authority, RendererCheckpoint::NavigationStarted)?;
     pump_until(
         || {
             let state = resource_state.borrow();
@@ -296,12 +366,13 @@ fn render_on_initialized_sta(
         },
         authority,
         READINESS_TIMEOUT,
-        entire_started,
+        operation_deadline,
     )?;
     if resource_state.borrow().fatal || resource_state.borrow().denied_requests != 0 {
         let _ = unsafe { controller.Close() };
         return Err(RendererFailure::Resource);
     }
+    test_checkpoint(authority, RendererCheckpoint::ReadinessCompleted)?;
     let print_settings = unsafe { environment6.CreatePrintSettings() }?;
     let (width, height) = request.settings.paper_inches();
     // SAFETY: exact fixed print policy and dimensions are applied on the owning STA.
@@ -335,19 +406,21 @@ fn render_on_initialized_sta(
         Ok(())
     }));
     let output = HSTRING::from(request.raw_pdf_path.as_os_str().to_string_lossy().as_ref());
+    test_checkpoint(authority, RendererCheckpoint::PrintStarted)?;
     // SAFETY: callback carries generation ownership; it reports only to this STA.
     unsafe { webview7.PrintToPdf(&output, &print_settings, &print_handler) }?;
     let printed = receive_with_pump(
         &print_rx,
         authority,
         PRINT_TIMEOUT,
-        entire_started,
+        operation_deadline,
         Some(&controller),
     )??;
     if !printed {
         let _ = unsafe { controller.Close() };
         return Err(RendererFailure::Native);
     }
+    test_checkpoint(authority, RendererCheckpoint::PrintCompleted)?;
     let served_urls = resource_state
         .borrow()
         .served_urls
@@ -367,7 +440,7 @@ fn render_on_initialized_sta(
 fn create_environment(
     request: &TextRenderRequest,
     authority: &Arc<CallbackAuthority>,
-    entire_started: Instant,
+    operation_deadline: Instant,
 ) -> Result<ICoreWebView2Environment, RendererFailure> {
     let options = CoreWebView2EnvironmentOptions::default();
     // SAFETY: options are configured before the generated COM interface is shared.
@@ -415,15 +488,21 @@ fn create_environment(
             &handler,
         )
     }?;
-    receive_with_pump(&receiver, authority, CREATION_TIMEOUT, entire_started, None)?
-        .map_err(RendererFailure::from)
+    receive_with_pump(
+        &receiver,
+        authority,
+        CREATION_TIMEOUT,
+        operation_deadline,
+        None,
+    )?
+    .map_err(RendererFailure::from)
 }
 
 fn create_controller(
     environment: &ICoreWebView2Environment,
     parent: HWND,
     authority: &Arc<CallbackAuthority>,
-    entire_started: Instant,
+    operation_deadline: Instant,
 ) -> Result<ICoreWebView2Controller, RendererFailure> {
     let (sender, receiver) = mpsc::channel();
     let expected_job = authority.job_id.clone();
@@ -453,8 +532,14 @@ fn create_controller(
     ));
     // SAFETY: parent is the exact hidden window owned by this STA.
     unsafe { environment.CreateCoreWebView2Controller(parent, &handler) }?;
-    receive_with_pump(&receiver, authority, CREATION_TIMEOUT, entire_started, None)?
-        .map_err(RendererFailure::from)
+    receive_with_pump(
+        &receiver,
+        authority,
+        CREATION_TIMEOUT,
+        operation_deadline,
+        None,
+    )?
+    .map_err(RendererFailure::from)
 }
 
 fn browser_version(environment: &ICoreWebView2Environment) -> Result<String, RendererFailure> {
@@ -533,6 +618,12 @@ fn deny_stale_resource_request(
     args: Option<ICoreWebView2WebResourceRequestedEventArgs>,
 ) -> windows::core::Result<()> {
     let args = args.ok_or_else(|| windows::core::Error::from(E_POINTER))?;
+    {
+        let mut state = state.borrow_mut();
+        state.reserve_response(0)?;
+        state.record_denied()?;
+        state.fatal = true;
+    }
     let retained = create_response(
         environment,
         Arc::from([]),
@@ -541,10 +632,7 @@ fn deny_stale_resource_request(
         &response_headers("text/plain", 0)?,
     )?;
     unsafe { args.SetResponse(&retained.response)? };
-    let mut state = state.borrow_mut();
-    state.denied_requests += 1;
-    state.fatal = true;
-    state.responses.push(retained);
+    state.borrow_mut().responses.push(retained);
     Ok(())
 }
 
@@ -565,12 +653,16 @@ fn handle_resource_request(
     let route = route_request(&uri, &method, context, source);
     let (status, reason, headers, bytes, served_url, denied) = match route {
         ResourceRoute::Allowed(kind) => {
+            let length = state.borrow().resource_length(kind);
+            state.borrow_mut().reserve_response(length)?;
             let (mime, bytes) = state.borrow().resource(kind);
             let headers = response_headers(mime, bytes.len())?;
             (200, "OK", headers, bytes, Some(uri), false)
         }
         ResourceRoute::WrongMethod => {
-            state.borrow_mut().denied_requests += 1;
+            let mut state = state.borrow_mut();
+            state.reserve_response(0)?;
+            state.record_denied()?;
             (
                 405,
                 "Method Not Allowed",
@@ -581,7 +673,9 @@ fn handle_resource_request(
             )
         }
         ResourceRoute::Denied => {
-            state.borrow_mut().denied_requests += 1;
+            let mut state = state.borrow_mut();
+            state.reserve_response(0)?;
+            state.record_denied()?;
             (
                 403,
                 "Forbidden",
@@ -845,7 +939,7 @@ fn receive_with_pump<T>(
     receiver: &Receiver<T>,
     authority: &Arc<CallbackAuthority>,
     timeout: Duration,
-    entire_started: Instant,
+    operation_deadline: Instant,
     controller: Option<&ICoreWebView2Controller>,
 ) -> Result<T, RendererFailure> {
     let started = Instant::now();
@@ -862,7 +956,7 @@ fn receive_with_pump<T>(
             }
             return Err(RendererFailure::Cancelled);
         }
-        if started.elapsed() >= timeout || entire_started.elapsed() >= ENTIRE_OPERATION_TIMEOUT {
+        if started.elapsed() >= timeout || Instant::now() >= operation_deadline {
             authority.invalidate();
             if let Some(controller) = controller {
                 let _ = unsafe { controller.Close() };
@@ -878,7 +972,7 @@ fn pump_until(
     condition: impl Fn() -> bool,
     authority: &Arc<CallbackAuthority>,
     timeout: Duration,
-    entire_started: Instant,
+    operation_deadline: Instant,
 ) -> Result<(), RendererFailure> {
     let started = Instant::now();
     loop {
@@ -889,7 +983,7 @@ fn pump_until(
             authority.invalidate();
             return Err(RendererFailure::Cancelled);
         }
-        if started.elapsed() >= timeout || entire_started.elapsed() >= ENTIRE_OPERATION_TIMEOUT {
+        if started.elapsed() >= timeout || Instant::now() >= operation_deadline {
             authority.invalidate();
             return Err(RendererFailure::Timeout);
         }
@@ -984,6 +1078,8 @@ struct ResourceState {
     dom_content_loaded: bool,
     fatal: bool,
     denied_requests: u32,
+    response_count: usize,
+    served_bytes: usize,
 }
 
 impl ResourceState {
@@ -999,7 +1095,44 @@ impl ResourceState {
             dom_content_loaded: false,
             fatal: false,
             denied_requests: 0,
+            response_count: 0,
+            served_bytes: 0,
         }
+    }
+
+    fn resource_length(&self, kind: ResourceKind) -> usize {
+        match kind {
+            ResourceKind::Html => self.html.len(),
+            ResourceKind::Css => self.css.len(),
+            ResourceKind::NotoSans => NOTO_SANS_BYTES.len(),
+            ResourceKind::NotoDevanagari => NOTO_DEVANAGARI_BYTES.len(),
+            ResourceKind::NotoTelugu => NOTO_TELUGU_BYTES.len(),
+        }
+    }
+
+    fn reserve_response(&mut self, length: usize) -> windows::core::Result<()> {
+        let response_count = self
+            .response_count
+            .checked_add(1)
+            .ok_or_else(|| windows::core::Error::from(E_POINTER))?;
+        let served_bytes = self
+            .served_bytes
+            .checked_add(length)
+            .ok_or_else(|| windows::core::Error::from(E_POINTER))?;
+        if response_count > MAX_RETAINED_RESPONSES || served_bytes > TXT_MAX_SERVED_BYTES {
+            return Err(windows::core::Error::from(E_POINTER));
+        }
+        self.response_count = response_count;
+        self.served_bytes = served_bytes;
+        Ok(())
+    }
+
+    fn record_denied(&mut self) -> windows::core::Result<()> {
+        self.denied_requests = self
+            .denied_requests
+            .checked_add(1)
+            .ok_or_else(|| windows::core::Error::from(E_POINTER))?;
+        Ok(())
     }
 
     fn resource(&self, kind: ResourceKind) -> (&'static str, Arc<[u8]>) {
@@ -1173,6 +1306,7 @@ fn renderer_error(code: &str) -> OperationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn exact_resource_routes_are_fail_closed() {
@@ -1258,6 +1392,8 @@ mod tests {
             dom_content_loaded: false,
             fatal: false,
             denied_requests: 0,
+            response_count: 0,
+            served_bytes: 0,
         };
         assert!(!state.is_ready());
         state.navigation_completed = true;
@@ -1287,10 +1423,39 @@ mod tests {
     }
 
     #[test]
+    fn response_accounting_caps_cumulative_bytes_and_retained_count_before_allocation() {
+        let mut state = ResourceState {
+            html: Arc::from(&b"html"[..]),
+            css: Arc::from(&b"css"[..]),
+            used_scripts: BTreeSet::new(),
+            served_urls: BTreeSet::new(),
+            received_urls: BTreeSet::new(),
+            responses: Vec::new(),
+            navigation_completed: false,
+            dom_content_loaded: false,
+            fatal: false,
+            denied_requests: 0,
+            response_count: 0,
+            served_bytes: TXT_MAX_SERVED_BYTES - 1,
+        };
+        state.reserve_response(1).expect("inclusive byte cap");
+        assert_eq!(state.served_bytes, TXT_MAX_SERVED_BYTES);
+        assert!(state.reserve_response(1).is_err());
+
+        state.response_count = MAX_RETAINED_RESPONSES;
+        state.served_bytes = 0;
+        assert!(state.reserve_response(0).is_err());
+
+        state.response_count = 0;
+        state.served_bytes = usize::MAX;
+        assert!(state.reserve_response(1).is_err());
+    }
+
+    #[test]
     fn callback_authority_rejects_stale_duplicate_and_cancelled_completions() {
         let registry = crate::app_state::CancellationRegistry::default();
         let token = registry.register("job");
-        let authority = CallbackAuthority {
+        let authority = Arc::new(CallbackAuthority {
             job_id: "job".to_owned(),
             generation: "generation".to_owned(),
             completion_token: "one-shot".to_owned(),
@@ -1298,8 +1463,10 @@ mod tests {
             active: AtomicBool::new(true),
             completed: AtomicBool::new(false),
             cancellation: token,
-        };
+        });
+        let guard = CallbackGuard::new(&authority);
         assert!(authority.is_current("job", "generation", 7));
+        assert!(guard.owns_current_generation());
         assert!(!authority.is_current("replacement", "generation", 7));
         assert!(!authority.is_current("job", "new-generation", 7));
         assert!(!authority.is_current("job", "generation", 8));
@@ -1307,6 +1474,7 @@ mod tests {
         assert!(!authority.complete_once());
         registry.request("job");
         assert!(!authority.is_current("job", "generation", 7));
+        assert!(!guard.owns_current_generation());
         authority.invalidate();
         assert!(!authority.active.load(Ordering::Acquire));
     }
@@ -1319,5 +1487,149 @@ mod tests {
         assert!(headers.contains("Cache-Control: no-store\r\n"));
         assert!(headers.contains(CONTENT_SECURITY_POLICY));
         assert!(response_headers("text/plain", u32::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    #[ignore = "runs the real hidden WebView2 renderer fault and cancellation matrix"]
+    fn native_renderer_fault_matrix_closes_exact_generation_at_bounded_checkpoints() {
+        crate::webview2_environment::enforce_webview2_environment_policy();
+        let lane = tempfile::tempdir().unwrap();
+        let normalized = crate::text_to_pdf::preflight_text(
+            "English हिन्दी తెలుగు क्\u{200d}ष క్\u{200c}ష".as_bytes(),
+        )
+        .unwrap();
+        let html: Arc<[u8]> = crate::text_to_pdf::canonical_html(&normalized.text)
+            .unwrap()
+            .into();
+        let css: Arc<[u8]> = crate::text_to_pdf::canonical_css().unwrap().into();
+        for (index, checkpoint, action, expected_code) in [
+            (
+                0,
+                RendererCheckpoint::StaInitialized,
+                RendererTestAction::Fail,
+                "TXT_RENDERER_FAILED",
+            ),
+            (
+                1,
+                RendererCheckpoint::StaInitialized,
+                RendererTestAction::Timeout,
+                "TXT_RENDERER_TIMEOUT",
+            ),
+            (
+                2,
+                RendererCheckpoint::StaInitialized,
+                RendererTestAction::Crash,
+                "TXT_RENDERER_CRASHED",
+            ),
+            (
+                3,
+                RendererCheckpoint::EnvironmentCreated,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                4,
+                RendererCheckpoint::ControllerCreated,
+                RendererTestAction::Fail,
+                "TXT_RENDERER_FAILED",
+            ),
+            (
+                5,
+                RendererCheckpoint::BoundaryInstalled,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                6,
+                RendererCheckpoint::NavigationStarted,
+                RendererTestAction::Fail,
+                "TXT_RENDERER_FAILED",
+            ),
+            (
+                7,
+                RendererCheckpoint::ReadinessCompleted,
+                RendererTestAction::Timeout,
+                "TXT_RENDERER_TIMEOUT",
+            ),
+            (
+                8,
+                RendererCheckpoint::PrintStarted,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                9,
+                RendererCheckpoint::PrintCompleted,
+                RendererTestAction::Fail,
+                "TXT_RENDERER_FAILED",
+            ),
+            (
+                10,
+                RendererCheckpoint::StaInitialized,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                11,
+                RendererCheckpoint::ControllerCreated,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                12,
+                RendererCheckpoint::NavigationStarted,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                13,
+                RendererCheckpoint::ReadinessCompleted,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+            (
+                14,
+                RendererCheckpoint::PrintCompleted,
+                RendererTestAction::Cancel,
+                "CANCELLED",
+            ),
+        ] {
+            let root = lane.path().join(format!("case-{index}"));
+            let udf = root.join("udf");
+            fs::create_dir_all(&udf).unwrap();
+            let raw_pdf_path = root.join("raw.pdf");
+            let job_id = Uuid::new_v4().hyphenated().to_string();
+            let generation = Uuid::new_v4().hyphenated().to_string();
+            let registry = crate::app_state::CancellationRegistry::default();
+            let token = registry.register(&job_id);
+            *RENDERER_TEST_FAULT
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap() = Some((checkpoint, action));
+            let error = render_text_pdf(
+                TextRenderRequest {
+                    job_id,
+                    renderer_generation: generation,
+                    lifecycle_version: 1,
+                    user_data_directory: udf,
+                    raw_pdf_path: raw_pdf_path.clone(),
+                    html: html.clone(),
+                    css: css.clone(),
+                    used_scripts: normalized.used_scripts.clone(),
+                    settings: TextToPdfSettings {
+                        page_size: crate::text_to_pdf::TextPageSize::A4,
+                        orientation: crate::text_to_pdf::TextOrientation::Portrait,
+                    },
+                    operation_deadline: Instant::now() + Duration::from_secs(120),
+                },
+                token,
+            )
+            .unwrap_err();
+            *RENDERER_TEST_FAULT.get().unwrap().lock().unwrap() = None;
+            assert_eq!(error.code, expected_code, "{checkpoint:?} {action:?}");
+            if raw_pdf_path.exists() {
+                fs::remove_file(raw_pdf_path).unwrap();
+            }
+        }
     }
 }

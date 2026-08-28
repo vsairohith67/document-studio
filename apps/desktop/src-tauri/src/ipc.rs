@@ -34,6 +34,7 @@ use crate::pdf_compression::PdfCompressionService;
 use crate::pdf_merge::PdfMergeService;
 use crate::pdf_operations::PdfPageOperationService;
 use crate::pdf_to_images::{PdfToImagesService, PixelUploadMetadata};
+use crate::publication::hash_file;
 use crate::recovery::{cancel_without_worker, resolve_interrupted, resolve_worker_spawn_failure};
 use crate::text_to_pdf::{TEXT_TO_PDF_OPERATION_ID, TEXT_TO_PDF_VERSION};
 use crate::text_to_pdf_service::TextToPdfService;
@@ -415,9 +416,19 @@ pub fn jobs_open_text_output(
     request: JobIdRequest,
     state: State<'_, AppState>,
 ) -> Result<ViewerDocumentMetadata, OperationError> {
+    let (path, size, sha256) = verified_text_output(state.inner(), &request.job_id)?;
+    state
+        .viewer_sessions
+        .open_verified_pdf(&path, size, &sha256)
+}
+
+fn verified_text_output(
+    state: &AppState,
+    job_id: &str,
+) -> Result<(std::path::PathBuf, u64, String), OperationError> {
     let job = state
         .database()
-        .get_job(&request.job_id)
+        .get_job(job_id)
         .map_err(|_| metadata_error())?
         .ok_or_else(job_not_found)?;
     if job.operation_id != TEXT_TO_PDF_OPERATION_ID
@@ -434,14 +445,20 @@ pub fn jobs_open_text_output(
         .filter(|_| output.status == OutputStatus::Published)
         .map(Path::new)
         .ok_or_else(request_error)?;
-    state.viewer_sessions.open_verified_pdf(
-        path,
-        output.size_bytes.ok_or_else(published_output_error)?,
-        output
-            .sha256
-            .as_deref()
-            .ok_or_else(published_output_error)?,
-    )
+    let (canonical, _) = canonical_regular_file(path).map_err(|_| published_output_error())?;
+    if canonical != path {
+        return Err(published_output_error());
+    }
+    let expected_size = output.size_bytes.ok_or_else(published_output_error)?;
+    let expected_hash = output
+        .sha256
+        .as_deref()
+        .ok_or_else(published_output_error)?;
+    let (actual_size, actual_hash) = hash_file(&canonical).map_err(|_| published_output_error())?;
+    if actual_size != expected_size || actual_hash != expected_hash {
+        return Err(published_output_error());
+    }
+    Ok((canonical, actual_size, actual_hash))
 }
 
 #[tauri::command]

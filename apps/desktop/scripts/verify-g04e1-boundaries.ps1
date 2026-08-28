@@ -114,7 +114,7 @@ $textCore = Get-Content -Raw (Join-Path $tauriRoot 'src\text_to_pdf.rs')
 $renderer = Get-Content -Raw (Join-Path $tauriRoot 'src\text_to_pdf_renderer.rs')
 $service = Get-Content -Raw (Join-Path $tauriRoot 'src\text_to_pdf_service.rs')
 $qpdf = Get-Content -Raw (Join-Path $tauriRoot 'src\qpdf.rs')
-$rendererProduction = $renderer.Substring(0, $renderer.IndexOf('#[cfg(test)]'))
+$rendererProduction = $renderer.Substring(0, $renderer.LastIndexOf('#[cfg(test)]'))
 $serviceProduction = $service.Substring(0, $service.IndexOf('#[cfg(test)]'))
 
 Require-Text $textCore @(
@@ -186,8 +186,8 @@ Require-Text $ui @(
   'Local · offline', 'Strict UTF-8 only', '100,000 logical lines', '65,536 UTF-8 bytes',
   'No system font', 'English, Hindi (Devanagari), and Telugu', 'Page size', 'Orientation',
   'existing files are never overwritten', 'Cancellation requested', 'Current stage:',
-  'Open in Viewer', 'Reveal saved location', 'Copy saved path',
-  'No operating-system shell was invoked', 'aria-live="polite"', 'queueMicrotask'
+  'Open in Viewer', 'Show saved path', 'Copy saved path',
+  'The verified saved path is shown and focused below.', 'aria-live="polite"', 'queueMicrotask'
 ) 'privacy and accessible UI boundary'
 if ($ui.Contains('source.text') -or $ui.Contains('documentBody') -or $ui.Contains('textPreview')) {
   throw 'G04E1 UI contains a private document-content field.'

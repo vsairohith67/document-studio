@@ -2,14 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+};
 
 use crate::app_state::{AppState, CancellationToken};
 use crate::contracts::{
@@ -22,9 +26,7 @@ use crate::path_policy::{
     canonical_directory, canonical_regular_file, ensure_different_files, reject_reparse_components,
     validate_output_name,
 };
-use crate::pdf_merge::{
-    qpdf_page_count, run_qpdf, run_qpdf_with_capture_limit, verify_qpdf_version,
-};
+use crate::pdf_merge::{run_qpdf, run_qpdf_with_capture_limit};
 use crate::process_sandbox::{authorize_qpdf_paths, ensure_production_profile};
 use crate::publication::{
     hash_file, is_exact_owned_partial_path, partial_ownership_result_code,
@@ -48,6 +50,7 @@ use crate::workspace::JobWorkspace;
 const QPDF_NORMALIZE_TIMEOUT: Duration = Duration::from_secs(300);
 const QPDF_VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 const QPDF_JSON_CAPTURE_LIMIT: usize = 32 * 1024 * 1024;
+const TOTAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const UDF_MARKER: &str = ".document-studio-txt-renderer-v1";
 const TOTAL_PROGRESS_STEPS: u64 = 18;
 
@@ -135,8 +138,8 @@ impl TextToPdfService {
             inputs: vec![JobInput {
                 ordinal: 0,
                 display_name: "Selected TXT".to_owned(),
-                source_path: source.path.to_string_lossy().into_owned(),
-                canonical_path: source.path.to_string_lossy().into_owned(),
+                source_path: String::new(),
+                canonical_path: String::new(),
                 file_identity: source.file_identity.clone(),
                 size_bytes: source.size_bytes,
                 modified_at: source.modified_at.clone(),
@@ -202,6 +205,9 @@ impl TextToPdfService {
     where
         F: FnMut(ProgressEvent),
     {
+        let operation_deadline = Instant::now()
+            .checked_add(TOTAL_OPERATION_TIMEOUT)
+            .ok_or_else(|| operation_timeout(OperationStage::Inspect))?;
         let mut workspace = None;
         let mut renderer_workspace = None;
         let result = self.execute_inner(
@@ -210,6 +216,7 @@ impl TextToPdfService {
             &token,
             &mut workspace,
             &mut renderer_workspace,
+            operation_deadline,
             &mut on_event,
         );
         let result = match result {
@@ -243,11 +250,13 @@ impl TextToPdfService {
         token: &CancellationToken,
         workspace_slot: &mut Option<JobWorkspace>,
         renderer_workspace_slot: &mut Option<RendererWorkspace>,
+        operation_deadline: Instant,
         on_event: &mut F,
     ) -> Result<JobRecord, OperationError>
     where
         F: FnMut(ProgressEvent),
     {
+        check_deadline(operation_deadline, OperationStage::Inspect)?;
         let inspecting = self.transition(
             job_id,
             JobState::Queued,
@@ -266,6 +275,7 @@ impl TextToPdfService {
             on_event,
         )?;
         check_cancelled(token, OperationStage::Inspect)?;
+        check_deadline(operation_deadline, OperationStage::Inspect)?;
         let input = inspecting.inputs.first().ok_or_else(metadata_error)?;
         if input.file_identity != source.file_identity
             || input.size_bytes != source.size_bytes
@@ -298,6 +308,7 @@ impl TextToPdfService {
             on_event,
         )?;
         check_cancelled(token, OperationStage::Preflight)?;
+        check_deadline(operation_deadline, OperationStage::Preflight)?;
         let spec = self
             .state
             .database()
@@ -334,7 +345,7 @@ impl TextToPdfService {
         *workspace_slot = Some(workspace.clone());
         let profile = ensure_production_profile().map_err(|_| dependency_error())?;
         authorize_qpdf_paths(&profile, &runtime.bin, &workspace).map_err(|_| dependency_error())?;
-        verify_qpdf_version(&runtime, &workspace, token)?;
+        verify_qpdf_version_bounded(&runtime, &workspace, token, operation_deadline)?;
         let renderer_workspace = create_renderer_workspace(&workspace, job_id)?;
         *renderer_workspace_slot = Some(RendererWorkspace {
             path: renderer_workspace.path.clone(),
@@ -359,6 +370,7 @@ impl TextToPdfService {
             on_event,
         )?;
         check_cancelled(token, OperationStage::Plan)?;
+        check_deadline(operation_deadline, OperationStage::Plan)?;
 
         self.transition(
             job_id,
@@ -390,6 +402,7 @@ impl TextToPdfService {
                 css,
                 used_scripts: normalized.used_scripts.clone(),
                 settings,
+                operation_deadline,
             },
             token.clone(),
         )?;
@@ -407,6 +420,7 @@ impl TextToPdfService {
             .map_err(|_| metadata_error())?;
         drop(normalized.text);
         check_cancelled(token, OperationStage::Execute)?;
+        check_deadline(operation_deadline, OperationStage::Execute)?;
 
         self.transition(
             job_id,
@@ -431,6 +445,7 @@ impl TextToPdfService {
             &workspace,
             Path::new(TEXT_RAW_STAGING_RELATIVE_PATH),
             token,
+            operation_deadline,
         )?;
         let normalize_arguments = build_text_pdf_normalization_arguments(
             Path::new(TEXT_RAW_STAGING_RELATIVE_PATH),
@@ -442,7 +457,11 @@ impl TextToPdfService {
             &workspace,
             &normalize_arguments,
             token,
-            QPDF_NORMALIZE_TIMEOUT,
+            bounded_timeout(
+                operation_deadline,
+                QPDF_NORMALIZE_TIMEOUT,
+                OperationStage::Verify,
+            )?,
             OperationStage::Verify,
         )?;
         if normalized_execution.exit_code != 0 {
@@ -454,6 +473,7 @@ impl TextToPdfService {
             &workspace,
             Path::new(TEXT_NORMALIZED_STAGING_RELATIVE_PATH),
             token,
+            operation_deadline,
         )?;
         if raw_verified.pages != normalized_verified.pages {
             return Err(verify_error("TXT_PAGE_COUNT_MISMATCH"));
@@ -467,7 +487,9 @@ impl TextToPdfService {
             source,
             &renderer_workspace,
             token,
+            operation_deadline,
         )?;
+        check_deadline(operation_deadline, OperationStage::Verify)?;
         source.verify_unchanged_hash(&source_hash, token)?;
         self.state
             .database()
@@ -500,8 +522,10 @@ impl TextToPdfService {
             normalized_verified.size,
             &normalized_verified.sha256,
             token,
+            operation_deadline,
             on_event,
         )?;
+        check_deadline(operation_deadline, OperationStage::Audit)?;
         self.progress(
             job_id,
             JobState::Publishing,
@@ -514,6 +538,7 @@ impl TextToPdfService {
             on_event,
         )?;
         cleanup_renderer_workspace(&workspace, &renderer_workspace)?;
+        check_deadline(operation_deadline, OperationStage::Cleanup)?;
         self.state
             .workspaces
             .cleanup_job(job_id)
@@ -533,6 +558,7 @@ impl TextToPdfService {
             false,
             on_event,
         )?;
+        check_deadline(operation_deadline, OperationStage::Cleanup)?;
         let completed = self.transition(
             job_id,
             JobState::Publishing,
@@ -561,11 +587,13 @@ impl TextToPdfService {
         verified_size: u64,
         verified_hash: &str,
         token: &CancellationToken,
+        operation_deadline: Instant,
         on_event: &mut F,
     ) -> Result<(), OperationError>
     where
         F: FnMut(ProgressEvent),
     {
+        check_deadline(operation_deadline, OperationStage::Publish)?;
         source.verify_unchanged_hash(
             verifying
                 .inputs
@@ -589,7 +617,7 @@ impl TextToPdfService {
                 requested_name: &verifying.requested_output_name,
                 job_id,
             },
-            || token.is_cancelled(),
+            || token.is_cancelled() || Instant::now() >= operation_deadline,
             |_completed, _total| {
                 self.progress(
                     job_id,
@@ -641,7 +669,9 @@ impl TextToPdfService {
                     .map_err(|_| publication_io("publication ownership could not be released"))
             },
             move |candidate| {
-                if !commit_token.try_begin_publication_commit() {
+                if Instant::now() >= operation_deadline
+                    || !commit_token.try_begin_publication_commit()
+                {
                     return Err(PublicationError::Cancelled);
                 }
                 let resolved_name = candidate
@@ -660,12 +690,23 @@ impl TextToPdfService {
                     .map_err(|_| publication_io("publication intent could not be stored"))
             },
         )
-        .map_err(publication_error)?;
+        .map_err(|error| {
+            if matches!(error, PublicationError::Cancelled)
+                && !token.is_cancelled()
+                && Instant::now() >= operation_deadline
+            {
+                operation_timeout(OperationStage::Publish)
+            } else {
+                publication_error(error)
+            }
+        })?;
+        check_deadline(operation_deadline, OperationStage::Publish)?;
         let (final_size, final_hash) =
             hash_file(&result.final_path).map_err(|_| verify_error("TXT_FINAL_REOPEN_FAILED"))?;
         if final_size != verified_size || final_hash != verified_hash {
             return Err(verify_error("TXT_FINAL_HASH_MISMATCH"));
         }
+        check_deadline(operation_deadline, OperationStage::Publish)?;
         self.state
             .database()
             .set_output_published(
@@ -905,12 +946,100 @@ impl TextToPdfService {
     }
 }
 
+fn check_deadline(deadline: Instant, stage: OperationStage) -> Result<(), OperationError> {
+    if Instant::now() >= deadline {
+        Err(operation_timeout(stage))
+    } else {
+        Ok(())
+    }
+}
+
+fn bounded_timeout(
+    deadline: Instant,
+    candidate: Duration,
+    stage: OperationStage,
+) -> Result<Duration, OperationError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(operation_timeout(stage));
+    }
+    Ok(candidate.min(remaining))
+}
+
+fn verify_qpdf_version_bounded(
+    runtime: &crate::qpdf::VerifiedQpdfRuntime,
+    workspace: &JobWorkspace,
+    token: &CancellationToken,
+    operation_deadline: Instant,
+) -> Result<(), OperationError> {
+    let execution = run_qpdf(
+        runtime,
+        workspace,
+        &[OsString::from("--version")],
+        token,
+        bounded_timeout(
+            operation_deadline,
+            Duration::from_secs(30),
+            OperationStage::Preflight,
+        )?,
+        OperationStage::Preflight,
+    )?;
+    check_deadline(operation_deadline, OperationStage::Preflight)?;
+    if execution.exit_code != 0 || !crate::qpdf::version_output_is_expected(&execution.stdout) {
+        return Err(dependency_error());
+    }
+    Ok(())
+}
+
+fn text_qpdf_page_count(
+    runtime: &crate::qpdf::VerifiedQpdfRuntime,
+    workspace: &JobWorkspace,
+    relative: &Path,
+    token: &CancellationToken,
+    operation_deadline: Instant,
+) -> Result<u64, OperationError> {
+    let execution = run_qpdf(
+        runtime,
+        workspace,
+        &[
+            relative.as_os_str().to_owned(),
+            OsString::from("--suppress-recovery"),
+            OsString::from("--show-npages"),
+        ],
+        token,
+        bounded_timeout(
+            operation_deadline,
+            QPDF_VERIFY_TIMEOUT,
+            OperationStage::Verify,
+        )?,
+        OperationStage::Verify,
+    )?;
+    check_deadline(operation_deadline, OperationStage::Verify)?;
+    if execution.exit_code != 0 {
+        return Err(verify_error("TXT_PAGE_COUNT_INVALID"));
+    }
+    let output = std::str::from_utf8(&execution.stdout)
+        .map_err(|_| verify_error("TXT_PAGE_COUNT_INVALID"))?;
+    let trimmed = output.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 20
+        || !trimmed.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(verify_error("TXT_PAGE_COUNT_INVALID"));
+    }
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| verify_error("TXT_PAGE_COUNT_INVALID"))
+}
+
 fn verify_pdf_basics(
     runtime: &crate::qpdf::VerifiedQpdfRuntime,
     workspace: &JobWorkspace,
     relative: &Path,
     token: &CancellationToken,
+    operation_deadline: Instant,
 ) -> Result<VerifiedPdf, OperationError> {
+    check_deadline(operation_deadline, OperationStage::Verify)?;
     let path = workspace.root.join(relative);
     let (canonical, _) =
         canonical_regular_file(&path).map_err(|_| verify_error("TXT_OUTPUT_NOT_REGULAR"))?;
@@ -940,7 +1069,11 @@ fn verify_pdf_basics(
             OsString::from("--check"),
         ],
         token,
-        QPDF_VERIFY_TIMEOUT,
+        bounded_timeout(
+            operation_deadline,
+            QPDF_VERIFY_TIMEOUT,
+            OperationStage::Verify,
+        )?,
         OperationStage::Verify,
     )?;
     if interpret_structural_check_exit(structural.exit_code as i32)
@@ -956,7 +1089,11 @@ fn verify_pdf_basics(
             OsString::from("--is-encrypted"),
         ],
         token,
-        QPDF_VERIFY_TIMEOUT,
+        bounded_timeout(
+            operation_deadline,
+            QPDF_VERIFY_TIMEOUT,
+            OperationStage::Verify,
+        )?,
         OperationStage::Verify,
     )?;
     if interpret_encryption_check_exit(encryption.exit_code as i32)
@@ -964,7 +1101,7 @@ fn verify_pdf_basics(
     {
         return Err(verify_error("TXT_OUTPUT_ENCRYPTED"));
     }
-    let pages = qpdf_page_count(runtime, workspace, relative, token, OperationStage::Verify)?;
+    let pages = text_qpdf_page_count(runtime, workspace, relative, token, operation_deadline)?;
     if !(1..=TXT_MAX_PAGES).contains(&pages) {
         return Err(verify_error("TXT_PAGE_COUNT_INVALID"));
     }
@@ -990,7 +1127,9 @@ fn inspect_pdf_security(
     source: &ViewerJobSource,
     renderer_workspace: &RendererWorkspace,
     token: &CancellationToken,
+    operation_deadline: Instant,
 ) -> Result<(), OperationError> {
+    check_deadline(operation_deadline, OperationStage::Verify)?;
     let execution = run_qpdf_with_capture_limit(
         runtime,
         workspace,
@@ -1007,7 +1146,11 @@ fn inspect_pdf_security(
             OsString::from("--json-key=qpdf"),
         ],
         token,
-        QPDF_VERIFY_TIMEOUT,
+        bounded_timeout(
+            operation_deadline,
+            QPDF_VERIFY_TIMEOUT,
+            OperationStage::Verify,
+        )?,
         OperationStage::Verify,
         QPDF_JSON_CAPTURE_LIMIT,
     )?;
@@ -1374,6 +1517,32 @@ pub fn validate_recovery_renderer_workspaces(
         if marker != format!("job={job_id}\ngeneration={generation}\n") {
             return Err(cleanup_error());
         }
+        prove_exclusive_cleanup_access(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn prove_exclusive_cleanup_access(path: &Path) -> Result<(), OperationError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| cleanup_error())?;
+    if metadata.file_type().is_symlink() {
+        return Err(cleanup_error());
+    }
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(FILE_READ_ATTRIBUTES | DELETE)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    if metadata.is_dir() {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    } else if !metadata.is_file() {
+        return Err(cleanup_error());
+    }
+    let handle = options.open(path).map_err(|_| cleanup_error())?;
+    drop(handle);
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|_| cleanup_error())? {
+            prove_exclusive_cleanup_access(&entry.map_err(|_| cleanup_error())?.path())?;
+        }
     }
     Ok(())
 }
@@ -1448,6 +1617,16 @@ fn check_cancelled(token: &CancellationToken, stage: OperationStage) -> Result<(
     } else {
         Ok(())
     }
+}
+
+fn operation_timeout(stage: OperationStage) -> OperationError {
+    OperationError::safe(
+        "TXT_OPERATION_TIMEOUT",
+        "TXT-to-PDF conversion exceeded its bounded runtime",
+        "No unverified output was published; retry after local resources are available.",
+        stage,
+        true,
+    )
 }
 
 fn timestamp() -> String {
@@ -1588,6 +1767,61 @@ fn metadata_error() -> OperationError {
 mod tests {
     use super::*;
 
+    fn create_text_test_job(state: &AppState, lane: &Path, label: &str) -> JobRecord {
+        let source = lane.join(format!("{label}.txt"));
+        let destination = lane.join(format!("{label}-destination"));
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(&source, format!("private-{label}-content")).unwrap();
+        let input = state.viewer_sessions.open_txt(&source).unwrap();
+        let grant = state
+            .viewer_sessions
+            .grant_destination(&destination)
+            .unwrap();
+        TextToPdfService::new(state.clone())
+            .create_job(crate::contracts::TextToPdfJobCreateRequest {
+                operation_id: TEXT_TO_PDF_OPERATION_ID.to_owned(),
+                input_session_id: input.session_id,
+                input_generation: input.generation,
+                destination_grant_id: grant.grant_id,
+                requested_output_name: format!("{label}.pdf"),
+                settings: TextToPdfSettings {
+                    page_size: crate::text_to_pdf::TextPageSize::A4,
+                    orientation: crate::text_to_pdf::TextOrientation::Portrait,
+                },
+            })
+            .unwrap()
+    }
+
+    fn advance_text_job(state: &AppState, job_id: &str, target: JobState) {
+        let mut current = JobState::Queued;
+        for (next, stage) in [
+            (JobState::Inspecting, OperationStage::Inspect),
+            (JobState::Preflight, OperationStage::Preflight),
+            (JobState::Ready, OperationStage::Plan),
+            (JobState::Running, OperationStage::Execute),
+            (JobState::Verifying, OperationStage::Verify),
+            (JobState::Publishing, OperationStage::Publish),
+        ] {
+            if current == target {
+                return;
+            }
+            let mut database = state.database();
+            let version = database.get_job(job_id).unwrap().unwrap().version;
+            database
+                .transition_job(job_id, current, version, next, Some(stage))
+                .unwrap();
+            current = next;
+        }
+        if target == JobState::Interrupted {
+            state
+                .database()
+                .mark_interrupted(job_id, JobState::Publishing)
+                .unwrap();
+            return;
+        }
+        assert_eq!(current, target);
+    }
+
     #[test]
     fn subset_prefix_normalization_is_exact() {
         assert_eq!(
@@ -1641,6 +1875,21 @@ mod tests {
     }
 
     #[test]
+    fn total_operation_deadline_bounds_every_candidate_timeout() {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let bounded =
+            bounded_timeout(deadline, QPDF_NORMALIZE_TIMEOUT, OperationStage::Verify).unwrap();
+        assert!(bounded <= Duration::from_millis(100));
+        let expired = Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            bounded_timeout(expired, QPDF_VERIFY_TIMEOUT, OperationStage::Verify)
+                .unwrap_err()
+                .code,
+            "TXT_OPERATION_TIMEOUT"
+        );
+    }
+
+    #[test]
     fn pre_cancelled_job_publishes_nothing_and_reconciles_terminal_state() {
         let lane = tempfile::tempdir().unwrap();
         let app_data = lane.path().join("app-data");
@@ -1683,6 +1932,101 @@ mod tests {
         assert_eq!(cancelled.state, JobState::Cancelled);
         assert!(fs::read_dir(&destination).unwrap().next().is_none());
         assert!(cancelled.outputs[0].final_path.is_none());
+    }
+
+    #[test]
+    fn txt_job_metadata_never_persists_source_paths_or_private_text() {
+        let lane = tempfile::tempdir().unwrap();
+        let state = crate::initialize_runtime(&lane.path().join("app-data"), Utc::now()).unwrap();
+        let canary = "txt-source-path-canary-94b18c";
+        let job = create_text_test_job(&state, lane.path(), canary);
+        let persisted = state.database().get_job(&job.id).unwrap().unwrap();
+        assert!(persisted.inputs[0].source_path.is_empty());
+        assert!(persisted.inputs[0].canonical_path.is_empty());
+        let database = state.database();
+        let leaked: i64 = database
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM job_inputs
+                 WHERE source_path LIKE ?1 OR canonical_path LIKE ?1",
+                [format!("%{canary}%")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leaked, 0);
+    }
+
+    #[test]
+    fn txt_recovery_marks_every_unpublished_nonterminal_state_interrupted() {
+        for target in [
+            JobState::Queued,
+            JobState::Inspecting,
+            JobState::Preflight,
+            JobState::Ready,
+            JobState::Running,
+            JobState::Verifying,
+            JobState::Publishing,
+            JobState::Interrupted,
+        ] {
+            let lane = tempfile::tempdir().unwrap();
+            let state =
+                crate::initialize_runtime(&lane.path().join("app-data"), Utc::now()).unwrap();
+            let job = create_text_test_job(&state, lane.path(), &format!("state-{target:?}"));
+            advance_text_job(&state, &job.id, target);
+            let workspace = state.workspaces.create_job(&job.id).unwrap();
+            fs::write(workspace.staging.join("abandoned.pdf"), b"private").unwrap();
+
+            let report = crate::recovery::reconcile_startup(&state).unwrap();
+            let recovered = state.database().get_job(&job.id).unwrap().unwrap();
+            assert_eq!(recovered.state, JobState::Interrupted, "{target:?}");
+            assert_eq!(report.failed, 0, "{target:?}");
+            assert_eq!(report.interrupted, 1, "{target:?}");
+            assert!(!workspace.root.exists(), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn txt_recovery_preserves_locked_udf_and_retries_only_after_release() {
+        let lane = tempfile::tempdir().unwrap();
+        let state = crate::initialize_runtime(&lane.path().join("app-data"), Utc::now()).unwrap();
+        let job = create_text_test_job(&state, lane.path(), "locked-udf");
+        advance_text_job(&state, &job.id, JobState::Running);
+        let workspace = state.workspaces.create_job(&job.id).unwrap();
+        let generation = Uuid::new_v4().hyphenated().to_string();
+        let udf = workspace.temporary.join("renderer-udfs").join(&generation);
+        fs::create_dir_all(&udf).unwrap();
+        fs::write(
+            udf.join(UDF_MARKER),
+            format!("job={}\ngeneration={generation}\n", job.id),
+        )
+        .unwrap();
+        let locked_path = udf.join("owned.lock");
+        fs::write(&locked_path, b"owned").unwrap();
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+            )
+            .open(&locked_path)
+            .unwrap();
+
+        let first = crate::recovery::reconcile_startup(&state).unwrap();
+        assert_eq!(first.cleanup_failures, 1);
+        assert_eq!(
+            state.database().get_job(&job.id).unwrap().unwrap().state,
+            JobState::Interrupted
+        );
+        assert!(workspace.root.exists());
+
+        drop(locked);
+        assert!(
+            validate_recovery_renderer_workspaces(&workspace.root, &job.id).is_ok(),
+            "released UDF must pass the exclusive ownership probe"
+        );
+        let recovered = crate::recovery::resolve_interrupted(&state, &job.id).unwrap();
+        assert_eq!(recovered.state, JobState::Interrupted);
+        assert!(!workspace.root.exists());
     }
 
     #[test]

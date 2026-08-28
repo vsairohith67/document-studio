@@ -41,11 +41,36 @@ export function TextToPdfWorkspace({
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const jobId = useRef<string | null>(null);
+  const sourceRef = useRef<TextInputMetadata | null>(null);
+  const destinationRef = useRef<DestinationGrant | null>(null);
+  const ownershipTransferInFlight = useRef(false);
+  const mounted = useRef(true);
   const openButton = useRef<HTMLButtonElement | null>(null);
   const result = useRef<HTMLDivElement | null>(null);
   const savedPath = useRef<HTMLSpanElement | null>(null);
 
   useEffect(() => onBusyChange(busy), [busy, onBusyChange]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (ownershipTransferInFlight.current) return;
+      const retainedSource = sourceRef.current;
+      const retainedDestination = destinationRef.current;
+      sourceRef.current = null;
+      destinationRef.current = null;
+      if (retainedSource) {
+        void api.viewer.close({
+          sessionId: retainedSource.sessionId,
+          generation: retainedSource.generation,
+        }).catch(() => undefined);
+      }
+      if (retainedDestination) {
+        void api.viewer.revokeDestination(retainedDestination.grantId).catch(() => undefined);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -65,6 +90,7 @@ export function TextToPdfWorkspace({
             if (!active) return;
             setJob(snapshot);
             setSource(null);
+            sourceRef.current = null;
             if (snapshot.state === 'completed') {
               queueMicrotask(() => result.current?.focus());
             } else {
@@ -94,9 +120,18 @@ export function TextToPdfWorkspace({
     try {
       const selected = await api.text.open();
       if (!selected) return;
-      if (source) {
-        await api.viewer.close({ sessionId: source.sessionId, generation: source.generation }).catch(() => undefined);
+      const retainedSource = sourceRef.current;
+      if (retainedSource) {
+        await api.viewer.close({ sessionId: retainedSource.sessionId, generation: retainedSource.generation }).catch(() => undefined);
       }
+      if (!mounted.current) {
+        await api.viewer.close({
+          sessionId: selected.sessionId,
+          generation: selected.generation,
+        }).catch(() => undefined);
+        return;
+      }
+      sourceRef.current = selected;
       setSource(selected);
       setJob(null);
       setProgress(null);
@@ -115,7 +150,13 @@ export function TextToPdfWorkspace({
     try {
       const selected = await api.viewer.chooseDestination();
       if (!selected) return;
-      if (destination) await api.viewer.revokeDestination(destination.grantId);
+      const retainedDestination = destinationRef.current;
+      if (retainedDestination) await api.viewer.revokeDestination(retainedDestination.grantId);
+      if (!mounted.current) {
+        await api.viewer.revokeDestination(selected.grantId).catch(() => undefined);
+        return;
+      }
+      destinationRef.current = selected;
       setDestination(selected);
       setAnnouncement('Local destination selected through an opaque grant.');
     } catch (reason) {
@@ -129,6 +170,7 @@ export function TextToPdfWorkspace({
     setError(null);
     setJob(null);
     setProgress(null);
+    ownershipTransferInFlight.current = true;
     try {
       const created = await api.jobs.createTextToPdf({
         operationId: 'text.to-pdf',
@@ -139,8 +181,12 @@ export function TextToPdfWorkspace({
         settings: { pageSize, orientation },
       });
       jobId.current = created.id;
-      setJob(created);
+      sourceRef.current = null;
       await api.viewer.revokeDestination(destination.grantId).catch(() => undefined);
+      destinationRef.current = null;
+      ownershipTransferInFlight.current = false;
+      if (!mounted.current) return;
+      setJob(created);
       setDestination(null);
       setAnnouncement('TXT-to-PDF job queued for strict native preflight.');
       void api.jobs.get({ jobId: created.id }).then((snapshot) => {
@@ -149,12 +195,30 @@ export function TextToPdfWorkspace({
         if (terminalStates.has(snapshot.state)) {
           setBusy(false);
           setSource(null);
+          sourceRef.current = null;
           queueMicrotask(() => snapshot.state === 'completed'
             ? result.current?.focus()
             : openButton.current?.focus());
         }
       }).catch((reason: unknown) => setError(operationErrorMessage(reason)));
     } catch (reason) {
+      ownershipTransferInFlight.current = false;
+      if (!mounted.current) {
+        const retainedSource = sourceRef.current;
+        const retainedDestination = destinationRef.current;
+        sourceRef.current = null;
+        destinationRef.current = null;
+        if (retainedSource) {
+          await api.viewer.close({
+            sessionId: retainedSource.sessionId,
+            generation: retainedSource.generation,
+          }).catch(() => undefined);
+        }
+        if (retainedDestination) {
+          await api.viewer.revokeDestination(retainedDestination.grantId).catch(() => undefined);
+        }
+        return;
+      }
       setBusy(false);
       setError(operationErrorMessage(reason));
       queueMicrotask(() => openButton.current?.focus());
@@ -182,9 +246,19 @@ export function TextToPdfWorkspace({
     }
   };
 
-  const revealSavedLocation = () => {
+  const showSavedPath = () => {
     savedPath.current?.focus();
-    setAnnouncement('The verified saved path is shown and focused below. No operating-system shell was invoked.');
+    setAnnouncement('The verified saved path is shown and focused below.');
+  };
+
+  const copySavedPath = async (path: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error('Clipboard access is unavailable.');
+      await navigator.clipboard.writeText(path);
+      setAnnouncement('The verified saved path was copied.');
+    } catch {
+      setAnnouncement('The verified saved path could not be copied.');
+    }
   };
 
   const activeError = job?.errors.at(-1);
@@ -196,6 +270,7 @@ export function TextToPdfWorkspace({
     ? Math.min(100, Math.round((completedUnits / totalUnits) * 100))
     : 0;
   const finalPath = job?.outputs[0]?.finalPath ?? null;
+  const outputNameInvalid = !validPdfOutputName(outputName);
 
   return <>
     {error && <div className="error-banner" role="alert">{error}</div>}
@@ -240,7 +315,7 @@ export function TextToPdfWorkspace({
             <div><span className="field-label">Destination</span><strong>{destination?.displayName ?? 'No folder selected'}</strong><small>Opaque local grant · existing files are never overwritten</small></div>
             <button type="button" className="secondary" onClick={chooseDestination} disabled={busy}>Choose</button>
           </div>
-          <label className="output-field" htmlFor="txt-output-name"><span className="field-label">Requested output filename</span><input id="txt-output-name" value={outputName} onChange={(event) => setOutputName(event.target.value)} aria-describedby="txt-output-help" disabled={busy} /><small id="txt-output-help">A destination collision receives a numbered no-overwrite name; the verified final name is shown below.</small></label>
+          <label className="output-field" htmlFor="txt-output-name"><span className="field-label">Requested output filename</span><input id="txt-output-name" aria-label="Requested output filename" value={outputName} onChange={(event) => setOutputName(event.target.value)} aria-invalid={outputNameInvalid} aria-describedby={outputNameInvalid ? 'txt-output-help txt-output-error' : 'txt-output-help'} disabled={busy} /><small id="txt-output-help">A destination collision receives a numbered no-overwrite name; the verified final name is shown below.</small>{outputNameInvalid && <small id="txt-output-error" className="sr-only">Enter a Windows-safe filename ending in .pdf.</small>}</label>
           {validation && <p className="preflight-message" role="status">{validation}</p>}
           <div className="action-row"><button type="button" className="primary" disabled={Boolean(validation) || busy} onClick={start}>Create verified PDF</button>{busy && <button type="button" className="secondary danger" disabled={!cancellable} onClick={cancel}>{cancellable ? 'Cancel' : 'Publishing safely'}</button>}</div>
         </article>
@@ -250,7 +325,7 @@ export function TextToPdfWorkspace({
           <small>{progress?.stage ? `Current stage: ${progress.stage}` : 'No renderer has been created.'}</small>
           <progress value={progressPercent} max={100} aria-label="TXT to PDF progress" />
           {busy && !cancellable && <p className="publishing-copy">Publishing safely—cancellation cannot remove a committed user file.</p>}
-          {job?.state === 'completed' && finalPath && <div ref={result} className="success-result" tabIndex={-1}><strong>Verified TXT PDF</strong><span ref={savedPath} tabIndex={-1}>{finalPath}</span><small>{job.outputs[0]?.sizeBytes == null ? '' : formatBytes(job.outputs[0].sizeBytes)}</small><div className="action-row"><button type="button" className="secondary compact" onClick={openVerifiedOutput}>Open in Viewer</button><button type="button" className="secondary compact" onClick={revealSavedLocation}>Reveal saved location</button><button type="button" className="secondary compact" onClick={() => void navigator.clipboard?.writeText(finalPath)}>Copy saved path</button></div></div>}
+          {job?.state === 'completed' && finalPath && <div ref={result} className="success-result" tabIndex={-1}><strong>Verified TXT PDF</strong><span ref={savedPath} tabIndex={-1}>{finalPath}</span><small>{job.outputs[0]?.sizeBytes == null ? '' : formatBytes(job.outputs[0].sizeBytes)}</small><div className="action-row"><button type="button" className="secondary compact" onClick={openVerifiedOutput}>Open in Viewer</button><button type="button" className="secondary compact" onClick={showSavedPath}>Show saved path</button><button type="button" className="secondary compact" onClick={() => void copySavedPath(finalPath)}>Copy saved path</button></div></div>}
           {(job?.state === 'failed' || job?.state === 'cancelled' || job?.state === 'interrupted') && <div className="failure-result" role="alert"><strong>{activeError?.title ?? `Conversion ${job.state}`}</strong><span>{activeError?.detail ?? 'No unverified output was published.'}</span></div>}
         </article>
       </aside>

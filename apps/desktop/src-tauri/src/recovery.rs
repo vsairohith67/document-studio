@@ -8,6 +8,7 @@ use crate::contracts::{
 };
 use crate::database::{Database, DatabaseError};
 use crate::publication::{hash_file, is_exact_owned_partial_path, partial_ownership_result_code};
+use crate::text_to_pdf::TEXT_TO_PDF_OPERATION_ID;
 use crate::windows_security::{delete_open_file, identity_from_file, open_for_identity_and_delete};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -278,8 +279,16 @@ fn reconcile_current_job(
             )?;
         }
         database.record_error_once(&job.id, &worker_stopped_error(job.state))?;
-        transition_to_failed(&mut database, &job)?;
-        report.failed += 1;
+        if job.operation_id == TEXT_TO_PDF_OPERATION_ID {
+            let current = database
+                .get_job(&job.id)?
+                .ok_or(DatabaseError::JobConflict)?;
+            database.mark_interrupted(&job.id, current.state)?;
+            report.interrupted += 1;
+        } else {
+            transition_to_failed(&mut database, &job)?;
+            report.failed += 1;
+        }
     } else {
         interrupt_with_cleanup_error(state, &job)?;
         report.cleanup_failures += 1;

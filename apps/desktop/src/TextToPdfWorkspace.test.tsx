@@ -69,6 +69,7 @@ function completedEvent(): ProgressEvent {
 
 describe('G04E1 TXT to PDF workspace', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.progressHandler = undefined;
     mocks.open.mockResolvedValue(input);
     mocks.openOutput.mockResolvedValue({
@@ -114,14 +115,41 @@ describe('G04E1 TXT to PDF workspace', () => {
     await user.click(screen.getByRole('button', { name: 'Open in Viewer' }));
     expect(mocks.openOutput).toHaveBeenCalledWith(job('completed').id);
     expect(onOpenViewer).toHaveBeenCalledWith(expect.objectContaining({ displayName: 'private-notes.pdf' }));
-    await user.click(screen.getByRole('button', { name: 'Reveal saved location' }));
+    await user.click(screen.getByRole('button', { name: 'Show saved path' }));
     expect(document.activeElement).toBe(savedPath);
+    await user.click(screen.getByRole('button', { name: 'Copy saved path' }));
+    expect(await screen.findByText('The verified saved path was copied.')).toBeTruthy();
+    vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('denied'));
+    await user.click(screen.getByRole('button', { name: 'Copy saved path' }));
+    expect(await screen.findByText('The verified saved path could not be copied.')).toBeTruthy();
+  });
+
+  it('releases pre-job TXT and destination grants when the workspace unmounts', async () => {
+    const user = userEvent.setup();
+    const rendered = render(
+      <TextToPdfWorkspace onBusyChange={vi.fn()} onOpenViewer={vi.fn()} />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Choose TXT' }));
+    await user.click(screen.getByRole('button', { name: 'Choose' }));
+    rendered.unmount();
+    await act(async () => Promise.resolve());
+    expect(mocks.close).toHaveBeenCalledWith({
+      sessionId: input.sessionId,
+      generation: input.generation,
+    });
+    expect(mocks.revokeDestination).toHaveBeenCalledWith(
+      '14035919-f030-4a43-b6a6-60feccf42557',
+    );
   });
 
   it('has bounded explanations, no document preview, and no accessibility violations', async () => {
     const user = userEvent.setup();
     const { container } = render(<TextToPdfWorkspace onBusyChange={vi.fn()} onOpenViewer={vi.fn()} />);
     await user.click(screen.getByRole('button', { name: 'Choose TXT' }));
+    const outputName = screen.getByRole('textbox', { name: 'Requested output filename' });
+    await user.clear(outputName);
+    expect(outputName.getAttribute('aria-invalid')).toBe('true');
+    expect(outputName.getAttribute('aria-describedby')).toContain('txt-output-error');
     expect(screen.getByText(/Strict UTF-8 only/)).toBeTruthy();
     expect(screen.getByText(/English, Hindi \(Devanagari\), and Telugu/)).toBeTruthy();
     expect(screen.queryByRole('textbox', { name: /preview/i })).toBeNull();
