@@ -110,3 +110,20 @@ staging\output-NNNN.pdf
 ```
 
 Rotate first creates `temp\rotation-normalized.pdf` with `--flatten-rotation` and uses that private relative path as the input. qpdf sees no original source or destination path. Each staging result requires an owned regular file, PDF magic, nonzero size, SHA-256, strict no-recovery qpdf check, unencrypted state and exact page count. Rotation verification batches selected output pages, asks qpdf for their actual object references, and checks those exact page dictionaries; it never assumes object numbering. Semantic order is proven with deterministic adversarial fixtures, not claimed from arbitrary visual-page identity at runtime. Final size/hash must equal staging evidence.
+
+## `text.to-pdf@1.0.0`
+
+Input is exactly one retained-handle local regular non-reparse `.txt` file. Raw bytes are limited to 8,388,608; normalized logical lines to 100,000; and each normalized line to 65,536 UTF-8 bytes, all inclusive. Encoding is strict UTF-8 with at most one initial BOM, CRLF/bare-CR normalization to LF and no Unicode normalization. NUL, disallowed C0/C1 controls, later U+FEFF, bidi controls, noncharacters, unsupported font cmap entries and excessive or invalid shaping/joiner sequences fail before WebView2 creation with typed `TXT_*` codes.
+
+Settings are closed and exact:
+
+```json
+{
+  "pageSize": "a4 | letter",
+  "orientation": "portrait | landscape"
+}
+```
+
+Rust owns the HTML, CSS, font resources and CSP. Print policy is fixed to `DocumentStudioText` Regular 400, 11 pt, 1.45 line height, pre-wrap/anywhere, tab size 4, 0.5-inch margins, scale 1.0, backgrounds on and headers/footers off. A4 portrait is 8.2677165354 × 11.6929133858 inches and Letter portrait is 8.5 × 11 inches; landscape swaps dimensions and `/Rotate` stays zero.
+
+The operation follows inspect → preflight → ready → running → verifying → publishing → completed. It succeeds only after source immutability, raw/normalized strict qpdf checks, page/box/active-content/font/privacy inventory, atomic no-overwrite publication and final reopen size/SHA-256 equality. Recovery never resumes WebView2, printing or qpdf.

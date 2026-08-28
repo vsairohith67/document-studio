@@ -40,6 +40,7 @@ required = [
     'packages/contracts/package.json',
     'packages/contracts/fixtures/foundation-contracts.json',
     'packages/contracts/fixtures/batch-preview-contracts.json',
+    'packages/contracts/fixtures/text-to-pdf-contracts.json',
     'packages/tokens/document-studio.tokens.json',
     'packages/tokens/package.json',
     'models/models.yaml',
@@ -56,6 +57,19 @@ required = [
     'apps/desktop/src-tauri/migrations/0006_job_completion_outcomes.sql',
     'apps/desktop/src-tauri/migrations/0007_balanced_compression_audits.sql',
     'apps/desktop/src-tauri/migrations/0008_batch_preview_foundation.sql',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/font-manifest.json',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/NotoSans-Regular.ttf',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/NotoSansDevanagari-Regular.ttf',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/NotoSansTelugu-Regular.ttf',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/licenses/NotoSans-OFL-1.1.txt',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/licenses/NotoSansDevanagari-OFL-1.1.txt',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/licenses/NotoSansTelugu-OFL-1.1.txt',
+    'apps/desktop/src-tauri/src/text_to_pdf.rs',
+    'apps/desktop/src-tauri/src/text_to_pdf_renderer.rs',
+    'apps/desktop/src-tauri/src/text_to_pdf_service.rs',
+    'apps/desktop/src-tauri/src/webview2_g04e1_compile_gate.rs',
+    'apps/desktop/src/TextToPdfWorkspace.tsx',
+    'apps/desktop/src/TextToPdfWorkspace.test.tsx',
     'docs/adr/ADR-005-storage-ownership-and-provider-persistence.md',
     'docs/adr/ADR-006-foundation-dependencies-and-sqlite.md',
     'docs/adr/ADR-007-durable-publication-and-recovery.md',
@@ -70,10 +84,14 @@ required = [
     'docs/implementation-log/G04C2-corpus-recovery.md',
     'docs/adr/ADR-017-canonical-batch-preview-and-atomic-metadata.md',
     'docs/implementation-log/G04F1-batch-preview-foundation.md',
+    'docs/adr/ADR-018-hidden-webview2-text-pdf-renderer.md',
+    'docs/implementation-log/G04E1-txt-to-pdf.md',
     'scripts/g04c2_corpus.py',
     'apps/desktop/scripts/verify-g04c2-corpus.ps1',
     'apps/desktop/scripts/verify-g04c2b-boundaries.ps1',
     'apps/desktop/scripts/verify-g04f1-boundaries.ps1',
+    'apps/desktop/scripts/verify-g04e1-boundaries.ps1',
+    'apps/desktop/scripts/prepare-g04e1-visual-evidence.mjs',
     'packages/contracts/fixtures/pdf-compress-balanced-contracts.json',
     'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/README.md',
     'apps/desktop/src-tauri/tests/fixtures/g04c2-balanced-corpus/corpus-manifest.json',
@@ -102,6 +120,7 @@ for p in [
     'MANIFEST.json',
     'apps/desktop/package.json',
     'apps/desktop/src-tauri/tauri.conf.json',
+    'apps/desktop/src-tauri/resources/fonts/g04e1/font-manifest.json',
     'apps/desktop/src-tauri/capabilities/default.json',
     'package.json',
     'package-lock.json',
@@ -109,6 +128,7 @@ for p in [
     'packages/contracts/batch.schema.json',
     'packages/contracts/fixtures/foundation-contracts.json',
     'packages/contracts/fixtures/batch-preview-contracts.json',
+    'packages/contracts/fixtures/text-to-pdf-contracts.json',
     'packages/contracts/package.json',
     'packages/contracts/operation.schema.json',
     'packages/contracts/job.schema.json',
@@ -234,6 +254,8 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
         'g04 remains blocked',
         'g04 is blocked',
         'draft pr #6',
+        'g04b2 — active implementation',
+        'g04b2 is not accepted or complete',
     ]:
         if false_status in state:
             raise SystemExit(f'Stale G03/G04 status claim remains: {false_status}')
@@ -244,8 +266,7 @@ def validate_g03_acceptance_consistency(inputs: dict[str, object]) -> None:
         'a27306653119e6e4fcdef162308445b78129f974',
         'g04b — complete',
         '6940a1381822a5872f4c345cc0e5cd15b2e6294c',
-        'g04b2 — active implementation',
-        'g04b2 is not accepted or complete',
+        'accepted on main at merge b5901a7baca58b3acb1ee00027e42b0059c59fd4',
     ]:
         if required not in state:
             raise SystemExit(f'Current G03/G04 status is missing required truth: {required}')
@@ -459,7 +480,7 @@ def validate_g04b_boundaries(inputs: dict[str, str]) -> None:
     viewer_tests = inputs['viewer_tests']
     if 'G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer' not in viewer_tests:
         raise SystemExit('G04B browser-backed visual evidence is missing')
-    if '"pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs"' not in inputs['package']:
+    if '"pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs && node ./scripts/prepare-g04e1-visual-evidence.mjs"' not in inputs['package']:
         raise SystemExit('G04B native visual producer must run before Playwright timing')
     for required in [
         'DOCUMENT_STUDIO_G04B_VISUAL_EVIDENCE_DIR',
@@ -469,8 +490,12 @@ def validate_g04b_boundaries(inputs: dict[str, str]) -> None:
     ]:
         if required not in inputs['visual_producer']:
             raise SystemExit(f'G04B pre-browser visual producer is missing: {required}')
-    if "'target', 'g04b-browser-visual-evidence'" not in viewer_tests:
-        raise SystemExit('G04B browser test is not consuming pre-generated native evidence')
+    for required in [
+        'DOCUMENT_STUDIO_BROWSER_EVIDENCE_ROOT',
+        "resolve(browserEvidenceRoot, 'g04b-browser-visual-evidence')",
+    ]:
+        if required not in viewer_tests:
+            raise SystemExit('G04B browser test is not consuming pre-generated native evidence')
 
     convert = inputs['convert']
     for required in [
@@ -802,6 +827,86 @@ if 'npm run verify:g04f1 --workspace @document-studio/desktop' not in ci_text:
 if 'Rust is authoritative for the Windows limit of 255 UTF-16 code units.' not in json.dumps(g04f1_schema):
     raise SystemExit('G04F1 schema must document the authoritative Rust UTF-16 filename gate')
 
+g04e1_core = (ROOT / 'apps/desktop/src-tauri/src/text_to_pdf.rs').read_text(encoding='utf-8')
+g04e1_renderer = (ROOT / 'apps/desktop/src-tauri/src/text_to_pdf_renderer.rs').read_text(encoding='utf-8')
+g04e1_service = (ROOT / 'apps/desktop/src-tauri/src/text_to_pdf_service.rs').read_text(encoding='utf-8')
+g04e1_registry = (ROOT / 'apps/desktop/src-tauri/src/operation_registry.rs').read_text(encoding='utf-8')
+g04e1_font_manifest = json.loads(
+    (ROOT / 'apps/desktop/src-tauri/resources/fonts/g04e1/font-manifest.json').read_text(encoding='utf-8')
+)
+g04e1_ipc_schema = json.loads((ROOT / 'packages/contracts/ipc.schema.json').read_text(encoding='utf-8'))
+g04e1_request = g04e1_ipc_schema.get('$defs', {}).get('textToPdfJobCreateRequest', {})
+if g04e1_request.get('additionalProperties') is not False:
+    raise SystemExit('G04E1 TXT-to-PDF IPC request must be closed')
+if g04e1_request.get('properties', {}).get('operationId') != {'const': 'text.to-pdf'}:
+    raise SystemExit('G04E1 TXT-to-PDF IPC request must be operation-exact')
+for required_boundary in [
+    'TXT_MAX_RAW_BYTES: usize = 8_388_608',
+    'TXT_MAX_LOGICAL_LINES: usize = 100_000',
+    'TXT_MAX_LINE_BYTES: usize = 65_536',
+    'TXT_INVALID_UTF8',
+    'TXT_UNSUPPORTED_BOM',
+    'TXT_UNSUPPORTED_UNICODE',
+    'TXT_SHAPING_COMPLEXITY_LIMIT',
+    "default-src 'none'",
+    'font-synthesis:none',
+]:
+    if required_boundary not in g04e1_core:
+        raise SystemExit(f'G04E1 input/document boundary is missing: {required_boundary}')
+for required_boundary in [
+    'ICoreWebView2_22',
+    'ICoreWebView2Environment6',
+    'ICoreWebView2_7',
+    'AddWebResourceRequestedFilterWithRequestSourceKinds',
+    'COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL',
+    'COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL',
+    'SHCreateMemStream',
+    'stream.Stat',
+    'WebResourceResponseReceivedEventHandler',
+    'DOMContentLoadedEventHandler',
+    'PrintToPdf',
+    'owns_generation',
+]:
+    if required_boundary not in g04e1_renderer:
+        raise SystemExit(f'G04E1 WebView2 boundary is missing: {required_boundary}')
+g04e1_renderer_production = g04e1_renderer.split('#[cfg(test)]', 1)[0]
+for forbidden_boundary in [
+    'ExecuteScript', 'QueryInterface', 'transmute', 'AddRef',
+    'http://', 'localhost', '127.0.0.1', 'file://', 'data:',
+]:
+    if forbidden_boundary in g04e1_renderer_production:
+        raise SystemExit(f'G04E1 renderer contains a prohibited production path: {forbidden_boundary}')
+for required_boundary in [
+    'publish_verified_staging_with_observer',
+    'source.verify_unchanged_hash',
+    'TXT_FINAL_HASH_MISMATCH',
+    'FontFile2',
+    '/OpenAction',
+    '/JavaScript',
+    '/AcroForm',
+    'validate_recovery_renderer_workspaces',
+    'id: "webview2"',
+]:
+    if required_boundary not in g04e1_service:
+        raise SystemExit(f'G04E1 verification/recovery boundary is missing: {required_boundary}')
+if 'text_to_pdf_manifest()' not in g04e1_registry or 'TEXT_TO_PDF_OPERATION_ID' not in g04e1_registry:
+    raise SystemExit('G04E1 operation is not registered exactly')
+if g04e1_font_manifest.get('operation') != 'text.to-pdf@1.0.0':
+    raise SystemExit('G04E1 font manifest operation is not exact')
+fonts = g04e1_font_manifest.get('fonts', [])
+if len(fonts) != 3 or {font.get('postScriptName') for font in fonts} != {
+    'NotoSans-Regular', 'NotoSansDevanagari-Regular', 'NotoSansTelugu-Regular',
+}:
+    raise SystemExit('G04E1 font manifest inventory is not exact')
+if any(font.get('weight') != 400 or font.get('style') != 'Regular' or font.get('spdxLicense') != 'OFL-1.1' for font in fonts):
+    raise SystemExit('G04E1 font manifest admits a non-Regular or non-OFL face')
+if desktop_scripts.get('verify:g04e1') != 'powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04e1-boundaries.ps1':
+    raise SystemExit('G04E1 boundary verifier is not registered exactly')
+if 'npm run verify:g04e1 --workspace @document-studio/desktop' not in ci_text:
+    raise SystemExit('G04E1 boundary verifier is not wired into exact-head CI')
+if any(path.name.startswith('0009_') for path in (ROOT / 'apps/desktop/src-tauri/migrations').glob('*.sql')):
+    raise SystemExit('G04E1 added an unauthorized database migration')
+
 legacy_name = 'Rohith' + ' Document Studio'
 for p in ROOT.rglob('*.md'):
     if 'attachments/archive' in str(p):
@@ -811,5 +916,5 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01-G04B accepted status, G04B2 boundaries and G04C2 offline corpus consistency verified.'
+    f'{len(rows)} feature entries found; G01-G04F1 accepted status and G04E1 TXT-to-PDF boundaries verified.'
 )

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { DependencyDiagnostic, FileInspection, JobRecord, ProgressEvent, SystemStatus } from '@document-studio/contracts';
+import type { DependencyDiagnostic, FileInspection, JobRecord, ProgressEvent, SystemStatus, ViewerDocumentMetadata } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
 import { NoBenefitResult } from './JobCompletionOutcome';
 
@@ -52,6 +52,7 @@ function validPdfOutputName(name: string): boolean {
 
 export default function App() {
   const [workspaceMode, setWorkspaceMode] = useState<'merge' | 'viewer' | 'optimize' | 'convert' | 'batch'>('merge');
+  const [pendingViewerDocument, setPendingViewerDocument] = useState<ViewerDocumentMetadata | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [inputs, setInputs] = useState<SelectedPdf[]>([]);
   const [destination, setDestination] = useState<string | null>(null);
@@ -68,6 +69,11 @@ export default function App() {
   const busyRef = useRef(false);
   const inputCountRef = useRef(0);
   const nextSelectionId = useRef(0);
+
+  const openViewer = (document?: ViewerDocumentMetadata) => {
+    if (document) setPendingViewerDocument(document);
+    setWorkspaceMode('viewer');
+  };
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const mergeListRef = useRef<HTMLOListElement>(null);
   const pendingFocus = useRef<PendingFocus | null>(null);
@@ -241,7 +247,7 @@ export default function App() {
           system={system}
           dependencies={dependencies}
           onOpenMerge={() => setWorkspaceMode('merge')}
-          onOpenViewer={() => setWorkspaceMode('viewer')}
+          onOpenViewer={openViewer}
           onOpenConvert={() => setWorkspaceMode('convert')}
           onOpenBatch={() => setWorkspaceMode('batch')}
         />
@@ -256,7 +262,7 @@ export default function App() {
           system={system}
           dependencies={dependencies}
           onOpenMerge={() => setWorkspaceMode('merge')}
-          onOpenViewer={() => setWorkspaceMode('viewer')}
+          onOpenViewer={openViewer}
           onOpenOptimize={() => setWorkspaceMode('optimize')}
           onOpenBatch={() => setWorkspaceMode('batch')}
         />
@@ -276,7 +282,7 @@ export default function App() {
           <button className="rail-button" onClick={() => setWorkspaceMode('batch')}>Batch</button>
           <button className="rail-button" disabled>Settings</button>
         </aside>
-        <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing the local PDF workspace…</div></main>}><ViewerWorkspace /></Suspense>
+        <Suspense fallback={<main className="viewer-workspace"><div className="viewer-empty-state" role="status">Preparing the local PDF workspace…</div></main>}><ViewerWorkspace initialDocument={pendingViewerDocument} onInitialDocumentConsumed={() => setPendingViewerDocument(null)} /></Suspense>
       </div>
     );
   }
@@ -287,7 +293,7 @@ export default function App() {
         <BatchWorkspace
           system={system}
           onOpenMerge={() => setWorkspaceMode('merge')}
-          onOpenViewer={() => setWorkspaceMode('viewer')}
+          onOpenViewer={openViewer}
           onOpenOptimize={() => setWorkspaceMode('optimize')}
           onOpenConvert={() => setWorkspaceMode('convert')}
           onCreated={() => void refreshHistory()}

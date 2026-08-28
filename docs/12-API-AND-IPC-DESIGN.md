@@ -90,3 +90,12 @@ Rust-side `WindowEvent::DragDrop` validates a single path and emits `document-st
 The viewer APIs expose no file URL, raw path, shell, HTTP, custom protocol or general filesystem handle. A test-only `viewer_open_test_fixture` command and WebView2 remote-debugging flags compile only under `test-runtime`; production command registration and startup strip them.
 
 Durable G03 jobs keep canonical source, workspace and destination paths inside Rust/SQLite because execution and recovery need them. Before a G03 job record crosses `jobs_create_core_pdf`, `jobs_get`, `jobs_resolve_interrupted` or `history_list`, Rust clears the destination/source/canonical path strings and removes staging/partial/final path fields. Operation names, safe display filenames, state, progress, hashes and output status remain available. The accepted G01/G02 command behavior is unchanged.
+
+## G04E1 TXT-to-PDF IPC
+
+- `text_open_dialog` accepts exactly one `.txt` selection and returns sanitized display name, byte size and opaque session/generation identifiers; the source path and text never cross IPC.
+- `jobs_create_text_to_pdf` accepts operation id `text.to-pdf`, opaque input session/generation, opaque destination grant, validated PDF output name and closed page-size/orientation settings.
+- `jobs_open_text_output` accepts only a completed G04E1 job id, re-hashes the one published output against durable size/SHA-256 evidence, creates an opaque retained Viewer session and returns no source path.
+- Existing `jobs_get`, progress, cancellation, history and viewer APIs carry bounded safe state/error messages. Rejected text, full paths and source content are excluded from responses and events.
+
+The hidden renderer is Rust-owned and has no Tauri capability, raw IPC, host object or web-message API. The generated document cannot invoke commands. Final path exposure follows the existing verified-publication policy only after the output is reopened and matched; source and private workspace/UDF paths remain redacted.

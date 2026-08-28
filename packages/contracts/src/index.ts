@@ -486,6 +486,32 @@ export interface ViewerDocumentMetadata {
   fileIdentity: string;
 }
 
+export interface TextInputMetadata {
+  sessionId: string;
+  generation: number;
+  displayName: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  mimeType: 'text/plain';
+}
+
+export type TextPageSize = 'a4' | 'letter';
+export type TextOrientation = 'portrait' | 'landscape';
+
+export interface TextToPdfSettings {
+  pageSize: TextPageSize;
+  orientation: TextOrientation;
+}
+
+export interface TextToPdfJobCreateRequest {
+  operationId: 'text.to-pdf';
+  inputSessionId: string;
+  inputGeneration: number;
+  destinationGrantId: string;
+  requestedOutputName: string;
+  settings: TextToPdfSettings;
+}
+
 export interface ViewerRangeRequest {
   sessionId: string;
   generation: number;

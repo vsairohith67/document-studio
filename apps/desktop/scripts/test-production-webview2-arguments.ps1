@@ -1,5 +1,6 @@
 param(
-  [string]$Executable = ""
+  [string]$Executable = "",
+  [string]$ExpectedWebViewData = ""
 )
 
 Set-StrictMode -Version Latest
@@ -15,7 +16,11 @@ $evidenceRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
 )
 $hostileUserDataFolder = Join-Path $evidenceRoot 'hostile-inherited-user-data'
 $hostileRuntimeFolder = Join-Path $evidenceRoot 'missing-hostile-runtime'
-$expectedProductionWebViewData = Join-Path $env:LOCALAPPDATA 'studio.document.app\EBWebView'
+$expectedProductionWebViewData = if ([string]::IsNullOrWhiteSpace($ExpectedWebViewData)) {
+  Join-Path $env:LOCALAPPDATA 'studio.document.app\EBWebView'
+} else {
+  [System.IO.Path]::GetFullPath($ExpectedWebViewData)
+}
 $environmentState = @{}
 $managedEnvironment = [ordered]@{
   'webview2_browser_executable_folder' = $hostileRuntimeFolder

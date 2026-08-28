@@ -42,6 +42,13 @@ windows-sys = { version = "~0.61.2", features = [
   "Win32_System_Threading",
 ] }
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.38.2"
+windows = { version = "=0.61.3", default-features = false, features = [
+  "Win32_System_Com",
+  "Win32_UI_Shell",
+] }
+
 [dev-dependencies]
 junction = "~2.0.0"
 tempfile = "~3.27.0"

@@ -20,8 +20,14 @@ pub mod process_sandbox;
 pub mod publication;
 pub mod qpdf;
 pub mod recovery;
+pub mod text_to_pdf;
+#[cfg(windows)]
+pub mod text_to_pdf_renderer;
+pub mod text_to_pdf_service;
 pub mod viewer_sessions;
 mod webview2_environment;
+#[cfg(windows)]
+pub mod webview2_g04e1_compile_gate;
 pub mod windows_security;
 pub mod workspace;
 
@@ -378,6 +384,8 @@ pub fn run() {
         ipc::jobs_create_core_pdf,
         ipc::jobs_create_pdf_to_images,
         ipc::jobs_create_balanced,
+        ipc::jobs_create_text_to_pdf,
+        ipc::jobs_open_text_output,
         ipc::pdf_to_images_submit_page,
         ipc::balanced_compression_submit_page,
         ipc::jobs_cancel,
@@ -391,6 +399,7 @@ pub fn run() {
         ipc::settings_get,
         ipc::settings_set,
         ipc::viewer_open_dialog,
+        ipc::text_open_dialog,
         ipc::viewer_read_range,
         ipc::viewer_close,
         ipc::viewer_set_drop_enabled,
@@ -409,6 +418,8 @@ pub fn run() {
         ipc::jobs_create_core_pdf,
         ipc::jobs_create_pdf_to_images,
         ipc::jobs_create_balanced,
+        ipc::jobs_create_text_to_pdf,
+        ipc::jobs_open_text_output,
         ipc::pdf_to_images_submit_page,
         ipc::balanced_compression_submit_page,
         ipc::jobs_cancel,
@@ -422,6 +433,7 @@ pub fn run() {
         ipc::settings_get,
         ipc::settings_set,
         ipc::viewer_open_dialog,
+        ipc::text_open_dialog,
         ipc::viewer_open_test_fixture,
         ipc::viewer_grant_test_destination,
         ipc::viewer_read_range,

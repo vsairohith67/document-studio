@@ -3,6 +3,14 @@ import { execFileSync } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+const repositoryRoot = resolve(import.meta.dirname, '..', '..', '..');
+const cargoTargetRoot = process.env.CARGO_TARGET_DIR
+  ? resolve(repositoryRoot, process.env.CARGO_TARGET_DIR)
+  : resolve(repositoryRoot, 'target');
+const browserEvidenceRoot = process.env.DOCUMENT_STUDIO_BROWSER_EVIDENCE_ROOT
+  ? resolve(process.env.DOCUMENT_STUDIO_BROWSER_EVIDENCE_ROOT)
+  : cargoTargetRoot;
+
 declare global {
   interface Window {
     __G03_TEST_EVIDENCE__: {
@@ -404,10 +412,7 @@ test('G04A lossless recompression renders the same representative PDF.js pixels'
 });
 
 test('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer', async ({ page }) => {
-  const evidenceDirectory = resolve(
-    import.meta.dirname,
-    '..', '..', '..', 'target', 'g04b-browser-visual-evidence',
-  );
+  const evidenceDirectory = resolve(browserEvidenceRoot, 'g04b-browser-visual-evidence');
   const sourceBytes = await readFile(resolve(evidenceDirectory, 'source.png'));
   const outputBytes = await readFile(resolve(evidenceDirectory, 'output.pdf'));
   await installTransport(page, 3, outputBytes);
@@ -438,6 +443,34 @@ test('G04B images-to-PDF output matches its source pixels through the accepted P
     return { sourcePixel, renderedPixel };
   }, sourceDataUrl);
   expect(pixels.renderedPixel).toEqual(pixels.sourcePixel);
+});
+
+test('G04E1 real hidden-WebView2 output renders and extracts representative text through PDF.js', async ({ page }) => {
+  const outputBytes = await readFile(resolve(
+    browserEvidenceRoot,
+    'g04e1-browser-visual-evidence',
+    'mixed-a4-portrait.pdf',
+  ));
+  await installTransport(page, 1, outputBytes);
+  await openViewer(page);
+  await expect.poll(() => page.evaluate(() => performance
+    .getEntriesByName('g03-first-page-displayed').length)).toBeGreaterThan(0);
+  await expect(page.locator('.textLayer span').first()).toBeVisible();
+  const evidence = await page.locator('.pdf-page-surface canvas').first().evaluate((canvas) => {
+    const surface = canvas as HTMLCanvasElement;
+    const pixels = surface.getContext('2d')!.getImageData(0, 0, surface.width, surface.height).data;
+    let nonWhite = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] < 250 || pixels[index + 1] < 250 || pixels[index + 2] < 250) nonWhite += 1;
+    }
+    return { nonWhite, ratio: surface.width / surface.height };
+  });
+  const extracted = (await page.locator('.textLayer span').allTextContents()).join(' ');
+  expect(evidence.nonWhite).toBeGreaterThan(100);
+  expect(evidence.ratio).toBeGreaterThan(0.69);
+  expect(evidence.ratio).toBeLessThan(0.72);
+  expect(extracted).toContain('English');
+  expect(await page.locator('a[href]').count()).toBe(0);
 });
 
 test('G04B2 PDF-to-images renders ordered opaque pages sequentially through authenticated binary transfer', async ({ page }) => {

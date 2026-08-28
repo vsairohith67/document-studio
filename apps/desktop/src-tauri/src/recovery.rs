@@ -351,6 +351,15 @@ fn cleanup_partial(state: &AppState, job: &JobRecord) -> Result<bool, DatabaseEr
 }
 
 fn cleanup_workspace(state: &AppState, job: &JobRecord) -> Result<bool, DatabaseError> {
+    if job.operation_id == crate::text_to_pdf::TEXT_TO_PDF_OPERATION_ID
+        && crate::text_to_pdf_service::validate_recovery_renderer_workspaces(
+            &state.workspaces.root().join(&job.id),
+            &job.id,
+        )
+        .is_err()
+    {
+        return Ok(false);
+    }
     if state.workspaces.cleanup_job(&job.id).is_err() {
         return Ok(false);
     }

@@ -158,7 +158,7 @@ function Set-TestEnvironmentValue {
         [AllowNull()][string]$Value
     )
 
-    if ($null -eq $Value) {
+    if ([string]::IsNullOrEmpty($Value)) {
         Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
     }
     else {

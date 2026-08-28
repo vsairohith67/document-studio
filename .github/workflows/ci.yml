@@ -95,6 +95,7 @@ jobs:
           npm run verify:g04c2-corpus --workspace @document-studio/desktop
           npm run verify:g04c2b --workspace @document-studio/desktop
           npm run verify:g04f1 --workspace @document-studio/desktop
+          npm run verify:g04e1 --workspace @document-studio/desktop
       - name: Install locked project-local Chromium
         shell: pwsh
         env:
@@ -121,6 +122,8 @@ jobs:
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
         run: npm run test:webview2 --workspace @document-studio/desktop
+      - name: Prove hidden WebView2 TXT rendering and accepted qpdf verification
+        run: cargo test -p document-studio --lib text_to_pdf_service::tests::native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts --locked -- --ignored --exact --nocapture
       - name: Compile Tauri without a bundle
         run: |
           npm --workspace @document-studio/desktop run tauri -- build --no-bundle

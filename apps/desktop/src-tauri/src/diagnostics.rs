@@ -10,6 +10,7 @@ use crate::contracts::{
 use crate::process_sandbox::{
     authorize_qpdf_paths, ensure_production_profile, run_sandboxed_capture, SandboxLaunchSpec,
 };
+use crate::text_to_pdf::TEXT_TO_PDF_OPERATION_ID;
 use std::ffi::OsString;
 use std::time::Duration;
 use uuid::Uuid;
@@ -26,6 +27,7 @@ pub fn scan_dependencies(state: &AppState) -> Result<Vec<DependencyDiagnostic>, 
                 "diagnostic.copy".to_owned(),
                 IMAGE_TO_PDF_OPERATION_ID.to_owned(),
                 PDF_TO_IMAGES_OPERATION_ID.to_owned(),
+                TEXT_TO_PDF_OPERATION_ID.to_owned(),
                 "sha256".to_owned(),
             ],
             checked_at: checked_at.clone(),
@@ -122,6 +124,7 @@ fn qpdf_diagnostic(state: &AppState, checked_at: &str) -> DependencyDiagnostic {
             BALANCED_COMPRESSION_OPERATION_ID.to_owned(),
             IMAGE_TO_PDF_OPERATION_ID.to_owned(),
             PDF_TO_IMAGES_OPERATION_ID.to_owned(),
+            TEXT_TO_PDF_OPERATION_ID.to_owned(),
         ],
         checked_at: checked_at.to_owned(),
         error_code: result.err().map(|_| "QPDF_RUNTIME_UNAVAILABLE".to_owned()),

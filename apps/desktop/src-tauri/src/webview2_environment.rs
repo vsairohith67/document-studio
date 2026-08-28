@@ -40,19 +40,20 @@ pub(crate) fn enforce_webview2_environment_policy() {
     std::env::set_var(plan.enforced_key, plan.enforced_value);
 }
 
-#[cfg(feature = "test-runtime")]
-pub(crate) fn test_runtime_environment_evidence() -> Result<&'static [u8], &'static str> {
+pub(crate) fn webview2_environment_policy_is_current() -> bool {
     let controlled_keys = std::env::vars_os()
         .map(|(key, _)| key)
         .filter(|key| is_managed_webview2_environment_key(key))
         .collect::<Vec<_>>();
-    if controlled_keys != [OsString::from(COREWEBVIEW2_MAX_INSTANCES_ENV)] {
+    controlled_keys == [OsString::from(COREWEBVIEW2_MAX_INSTANCES_ENV)]
+        && std::env::var_os(COREWEBVIEW2_MAX_INSTANCES_ENV).as_deref()
+            == Some(OsStr::new(COREWEBVIEW2_MAX_INSTANCES_VALUE))
+}
+
+#[cfg(feature = "test-runtime")]
+pub(crate) fn test_runtime_environment_evidence() -> Result<&'static [u8], &'static str> {
+    if !webview2_environment_policy_is_current() {
         return Err("inherited WebView2 environment controls survived startup policy");
-    }
-    if std::env::var_os(COREWEBVIEW2_MAX_INSTANCES_ENV).as_deref()
-        != Some(OsStr::new(COREWEBVIEW2_MAX_INSTANCES_VALUE))
-    {
-        return Err("COREWEBVIEW2_MAX_INSTANCES does not equal 20");
     }
     Ok(b"setup reached\nWEBVIEW2_ENVIRONMENT=clean\nCOREWEBVIEW2_MAX_INSTANCES=20\n")
 }

@@ -17,13 +17,13 @@ use crate::contracts::{
     BatchCreateRequest, BatchGetRequest, BatchPreviewRequest, BatchPreviewResponse, BatchRecord,
     CancelResponse, CorePdfJobCreateRequest, DestinationGrant, DestinationGrantRequest,
     FileInspection, FilesInspectRequest, HistoryDeleteRequest, HistoryListRequest, JobIdRequest,
-    JobRecord, JobWarning, JobsCreateRequest, OperationError, OperationManifest, OperationStage,
-    PdfToImagesJobCreateRequest, PdfToImagesJobSession, SettingGetRequest, SettingRecord,
-    SettingSetRequest, SystemStatus, ViewerDocumentMetadata, ViewerRangeRequest,
-    ViewerSessionRequest, BALANCED_COMPRESSION_OPERATION_ID, BALANCED_VISUAL_READY_EVENT_NAME,
-    JOB_PROGRESS_EVENT_NAME, PDF_EXTRACT_OPERATION_ID, PDF_REMOVE_OPERATION_ID,
-    PDF_REORDER_OPERATION_ID, PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID,
-    PDF_TO_IMAGES_OPERATION_ID,
+    JobRecord, JobState, JobWarning, JobsCreateRequest, OperationError, OperationManifest,
+    OperationStage, OutputStatus, PdfToImagesJobCreateRequest, PdfToImagesJobSession,
+    SettingGetRequest, SettingRecord, SettingSetRequest, SystemStatus, TextInputMetadata,
+    TextToPdfJobCreateRequest, ViewerDocumentMetadata, ViewerRangeRequest, ViewerSessionRequest,
+    BALANCED_COMPRESSION_OPERATION_ID, BALANCED_VISUAL_READY_EVENT_NAME, JOB_PROGRESS_EVENT_NAME,
+    PDF_EXTRACT_OPERATION_ID, PDF_REMOVE_OPERATION_ID, PDF_REORDER_OPERATION_ID,
+    PDF_ROTATE_OPERATION_ID, PDF_SPLIT_OPERATION_ID, PDF_TO_IMAGES_OPERATION_ID,
 };
 use crate::diagnostic_copy::DiagnosticCopyService;
 use crate::diagnostics::scan_dependencies;
@@ -35,6 +35,8 @@ use crate::pdf_merge::PdfMergeService;
 use crate::pdf_operations::PdfPageOperationService;
 use crate::pdf_to_images::{PdfToImagesService, PixelUploadMetadata};
 use crate::recovery::{cancel_without_worker, resolve_interrupted, resolve_worker_spawn_failure};
+use crate::text_to_pdf::{TEXT_TO_PDF_OPERATION_ID, TEXT_TO_PDF_VERSION};
+use crate::text_to_pdf_service::TextToPdfService;
 
 #[tauri::command]
 pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, OperationError> {
@@ -47,7 +49,7 @@ pub fn system_status(state: State<'_, AppState>) -> Result<SystemStatus, Operati
         .unwrap_or(0);
     Ok(SystemStatus {
         product: "Document Studio".to_owned(),
-        phase: "g04f1-batch-preview".to_owned(),
+        phase: "g04e1-text-to-pdf".to_owned(),
         offline_by_default: true,
         database_schema_version: u32::try_from(version).unwrap_or(0),
         webview2_runtime_version: tauri::webview_version().ok(),
@@ -98,6 +100,23 @@ pub async fn viewer_open_dialog(
     };
     let path = selected.into_path().map_err(|_| path_error())?;
     state.viewer_sessions.open_pdf(&path).map(Some)
+}
+
+#[tauri::command]
+pub async fn text_open_dialog(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<TextInputMetadata>, OperationError> {
+    let selected = app
+        .dialog()
+        .file()
+        .add_filter("Plain-text documents", &["txt"])
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected.into_path().map_err(|_| path_error())?;
+    state.viewer_sessions.open_txt(&path).map(Some)
 }
 
 #[cfg(feature = "test-runtime")]
@@ -352,6 +371,80 @@ pub fn jobs_create_balanced(
 }
 
 #[tauri::command]
+pub fn jobs_create_text_to_pdf(
+    request: TextToPdfJobCreateRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<JobRecord, OperationError> {
+    let source = state
+        .viewer_sessions
+        .source_for_text_job(&request.input_session_id, request.input_generation)?;
+    let source_session = source.session_request();
+    let job = TextToPdfService::new(state.inner().clone()).create_job(request)?;
+    let job_id = job.id.clone();
+    let worker_job_id = job_id.clone();
+    let worker_state = state.inner().clone();
+    let cleanup_state = worker_state.clone();
+    let cleanup_session = source_session.clone();
+    let spawned = spawn_registered_worker(
+        state.inner(),
+        &job_id,
+        move |token| {
+            let service = TextToPdfService::new(worker_state);
+            let _ = service.execute_with_registered_token(&worker_job_id, source, token, |event| {
+                let _ = app.emit(JOB_PROGRESS_EVENT_NAME, event);
+            });
+            let _ = cleanup_state.viewer_sessions.close(&cleanup_session);
+        },
+        |name, worker| {
+            std::thread::Builder::new()
+                .name(name)
+                .spawn(worker)
+                .map(|_| ())
+        },
+    );
+    if let Err(error) = spawned {
+        let _ = state.viewer_sessions.close(&source_session);
+        return Err(error);
+    }
+    Ok(redact_viewer_job_paths(job))
+}
+
+#[tauri::command]
+pub fn jobs_open_text_output(
+    request: JobIdRequest,
+    state: State<'_, AppState>,
+) -> Result<ViewerDocumentMetadata, OperationError> {
+    let job = state
+        .database()
+        .get_job(&request.job_id)
+        .map_err(|_| metadata_error())?
+        .ok_or_else(job_not_found)?;
+    if job.operation_id != TEXT_TO_PDF_OPERATION_ID
+        || job.operation_version != TEXT_TO_PDF_VERSION
+        || job.state != JobState::Completed
+        || job.outputs.len() != 1
+    {
+        return Err(request_error());
+    }
+    let output = &job.outputs[0];
+    let path = output
+        .final_path
+        .as_deref()
+        .filter(|_| output.status == OutputStatus::Published)
+        .map(Path::new)
+        .ok_or_else(request_error)?;
+    state.viewer_sessions.open_verified_pdf(
+        path,
+        output.size_bytes.ok_or_else(published_output_error)?,
+        output
+            .sha256
+            .as_deref()
+            .ok_or_else(published_output_error)?,
+    )
+}
+
+#[tauri::command]
 pub async fn pdf_to_images_submit_page(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -600,7 +693,10 @@ pub fn history_list(
 }
 
 fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
-    let balanced = job.operation_id == BALANCED_COMPRESSION_OPERATION_ID;
+    let may_expose_published_output = matches!(
+        job.operation_id.as_str(),
+        BALANCED_COMPRESSION_OPERATION_ID | TEXT_TO_PDF_OPERATION_ID
+    );
     if !matches!(
         job.operation_id.as_str(),
         PDF_EXTRACT_OPERATION_ID
@@ -610,6 +706,7 @@ fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
             | PDF_SPLIT_OPERATION_ID
             | PDF_TO_IMAGES_OPERATION_ID
             | BALANCED_COMPRESSION_OPERATION_ID
+            | TEXT_TO_PDF_OPERATION_ID
     ) {
         return job;
     }
@@ -621,7 +718,9 @@ fn redact_viewer_job_paths(mut job: JobRecord) -> JobRecord {
     for output in &mut job.outputs {
         output.staging_path = None;
         output.partial_path = None;
-        if !balanced || output.status != crate::contracts::OutputStatus::Published {
+        if !may_expose_published_output
+            || output.status != crate::contracts::OutputStatus::Published
+        {
             output.final_path = None;
         }
     }
@@ -751,6 +850,16 @@ fn job_not_found() -> OperationError {
         "The job is not available",
         "Refresh job history and try again.",
         OperationStage::Recovery,
+        false,
+    )
+}
+
+fn published_output_error() -> OperationError {
+    OperationError::safe(
+        "TXT_PUBLISHED_OUTPUT_CHANGED",
+        "The published TXT PDF changed",
+        "The saved file no longer matches its verified publication evidence.",
+        OperationStage::Verify,
         false,
     )
 }

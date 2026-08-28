@@ -16,6 +16,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["resources/qpdf/12.3.2/**/*"]
+    "resources": ["resources/qpdf/12.3.2/**/*", "resources/fonts/g04e1/**/*"]
   }
 }

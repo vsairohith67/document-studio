@@ -54,6 +54,33 @@ G04B's images-to-PDF writer adds these exact crates from crates.io:
 
 Their exact registry checksums and boundaries are recorded in ADR-013 and the dependency register. A distributable build must regenerate complete transitive notices from the accepted `Cargo.lock`. G04B2 reuses accepted `pdfjs-dist` 6.2.108 for rendering and `image` 0.25.10 for encoding; it does not bundle PDFium, MuPDF, Poppler, PDFBox, libvips or another raster renderer.
 
+### G04E1 Windows COM projections
+
+- `webview2-com` 0.38.2 is MIT, from the `wravery/webview2-rs`
+  project. Document Studio declares it directly on Windows for generated
+  WebView2 resource-interception and `PrintToPdf` COM interfaces. WebView2
+  itself remains the Windows platform-provided Evergreen runtime; no runtime
+  binary is bundled or downloaded.
+- Microsoft `windows` 0.61.3 is MIT OR Apache-2.0. Document Studio enables
+  only `Win32_System_Com` and `Win32_UI_Shell` for typed `IStream` and
+  `SHCreateMemStream` responses.
+
+The exact registry checksums are recorded in ADR-018 and the dependency
+register. These direct edges do not add a second resolved package version.
+Release packaging must regenerate the complete transitive notice inventory
+from the accepted lockfile; any version or feature change requires a new
+dependency review.
+
+### G04E1 packaged Noto Regular fonts
+
+Document Studio includes these three unmodified static hinted fonts under the SIL Open Font License 1.1:
+
+- `NotoSans-Regular.ttf`, version 2.015, copyright 2022 The Noto Project Authors.
+- `NotoSansDevanagari-Regular.ttf`, version 2.006, copyright 2022 The Noto Project Authors.
+- `NotoSansTelugu-Regular.ttf`, version 2.005, copyright 2022 The Noto Project Authors.
+
+The complete OFL-1.1 text and font-specific copyright statement accompany each file under `apps/desktop/src-tauri/resources/fonts/g04e1/licenses/`. Exact source repository/tag/commit/archive provenance, archive and file SHA-256 values, names, cmap evidence and OpenType tables are recorded in `font-manifest.json` and the dependency register. The fonts are not installed globally, altered, pre-subset or downloaded at runtime; Chromium PDF subset embedding is the only permitted subsetting.
+
 ### G04C2 public-domain photographic test corpus
 
 G04C2 commits six 1280px JPEG derivatives by George Chernilevsky solely as offline quality and compression fixtures. Each source page marks the work PD-self/Public domain. Exact revision identity, resolved binary URL, dimensions, byte size and SHA-256 are preserved in the corpus manifest.

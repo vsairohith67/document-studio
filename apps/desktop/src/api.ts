@@ -33,6 +33,8 @@ import type {
   SettingRecord,
   SettingSetRequest,
   SystemStatus,
+  TextInputMetadata,
+  TextToPdfJobCreateRequest,
   ViewerDocumentMetadata,
   ViewerRangeRequest,
   ViewerSessionRequest,
@@ -96,6 +98,11 @@ export const api = {
         ? Promise.resolve(() => undefined)
         : listen('document-studio-viewer-open-failed-v1', (event) => handler(event.payload)),
   },
+  text: {
+    open: () => invoke<TextInputMetadata | null>('text_open_dialog'),
+    openOutput: (jobId: string) =>
+      invoke<ViewerDocumentMetadata>('jobs_open_text_output', { request: { jobId } }),
+  },
   dialogs: {
     async selectPdfInputs(): Promise<string[]> {
       const selected = await open({
@@ -145,6 +152,8 @@ export const api = {
     },
     createBalanced: (request: BalancedCompressionJobCreateRequest) =>
       invoke<JobRecord>('jobs_create_balanced', { request }),
+    createTextToPdf: (request: TextToPdfJobCreateRequest) =>
+      invoke<JobRecord>('jobs_create_text_to_pdf', { request }),
     submitBalancedPixels(
       session: BalancedCompressionVisualSession,
       ticket: BalancedRenderPageTicket,

@@ -104,6 +104,7 @@ h2 { margin-bottom: var(--ds-core-space-2); font-size: 1.15rem; letter-spacing: 
 .choice-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--ds-core-space-2); margin: var(--ds-core-space-4) 0; padding: 0; border: 0; }
 .choice-grid legend { grid-column: 1 / -1; margin-bottom: var(--ds-core-space-2); color: var(--ds-core-color-muted); font-size: .78rem; font-weight: 750; text-transform: uppercase; letter-spacing: .06em; }
 .choice-grid label { display: flex; align-items: center; justify-content: center; gap: var(--ds-core-space-2); min-height: 42px; padding: var(--ds-core-space-2); border: 1px solid var(--ds-light-border); border-radius: var(--ds-core-radius-sm); background: var(--ds-light-background); font-size: .82rem; font-weight: 700; }
+.choice-grid.two-choice { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .output-preview-list { display: grid; gap: var(--ds-core-space-2); max-height: 340px; margin: var(--ds-core-space-3) 0 0; padding: 0; overflow: auto; list-style: none; }
 .output-preview-list > li { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: var(--ds-core-space-2); padding: var(--ds-core-space-2); border: 1px solid var(--ds-light-border); border-radius: var(--ds-core-radius-sm); background: var(--ds-light-background); content-visibility: auto; }
 .output-preview-list > li > div:not(.row-actions) { min-width: 0; display: grid; gap: var(--ds-core-space-1); }

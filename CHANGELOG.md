@@ -2,6 +2,22 @@
 
 All notable planning-package and software releases are recorded here.
 
+## 0.8.0-g04e1-text-to-pdf-dev — 2026-08-28
+
+### Added
+
+- Added the owner-gated `text.to-pdf@1.0.0` implementation for exactly one local strict UTF-8 `.txt` input, A4/Letter and portrait/landscape output.
+- Added a dedicated hidden Rust-owned WebView2 STA with exact `.invalid` origin interception, in-memory canonical HTML/CSS/font responses, native readiness accounting, fail-closed event denials and private `PrintToPdf` staging.
+- Added three byte-identical static Noto Regular fonts and their OFL-1.1 notices, a machine-readable provenance/cmap/OpenType manifest and pre-render validators.
+- Added exact Windows-only direct dependencies `webview2-com` 0.38.2 and `windows` 0.61.3 with only `Win32_System_Com` and `Win32_UI_Shell`; both already existed in the accepted lockfile.
+- Added strict input/Unicode/shaping bounds, qpdf 12.3.2 page-only normalization, PDF security/page/font verification, source-immutability checks, no-overwrite publication, recovery, cancellation and opaque TXT IPC/UI.
+- Added the G04E1 compile gate, native WebView2/qpdf acceptance test, repository boundary verifier, ADR-018 and implementation record.
+
+### Boundaries
+
+- No database migration, Office conversion, Markdown/HTML/CSV/JSON/XML input, batch execution, system font installation, HTTP server, runtime download, shell path, package, tag, release or deployment.
+- This is an unmerged candidate and must stop at the owner merge gate.
+
 ## 0.6.0-g04c2a-completion-outcomes - unreleased
 
 - Added migration 6 with a strict metadata-only `job_completion_outcomes` table and no backfill or changes to migration checksums 1–5.
