@@ -113,7 +113,7 @@ G04B2 adopts no new package. `pdf.to-images@1.0.0` reuses the already pinned loc
 
 ## G04E1 hidden WebView2 TXT renderer adoption
 
-[ADR-018](adr/ADR-018-hidden-webview2-text-pdf-renderer.md) approves exactly two
+[ADR-019](adr/ADR-019-hidden-webview2-text-pdf-renderer.md) approves exactly two
 direct Windows-target manifest edges. Both packages were already present in
 the accepted `Cargo.lock`; resolution changes only the Document Studio package
 dependency list and introduces no package, version, checksum, or registry

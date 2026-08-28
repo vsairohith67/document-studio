@@ -39,7 +39,7 @@ G01 proved the safety architecture before a production document engine was adopt
 7. Read `docs/implementation-log/G04B-image-pdf-conversion.md`, `docs/implementation-log/G04B2-pdf-to-images.md` and ADR-013 for the independently gated conversion paths.
 8. Read `docs/implementation-log/G04C2-corpus-recovery.md`, `docs/implementation-log/G04C2B-balanced-compression.md` and ADR-016 for the frozen corpus and owner-gated balanced path.
 9. Read `docs/implementation-log/G04F1-batch-preview-foundation.md` and ADR-017 for the batch preview/atomic metadata boundary.
-10. Read `docs/implementation-log/G04E1-txt-to-pdf.md` and ADR-018 for the hidden intercepted TXT renderer, Unicode/font gates and verification evidence.
+10. Read `docs/implementation-log/G04E1-txt-to-pdf.md` and ADR-019 for the hidden intercepted TXT renderer, Unicode/font gates and verification evidence.
 
 ## Validate and run on Windows
 

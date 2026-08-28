@@ -11,7 +11,7 @@ All notable planning-package and software releases are recorded here.
 - Added three byte-identical static Noto Regular fonts and their OFL-1.1 notices, a machine-readable provenance/cmap/OpenType manifest and pre-render validators.
 - Added exact Windows-only direct dependencies `webview2-com` 0.38.2 and `windows` 0.61.3 with only `Win32_System_Com` and `Win32_UI_Shell`; both already existed in the accepted lockfile.
 - Added strict input/Unicode/shaping bounds, qpdf 12.3.2 page-only normalization, PDF security/page/font verification, source-immutability checks, no-overwrite publication, recovery, cancellation and opaque TXT IPC/UI.
-- Added the G04E1 compile gate, native WebView2/qpdf acceptance test, repository boundary verifier, ADR-018 and implementation record.
+- Added the G04E1 compile gate, native WebView2/qpdf acceptance test, repository boundary verifier, ADR-019 and implementation record.
 - Closed exact-head review findings with empty TXT source-path persistence, cumulative resource caps, one 600-second deadline, cancellation-aware callback guards, category-strict joiners, interrupted lock-safe recovery, pre-job UI ownership cleanup and a CI-run real WebView2 fault/cancellation matrix.
 
 ### Boundaries

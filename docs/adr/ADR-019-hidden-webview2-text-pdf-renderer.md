@@ -1,4 +1,4 @@
-# ADR-018: Hidden intercepted WebView2 TXT-to-PDF renderer
+# ADR-019: Hidden intercepted WebView2 TXT-to-PDF renderer
 
 Status: Accepted for G04E1 implementation; owner merge pending
 

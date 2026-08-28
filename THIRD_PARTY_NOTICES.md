@@ -65,7 +65,7 @@ Their exact registry checksums and boundaries are recorded in ADR-013 and the de
   only `Win32_System_Com` and `Win32_UI_Shell` for typed `IStream` and
   `SHCreateMemStream` responses.
 
-The exact registry checksums are recorded in ADR-018 and the dependency
+The exact registry checksums are recorded in ADR-019 and the dependency
 register. These direct edges do not add a second resolved package version.
 Release packaging must regenerate the complete transitive notice inventory
 from the accepted lockfile; any version or feature change requires a new
