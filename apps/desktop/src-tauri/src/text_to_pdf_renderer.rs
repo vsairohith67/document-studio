@@ -59,12 +59,18 @@ type EventRegistrationToken = i64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RendererCheckpoint {
     StaInitialized,
+    #[cfg(test)]
+    EnvironmentCallback,
     EnvironmentCreated,
+    #[cfg(test)]
+    ControllerCallback,
     ControllerCreated,
     BoundaryInstalled,
     NavigationStarted,
     ReadinessCompleted,
     PrintStarted,
+    #[cfg(test)]
+    PrintCallback,
     PrintCompleted,
 }
 
@@ -75,6 +81,8 @@ enum RendererTestAction {
     Timeout,
     Crash,
     Cancel,
+    WithholdCallback,
+    FailCallback,
 }
 
 #[cfg(test)]
@@ -209,6 +217,7 @@ fn test_checkpoint(
             authority.invalidate();
             Err(RendererFailure::Cancelled)
         }
+        RendererTestAction::WithholdCallback | RendererTestAction::FailCallback => Ok(()),
     }
 }
 
@@ -218,6 +227,17 @@ fn test_checkpoint(
     _checkpoint: RendererCheckpoint,
 ) -> Result<(), RendererFailure> {
     Ok(())
+}
+
+#[cfg(test)]
+fn test_callback_action(checkpoint: RendererCheckpoint) -> Option<RendererTestAction> {
+    RENDERER_TEST_FAULT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|fault| {
+            fault.and_then(|(expected, action)| (expected == checkpoint).then_some(action))
+        })
 }
 
 pub fn render_text_pdf(
@@ -390,12 +410,29 @@ fn render_on_initialized_sta(
         print_settings.SetShouldPrintHeaderAndFooter(false)?;
     }
     let (print_tx, print_rx) = mpsc::channel();
+    #[cfg(test)]
+    let withheld_print_sender = print_tx.clone();
     let expected_job = authority.job_id.clone();
     let expected_generation = authority.generation.clone();
     let expected_completion_token = authority.completion_token.clone();
     let expected_version = authority.lifecycle_version;
     let print_authority = authority.clone();
     let print_handler = PrintToPdfCompletedHandler::create(Box::new(move |status, success| {
+        #[cfg(test)]
+        if let Some(action) = test_callback_action(RendererCheckpoint::PrintCallback) {
+            match action {
+                RendererTestAction::WithholdCallback => return Ok(()),
+                RendererTestAction::FailCallback => {
+                    if print_authority.complete_once() {
+                        let _ = print_tx.send(Err(windows::core::Error::from(
+                            windows::Win32::Foundation::E_FAIL,
+                        )));
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         let allowed =
             print_authority.is_current(&expected_job, &expected_generation, expected_version)
                 && print_authority.completion_token == expected_completion_token
@@ -409,13 +446,16 @@ fn render_on_initialized_sta(
     test_checkpoint(authority, RendererCheckpoint::PrintStarted)?;
     // SAFETY: callback carries generation ownership; it reports only to this STA.
     unsafe { webview7.PrintToPdf(&output, &print_settings, &print_handler) }?;
-    let printed = receive_with_pump(
+    let printed_result = receive_with_pump(
         &print_rx,
         authority,
         PRINT_TIMEOUT,
         operation_deadline,
         Some(&controller),
-    )??;
+    );
+    #[cfg(test)]
+    drop(withheld_print_sender);
+    let printed = printed_result??;
     if !printed {
         let _ = unsafe { controller.Close() };
         return Err(RendererFailure::Native);
@@ -451,6 +491,8 @@ fn create_environment(
         options.set_are_browser_extensions_enabled(false);
     }
     let (sender, receiver) = mpsc::channel();
+    #[cfg(test)]
+    let withheld_sender = sender.clone();
     let expected_job = authority.job_id.clone();
     let expected_generation = authority.generation.clone();
     let expected_completion_token = authority.completion_token.clone();
@@ -458,6 +500,19 @@ fn create_environment(
     let callback_authority = authority.clone();
     let handler = CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(
         move |status, environment| {
+            #[cfg(test)]
+            if let Some(action) = test_callback_action(RendererCheckpoint::EnvironmentCallback) {
+                match action {
+                    RendererTestAction::WithholdCallback => return Ok(()),
+                    RendererTestAction::FailCallback => {
+                        let _ = sender.send(Err(windows::core::Error::from(
+                            windows::Win32::Foundation::E_FAIL,
+                        )));
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
             if !callback_authority.owns_generation(
                 &expected_job,
                 &expected_generation,
@@ -488,14 +543,16 @@ fn create_environment(
             &handler,
         )
     }?;
-    receive_with_pump(
+    let result = receive_with_pump(
         &receiver,
         authority,
         CREATION_TIMEOUT,
         operation_deadline,
         None,
-    )?
-    .map_err(RendererFailure::from)
+    );
+    #[cfg(test)]
+    drop(withheld_sender);
+    result?.map_err(RendererFailure::from)
 }
 
 fn create_controller(
@@ -505,6 +562,8 @@ fn create_controller(
     operation_deadline: Instant,
 ) -> Result<ICoreWebView2Controller, RendererFailure> {
     let (sender, receiver) = mpsc::channel();
+    #[cfg(test)]
+    let withheld_sender = sender.clone();
     let expected_job = authority.job_id.clone();
     let expected_generation = authority.generation.clone();
     let expected_completion_token = authority.completion_token.clone();
@@ -512,6 +571,24 @@ fn create_controller(
     let callback_authority = authority.clone();
     let handler = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(
         move |status, controller| {
+            #[cfg(test)]
+            if let Some(action) = test_callback_action(RendererCheckpoint::ControllerCallback) {
+                match action {
+                    RendererTestAction::WithholdCallback | RendererTestAction::FailCallback => {
+                        if let Some(controller) = controller.as_ref() {
+                            // SAFETY: the withheld/failed controller belongs to this callback STA.
+                            let _ = unsafe { controller.Close() };
+                        }
+                        if action == RendererTestAction::FailCallback {
+                            let _ = sender.send(Err(windows::core::Error::from(
+                                windows::Win32::Foundation::E_FAIL,
+                            )));
+                        }
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
             if !callback_authority.owns_generation(
                 &expected_job,
                 &expected_generation,
@@ -532,14 +609,16 @@ fn create_controller(
     ));
     // SAFETY: parent is the exact hidden window owned by this STA.
     unsafe { environment.CreateCoreWebView2Controller(parent, &handler) }?;
-    receive_with_pump(
+    let result = receive_with_pump(
         &receiver,
         authority,
         CREATION_TIMEOUT,
         operation_deadline,
         None,
-    )?
-    .map_err(RendererFailure::from)
+    );
+    #[cfg(test)]
+    drop(withheld_sender);
+    result?.map_err(RendererFailure::from)
 }
 
 fn browser_version(environment: &ICoreWebView2Environment) -> Result<String, RendererFailure> {
@@ -1593,6 +1672,42 @@ mod tests {
                 RendererTestAction::Cancel,
                 "CANCELLED",
             ),
+            (
+                15,
+                RendererCheckpoint::EnvironmentCallback,
+                RendererTestAction::WithholdCallback,
+                "TXT_RENDERER_TIMEOUT",
+            ),
+            (
+                16,
+                RendererCheckpoint::EnvironmentCallback,
+                RendererTestAction::FailCallback,
+                "TXT_RENDERER_FAILED",
+            ),
+            (
+                17,
+                RendererCheckpoint::ControllerCallback,
+                RendererTestAction::WithholdCallback,
+                "TXT_RENDERER_TIMEOUT",
+            ),
+            (
+                18,
+                RendererCheckpoint::ControllerCallback,
+                RendererTestAction::FailCallback,
+                "TXT_RENDERER_FAILED",
+            ),
+            (
+                19,
+                RendererCheckpoint::PrintCallback,
+                RendererTestAction::WithholdCallback,
+                "TXT_RENDERER_TIMEOUT",
+            ),
+            (
+                20,
+                RendererCheckpoint::PrintCallback,
+                RendererTestAction::FailCallback,
+                "TXT_RENDERER_FAILED",
+            ),
         ] {
             let root = lane.path().join(format!("case-{index}"));
             let udf = root.join("udf");
@@ -1620,7 +1735,15 @@ mod tests {
                         page_size: crate::text_to_pdf::TextPageSize::A4,
                         orientation: crate::text_to_pdf::TextOrientation::Portrait,
                     },
-                    operation_deadline: Instant::now() + Duration::from_secs(120),
+                    operation_deadline: Instant::now()
+                        + if action == RendererTestAction::WithholdCallback {
+                            match checkpoint {
+                                RendererCheckpoint::PrintCallback => Duration::from_secs(15),
+                                _ => Duration::from_secs(3),
+                            }
+                        } else {
+                            Duration::from_secs(120)
+                        },
                 },
                 token,
             )
@@ -1629,6 +1752,19 @@ mod tests {
             assert_eq!(error.code, expected_code, "{checkpoint:?} {action:?}");
             if raw_pdf_path.exists() {
                 fs::remove_file(raw_pdf_path).unwrap();
+            }
+            let cleanup_deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match fs::remove_dir_all(&root) {
+                    Ok(()) => break,
+                    Err(error) if Instant::now() < cleanup_deadline => {
+                        let _ = error;
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(error) => {
+                        panic!("owned renderer cleanup failed for {checkpoint:?}: {error}")
+                    }
+                }
             }
         }
     }

@@ -869,7 +869,7 @@ for required_boundary in [
 ]:
     if required_boundary not in g04e1_renderer:
         raise SystemExit(f'G04E1 WebView2 boundary is missing: {required_boundary}')
-g04e1_renderer_production = g04e1_renderer.split('#[cfg(test)]', 1)[0]
+g04e1_renderer_production = g04e1_renderer.rsplit('#[cfg(test)]', 1)[0]
 for forbidden_boundary in [
     'ExecuteScript', 'QueryInterface', 'transmute', 'AddRef',
     'http://', 'localhost', '127.0.0.1', 'file://', 'data:',
@@ -904,6 +904,13 @@ if desktop_scripts.get('verify:g04e1') != 'powershell -NoProfile -ExecutionPolic
     raise SystemExit('G04E1 boundary verifier is not registered exactly')
 if 'npm run verify:g04e1 --workspace @document-studio/desktop' not in ci_text:
     raise SystemExit('G04E1 boundary verifier is not wired into exact-head CI')
+for native_test in [
+    'native_renderer_fault_matrix_closes_exact_generation_at_bounded_checkpoints',
+    'native_text_service_cancellation_matrix_cleans_owned_state_and_preserves_commits',
+    'native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts',
+]:
+    if native_test not in ci_text:
+        raise SystemExit(f'G04E1 native exact-head CI proof is missing: {native_test}')
 if any(path.name.startswith('0009_') for path in (ROOT / 'apps/desktop/src-tauri/migrations').glob('*.sql')):
     raise SystemExit('G04E1 added an unauthorized database migration')
 

@@ -125,6 +125,7 @@ jobs:
       - name: Prove hidden WebView2 TXT rendering and accepted qpdf verification
         run: |
           cargo test -p document-studio --lib text_to_pdf_renderer::tests::native_renderer_fault_matrix_closes_exact_generation_at_bounded_checkpoints --locked -- --ignored --exact --nocapture
+          cargo test -p document-studio --lib text_to_pdf_service::tests::native_text_service_cancellation_matrix_cleans_owned_state_and_preserves_commits --locked -- --ignored --exact --nocapture
           cargo test -p document-studio --lib text_to_pdf_service::tests::native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts --locked -- --ignored --exact --nocapture
       - name: Compile Tauri without a bundle
         run: |

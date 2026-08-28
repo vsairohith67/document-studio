@@ -115,7 +115,7 @@ $renderer = Get-Content -Raw (Join-Path $tauriRoot 'src\text_to_pdf_renderer.rs'
 $service = Get-Content -Raw (Join-Path $tauriRoot 'src\text_to_pdf_service.rs')
 $qpdf = Get-Content -Raw (Join-Path $tauriRoot 'src\qpdf.rs')
 $rendererProduction = $renderer.Substring(0, $renderer.LastIndexOf('#[cfg(test)]'))
-$serviceProduction = $service.Substring(0, $service.IndexOf('#[cfg(test)]'))
+$serviceProduction = $service.Substring(0, $service.LastIndexOf('#[cfg(test)]'))
 
 Require-Text $textCore @(
   'TXT_MAX_RAW_BYTES: usize = 8_388_608', 'TXT_MAX_LOGICAL_LINES: usize = 100_000',
@@ -162,7 +162,8 @@ Require-Text $serviceProduction @(
   'interpret_encryption_check_exit', 'FontFile2', '/MediaBox', '/CropBox',
   '/Rotate', '/OpenAction', '/JavaScript', '/AcroForm', '/Names', 'UDF_MARKER',
   'validate_recovery_renderer_workspaces', 'cleanup_renderer_workspace', 'clear_unpublished_intent',
-  'DependencyDiagnostic', 'id: "webview2"', 'runtime_version'
+  'DependencyDiagnostic', 'id: "webview2"', 'runtime_version',
+  'check_deadline_until_publication_commit'
 ) 'verification, publication, recovery and diagnostic boundary'
 foreach ($forbidden in @('std::process::Command', 'cmd.exe', 'powershell.exe', 'ShellExecute', 'runtime download')) {
   if ($rendererProduction.Contains($forbidden) -or $serviceProduction.Contains($forbidden)) {
@@ -221,5 +222,10 @@ $ci = Get-Content -Raw (Join-Path $repoRoot '.github\workflows\ci.yml')
 if (!$ci.Contains('npm run verify:g04e1 --workspace @document-studio/desktop')) {
   throw 'G04E1 boundary verifier is not wired into exact-head CI.'
 }
+Require-Text $ci @(
+  'native_renderer_fault_matrix_closes_exact_generation_at_bounded_checkpoints',
+  'native_text_service_cancellation_matrix_cleans_owned_state_and_preserves_commits',
+  'native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts'
+) 'native exact-head CI proof'
 
 Write-Output 'G04E1 exact dependencies, immutable fonts/OFL, strict UTF-8 and Unicode bounds, hidden intercepted WebView2, no-network callbacks, qpdf verification/publication/recovery, opaque IPC, accessible UI, no migration and minimum capability boundaries verified.'

@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -53,6 +56,22 @@ const QPDF_JSON_CAPTURE_LIMIT: usize = 32 * 1024 * 1024;
 const TOTAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const UDF_MARKER: &str = ".document-studio-txt-renderer-v1";
 const TOTAL_PROGRESS_STEPS: u64 = 18;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceCheckpoint {
+    QpdfNormalization,
+    OutputVerification,
+    PrePublication,
+    PostPublicationAudit,
+    Cleanup,
+}
+
+#[cfg(test)]
+static SERVICE_TEST_CANCELLATION: OnceLock<Mutex<Option<(String, ServiceCheckpoint)>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+static PUBLICATION_COMMIT_TEST_DELAY: OnceLock<Mutex<Option<(String, Duration)>>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct TextToPdfService {
@@ -452,6 +471,7 @@ impl TextToPdfService {
             Path::new(TEXT_NORMALIZED_STAGING_RELATIVE_PATH),
         )
         .map_err(|_| verify_error("TXT_QPDF_ARGUMENTS_INVALID"))?;
+        service_test_checkpoint(&self.state, job_id, ServiceCheckpoint::QpdfNormalization);
         let normalized_execution = run_qpdf(
             &runtime,
             &workspace,
@@ -478,6 +498,8 @@ impl TextToPdfService {
         if raw_verified.pages != normalized_verified.pages {
             return Err(verify_error("TXT_PAGE_COUNT_MISMATCH"));
         }
+        service_test_checkpoint(&self.state, job_id, ServiceCheckpoint::OutputVerification);
+        check_cancelled(token, OperationStage::Verify)?;
         inspect_pdf_security(
             &runtime,
             &workspace,
@@ -513,6 +535,7 @@ impl TextToPdfService {
 
         let destination = canonical_directory(Path::new(&verifying.destination_directory))
             .map_err(|_| path_error())?;
+        service_test_checkpoint(&self.state, job_id, ServiceCheckpoint::PrePublication);
         self.publish(
             job_id,
             &verifying,
@@ -525,7 +548,8 @@ impl TextToPdfService {
             operation_deadline,
             on_event,
         )?;
-        check_deadline(operation_deadline, OperationStage::Audit)?;
+        service_test_checkpoint(&self.state, job_id, ServiceCheckpoint::PostPublicationAudit);
+        check_deadline_until_publication_commit(operation_deadline, token, OperationStage::Audit)?;
         self.progress(
             job_id,
             JobState::Publishing,
@@ -538,7 +562,12 @@ impl TextToPdfService {
             on_event,
         )?;
         cleanup_renderer_workspace(&workspace, &renderer_workspace)?;
-        check_deadline(operation_deadline, OperationStage::Cleanup)?;
+        service_test_checkpoint(&self.state, job_id, ServiceCheckpoint::Cleanup);
+        check_deadline_until_publication_commit(
+            operation_deadline,
+            token,
+            OperationStage::Cleanup,
+        )?;
         self.state
             .workspaces
             .cleanup_job(job_id)
@@ -558,7 +587,11 @@ impl TextToPdfService {
             false,
             on_event,
         )?;
-        check_deadline(operation_deadline, OperationStage::Cleanup)?;
+        check_deadline_until_publication_commit(
+            operation_deadline,
+            token,
+            OperationStage::Cleanup,
+        )?;
         let completed = self.transition(
             job_id,
             JobState::Publishing,
@@ -687,7 +720,9 @@ impl TextToPdfService {
                         verified_size,
                         verified_hash,
                     )
-                    .map_err(|_| publication_io("publication intent could not be stored"))
+                    .map_err(|_| publication_io("publication intent could not be stored"))?;
+                publication_commit_test_delay(job_id);
+                Ok(())
             },
         )
         .map_err(|error| {
@@ -700,13 +735,11 @@ impl TextToPdfService {
                 publication_error(error)
             }
         })?;
-        check_deadline(operation_deadline, OperationStage::Publish)?;
         let (final_size, final_hash) =
             hash_file(&result.final_path).map_err(|_| verify_error("TXT_FINAL_REOPEN_FAILED"))?;
         if final_size != verified_size || final_hash != verified_hash {
             return Err(verify_error("TXT_FINAL_HASH_MISMATCH"));
         }
-        check_deadline(operation_deadline, OperationStage::Publish)?;
         self.state
             .database()
             .set_output_published(
@@ -953,6 +986,49 @@ fn check_deadline(deadline: Instant, stage: OperationStage) -> Result<(), Operat
         Ok(())
     }
 }
+
+fn check_deadline_until_publication_commit(
+    deadline: Instant,
+    token: &CancellationToken,
+    stage: OperationStage,
+) -> Result<(), OperationError> {
+    if token.commit_started() {
+        return Ok(());
+    }
+    check_deadline(deadline, stage)
+}
+
+#[cfg(test)]
+fn service_test_checkpoint(state: &AppState, job_id: &str, checkpoint: ServiceCheckpoint) {
+    let configured = SERVICE_TEST_CANCELLATION
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    if configured.as_ref() == Some(&(job_id.to_owned(), checkpoint)) {
+        let _ = state.cancellations.request(job_id);
+    }
+}
+
+#[cfg(not(test))]
+fn service_test_checkpoint(_state: &AppState, _job_id: &str, _checkpoint: ServiceCheckpoint) {}
+
+#[cfg(test)]
+fn publication_commit_test_delay(job_id: &str) {
+    let configured = PUBLICATION_COMMIT_TEST_DELAY
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|value| value.clone());
+    if let Some((expected_job, delay)) = configured {
+        if expected_job == job_id {
+            thread::sleep(delay);
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn publication_commit_test_delay(_job_id: &str) {}
 
 fn bounded_timeout(
     deadline: Instant,
@@ -1890,6 +1966,108 @@ mod tests {
     }
 
     #[test]
+    fn deadline_crossing_after_publication_commit_records_truthful_terminal_evidence() {
+        let lane = tempfile::tempdir().unwrap();
+        let app_data = lane.path().join("app-data");
+        let destination = lane.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        let input_path = lane.path().join("deadline.txt");
+        fs::write(&input_path, "publication deadline boundary").unwrap();
+        let state = crate::initialize_runtime(&app_data, Utc::now()).unwrap();
+        let input = state.viewer_sessions.open_txt(&input_path).unwrap();
+        let grant = state
+            .viewer_sessions
+            .grant_destination(&destination)
+            .unwrap();
+        let source = state
+            .viewer_sessions
+            .source_for_text_job(&input.session_id, input.generation)
+            .unwrap();
+        let service = TextToPdfService::new(state.clone());
+        let created = service
+            .create_job(crate::contracts::TextToPdfJobCreateRequest {
+                operation_id: TEXT_TO_PDF_OPERATION_ID.to_owned(),
+                input_session_id: input.session_id,
+                input_generation: input.generation,
+                destination_grant_id: grant.grant_id,
+                requested_output_name: "deadline.pdf".to_owned(),
+                settings: TextToPdfSettings {
+                    page_size: crate::text_to_pdf::TextPageSize::A4,
+                    orientation: crate::text_to_pdf::TextOrientation::Portrait,
+                },
+            })
+            .unwrap();
+        let token = state.cancellations.register(&created.id);
+        let (_, source_hash) = source.read_all_bounded(TXT_MAX_RAW_BYTES, &token).unwrap();
+        state
+            .database()
+            .update_input_hash(&created.id, 0, &source_hash)
+            .unwrap();
+        advance_text_job(&state, &created.id, JobState::Verifying);
+        let verifying = state.database().get_job(&created.id).unwrap().unwrap();
+        let staging = lane.path().join("verified.pdf");
+        fs::write(&staging, b"verified-private-pdf-bytes").unwrap();
+        let (verified_size, verified_hash) = hash_file(&staging).unwrap();
+        state
+            .database()
+            .set_output_staging(
+                &created.id,
+                &staging.to_string_lossy(),
+                verified_size,
+                &verified_hash,
+                &timestamp(),
+            )
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        *PUBLICATION_COMMIT_TEST_DELAY
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap() = Some((created.id.clone(), Duration::from_millis(2_200)));
+        service
+            .publish(
+                &created.id,
+                &verifying,
+                &staging,
+                &destination,
+                &source,
+                verified_size,
+                &verified_hash,
+                &token,
+                deadline,
+                &mut |_| {},
+            )
+            .unwrap();
+        *PUBLICATION_COMMIT_TEST_DELAY.get().unwrap().lock().unwrap() = None;
+
+        assert!(Instant::now() >= deadline);
+        assert!(token.commit_started());
+        check_deadline_until_publication_commit(deadline, &token, OperationStage::Audit).unwrap();
+        check_deadline_until_publication_commit(deadline, &token, OperationStage::Cleanup).unwrap();
+        let published = state.database().get_job(&created.id).unwrap().unwrap();
+        let output = &published.outputs[0];
+        assert_eq!(output.status, OutputStatus::Published);
+        let final_path = Path::new(output.final_path.as_deref().unwrap());
+        assert_eq!(
+            hash_file(final_path).unwrap(),
+            (verified_size, verified_hash)
+        );
+        state
+            .database()
+            .clear_staging_path(&created.id, Some(&staging.to_string_lossy()))
+            .unwrap();
+        let completed = service
+            .transition(
+                &created.id,
+                JobState::Publishing,
+                JobState::Completed,
+                OperationStage::Cleanup,
+            )
+            .unwrap();
+        assert_eq!(completed.state, JobState::Completed);
+        assert!(final_path.exists());
+    }
+
+    #[test]
     fn pre_cancelled_job_publishes_nothing_and_reconciles_terminal_state() {
         let lane = tempfile::tempdir().unwrap();
         let app_data = lane.path().join("app-data");
@@ -2314,6 +2492,96 @@ mod tests {
                     generation: input.generation,
                 })
                 .unwrap();
+        }
+        state.viewer_sessions.close_all();
+    }
+
+    #[test]
+    #[ignore = "runs real WebView2/qpdf cancellation at service-owned checkpoints"]
+    fn native_text_service_cancellation_matrix_cleans_owned_state_and_preserves_commits() {
+        crate::webview2_environment::enforce_webview2_environment_policy();
+        let lane = tempfile::tempdir().unwrap();
+        let app_data = lane.path().join("app-data");
+        let destination = lane.path().join("published");
+        fs::create_dir(&destination).unwrap();
+        let input_path = lane.path().join("cancellation.txt");
+        fs::write(&input_path, "English हिन्दी తెలుగు").unwrap();
+        let state = crate::initialize_runtime_with_resources(
+            &app_data,
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            Utc::now(),
+        )
+        .unwrap();
+        let input = state.viewer_sessions.open_txt(&input_path).unwrap();
+        let grant = state
+            .viewer_sessions
+            .grant_destination(&destination)
+            .unwrap();
+
+        for (index, checkpoint, expected_state) in [
+            (0, ServiceCheckpoint::QpdfNormalization, JobState::Cancelled),
+            (
+                1,
+                ServiceCheckpoint::OutputVerification,
+                JobState::Cancelled,
+            ),
+            (2, ServiceCheckpoint::PrePublication, JobState::Cancelled),
+            (
+                3,
+                ServiceCheckpoint::PostPublicationAudit,
+                JobState::Completed,
+            ),
+            (4, ServiceCheckpoint::Cleanup, JobState::Completed),
+        ] {
+            let source = state
+                .viewer_sessions
+                .source_for_text_job(&input.session_id, input.generation)
+                .unwrap();
+            let service = TextToPdfService::new(state.clone());
+            let created = service
+                .create_job(crate::contracts::TextToPdfJobCreateRequest {
+                    operation_id: TEXT_TO_PDF_OPERATION_ID.to_owned(),
+                    input_session_id: input.session_id.clone(),
+                    input_generation: input.generation,
+                    destination_grant_id: grant.grant_id.clone(),
+                    requested_output_name: format!("cancel-{index}.pdf"),
+                    settings: TextToPdfSettings {
+                        page_size: crate::text_to_pdf::TextPageSize::A4,
+                        orientation: crate::text_to_pdf::TextOrientation::Portrait,
+                    },
+                })
+                .unwrap();
+            let token = state.cancellations.register(&created.id);
+            *SERVICE_TEST_CANCELLATION
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .unwrap() = Some((created.id.clone(), checkpoint));
+            let terminal = service
+                .execute_with_registered_token(&created.id, source, token, |_| {})
+                .unwrap_or_else(|error| panic!("{checkpoint:?}: {}", error.code));
+            *SERVICE_TEST_CANCELLATION.get().unwrap().lock().unwrap() = None;
+            assert_eq!(terminal.state, expected_state, "{checkpoint:?}");
+            assert!(
+                !state.workspaces.root().join(&created.id).exists(),
+                "owned workspace remains at {checkpoint:?}"
+            );
+            match expected_state {
+                JobState::Completed => {
+                    let output = &terminal.outputs[0];
+                    assert_eq!(output.status, OutputStatus::Published);
+                    let final_path = Path::new(output.final_path.as_deref().unwrap());
+                    assert!(final_path.exists());
+                    assert_eq!(
+                        hash_file(final_path).unwrap(),
+                        (output.size_bytes.unwrap(), output.sha256.clone().unwrap())
+                    );
+                }
+                JobState::Cancelled => {
+                    assert!(terminal.outputs[0].final_path.is_none());
+                    assert!(!destination.join(format!("cancel-{index}.pdf")).exists());
+                }
+                _ => unreachable!(),
+            }
         }
         state.viewer_sessions.close_all();
     }
