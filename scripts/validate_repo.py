@@ -909,11 +909,32 @@ if post_smoke not in g04dc_minimal or sandbox_pass not in g04dc_minimal or g04dc
     raise SystemExit('G04D-C minimal proof sets sandboxPassed before post-smoke machine reconciliation')
 if 'post-uninstall-install-root-residue.json' not in g04dc_minimal or '-and ![bool]$installRootResidue.present' not in g04dc_minimal:
     raise SystemExit('G04D-C minimal proof does not reject install-root residue before cleanup')
-for boundary in ['AllowAutoRedirect = $false', "Host -cne 'download.documentfoundation.org'", 'Uri.Port -ne 443', 'MSI_ACQUISITION_SOURCE_REJECTED', 'mirrors are prohibited']:
+for boundary in [
+    'TcpClient]::new', '$tcp.Connect($selected, 443)', 'AuthenticateAsClient',
+    'RemoteEndPoint', 'Assert-G04DCPinnedRemoteEndpoint', 'CanonicalFirstRequest', 'maximumRedirects = 8',
+    'Redirect loop detected', 'Raw IP-literal acquisition hosts are prohibited',
+    'Test-G04DCRestrictedIpAddress', 'FileMode]::CreateNew', 'FileShare]::None',
+    'Assert-G04DCBoundedDownloadLength', 'Assert-G04DCFailedDownloadCleanup',
+    'mirrorHostnameIsTrustAnchor = $false', 'MSI_ACQUISITION_SOURCE_REJECTED',
+]:
     if boundary not in g04dc_common:
-        raise SystemExit(f'G04D-C same-origin acquisition gate is missing: {boundary}')
-if 'Invoke-WebRequest' in g04dc_common:
-    raise SystemExit('G04D-C acquisition may not silently follow mirrors')
+        raise SystemExit(f'G04D-C MirrorBrain acquisition gate is missing: {boundary}')
+if 'Invoke-WebRequest' in g04dc_common or 'HttpWebRequest' in g04dc_common:
+    raise SystemExit('G04D-C acquisition may not delegate DNS or redirect handling to an unpinned HTTP client')
+for regression in [
+    'exact canonical first request', 'accepted HTTPS cross-origin MirrorBrain redirect',
+    'pinned HTTPS remote endpoint', 'DNS rebinding remote endpoint', 'multi-hop HTTPS redirect',
+    'exact eight-hop redirect boundary', 'ninth-hop rejection',
+    'redirect loop', 'redirect missing Location', 'HTTP downgrade', 'non-default port',
+    'acquisition URI userinfo', 'acquisition URI empty userinfo', 'acquisition URI fragment', 'localhost target',
+    'IPv4 loopback target', 'IPv6 loopback target', 'RFC1918 private target',
+    'link-local target', 'multicast target', 'reserved target', 'unspecified target',
+    'raw IP literal target', 'unexpected final filename or path', 'truncated acquisition body',
+    'oversized acquisition body', 'bounded chunked acquisition body', 'failed-download cleanup ownership',
+    'complete redirect-chain evidence', 'no production acquisition path',
+]:
+    if regression not in g04dc_tests:
+        raise SystemExit(f'G04D-C MirrorBrain failure regression is missing: {regression}')
 if 'if: ${{ always() }}' not in g04dc_workflow or 'PROOF_PROVENANCE_OR_INFRASTRUCTURE_FAILURE' not in g04dc_workflow or 'Assert-G04DCArtifactManifest' not in g04dc_decision:
     raise SystemExit('G04D-C terminal decision does not separate evidence rejection from infrastructure/provenance failure')
 for regression in [

@@ -104,10 +104,28 @@ if ([regex]::Matches($workflow, 'persist-credentials:\s*false').Count -ne 3) { t
 if (!$workflow.Contains('if: ${{ always() }}') -or !$workflow.Contains('PROOF_PROVENANCE_OR_INFRASTRUCTURE_FAILURE') -or !$decisionProof.Contains('Assert-G04DCArtifactManifest')) {
     throw 'G04D-C decision must always run, separate infrastructure failure, and validate both artifact manifests.'
 }
-foreach ($sourceBoundary in @('AllowAutoRedirect = $false', "Host -cne 'download.documentfoundation.org'", 'Uri.Port -ne 443', 'MSI_ACQUISITION_SOURCE_REJECTED', 'mirrors are prohibited')) {
-    if (!$commonProof.Contains($sourceBoundary)) { throw "G04D-C same-origin acquisition boundary is missing: $sourceBoundary" }
+foreach ($sourceBoundary in @(
+    'TcpClient]::new', '$tcp.Connect($selected, 443)', 'AuthenticateAsClient', 'RemoteEndPoint',
+    'Assert-G04DCPinnedRemoteEndpoint', 'CanonicalFirstRequest', 'maximumRedirects = 8', 'Redirect loop detected',
+    'Raw IP-literal acquisition hosts are prohibited', 'Test-G04DCRestrictedIpAddress', 'FileMode]::CreateNew',
+    'FileShare]::None', 'Assert-G04DCBoundedDownloadLength', 'Assert-G04DCFailedDownloadCleanup',
+    'mirrorHostnameIsTrustAnchor = $false', 'MSI_ACQUISITION_SOURCE_REJECTED'
+)) {
+    if (!$commonProof.Contains($sourceBoundary)) { throw "G04D-C MirrorBrain acquisition boundary is missing: $sourceBoundary" }
 }
-if ($commonProof.Contains('Invoke-WebRequest')) { throw 'G04D-C acquisition may not silently follow a redirect to a mirror.' }
+if ($commonProof.Contains('Invoke-WebRequest') -or $commonProof.Contains('HttpWebRequest')) { throw 'G04D-C acquisition may not delegate DNS or redirect handling to an unpinned HTTP client.' }
+foreach ($redirectRegression in @(
+    'exact canonical first request', 'accepted HTTPS cross-origin MirrorBrain redirect', 'pinned HTTPS remote endpoint',
+    'DNS rebinding remote endpoint', 'multi-hop HTTPS redirect',
+    'exact eight-hop redirect boundary', 'ninth-hop rejection', 'redirect loop', 'redirect missing Location',
+    'HTTP downgrade', 'non-default port', 'acquisition URI userinfo', 'acquisition URI empty userinfo', 'acquisition URI fragment', 'localhost target',
+    'IPv4 loopback target', 'IPv6 loopback target', 'RFC1918 private target', 'link-local target',
+    'multicast target', 'reserved target', 'unspecified target', 'raw IP literal target',
+    'unexpected final filename or path', 'truncated acquisition body', 'oversized acquisition body', 'bounded chunked acquisition body',
+    'failed-download cleanup ownership', 'complete redirect-chain evidence', 'no production acquisition path'
+)) {
+    if (!$tests.Contains($redirectRegression)) { throw "G04D-C MirrorBrain regression is missing: $redirectRegression" }
+}
 foreach ($uses in [regex]::Matches($workflow, '(?m)^\s*-\s+uses:\s*([^\s]+)')) {
     if ($uses.Groups[1].Value -notmatch '@[0-9a-f]{40}$') { throw "G04D-C action is not pinned to a full commit: $($uses.Groups[1].Value)" }
 }

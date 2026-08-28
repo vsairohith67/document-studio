@@ -26,18 +26,129 @@ function New-ValidIdentity {
 
 $case = New-ValidIdentity; $case.sha256 = '0' * 64
 Assert-Throws 'wrong MSI hash' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.sizeBytes = $expected.SizeBytes - 1
+Assert-Throws 'wrong MSI byte count' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.authenticodeStatus = 'HashMismatch'
+Assert-Throws 'invalid Authenticode' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
 $case = New-ValidIdentity; $case.signerSubject = 'CN=Substituted Publisher'
 Assert-Throws 'wrong signer' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.signerThumbprint = '0' * 40
+Assert-Throws 'wrong signer thumbprint' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.signerChainValid = $false
+Assert-Throws 'invalid signer chain' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.timestampSignerThumbprint = '0' * 40
+Assert-Throws 'wrong timestamp signer' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.timestampChainValid = $false
+Assert-Throws 'invalid timestamp chain' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
 $case = New-ValidIdentity; $case.productCode = '{00000000-0000-0000-0000-000000000000}'
 Assert-Throws 'wrong ProductCode' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.upgradeCode = '{00000000-0000-0000-0000-000000000000}'
+Assert-Throws 'wrong UpgradeCode' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
+$case = New-ValidIdentity; $case.packageCode = '{00000000-0000-0000-0000-000000000000}'
+Assert-Throws 'wrong PackageCode' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
 $case = New-ValidIdentity; $case.productVersion = '26.2.5.3'
 Assert-Throws 'wrong version' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
 $case = New-ValidIdentity; $case.architecture = 'Intel'
 Assert-Throws 'wrong architecture' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
 $case = New-ValidIdentity; $case.signerChain = @()
 Assert-Throws 'missing signer chain elements' 'MSI_IDENTITY_MISMATCH' { Assert-G04DCMsiIdentity -Identity $case }
-Assert-Throws 'cross-origin MSI redirect' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://mirror.example.invalid/LibreOffice.msi') }
-Assert-Throws 'nonstandard-port MSI redirect' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://download.documentfoundation.org:8443/LibreOffice.msi') }
+
+$publicAddress = @('93.184.216.34')
+Assert-G04DCAcquisitionUri -Uri ([uri]$expected.Url) -CanonicalFirstRequest -ResolvedAddresses $publicAddress | Out-Null
+$passed.Add('exact canonical first request')
+$mirrorUri = [uri]'https://mirror.example.org/tdf/libreoffice/stable/26.2.5/win/x86_64/LibreOffice_26.2.5_Win_x86-64.msi'
+Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses $publicAddress | Out-Null
+$passed.Add('accepted HTTPS cross-origin MirrorBrain redirect')
+Assert-G04DCPinnedRemoteEndpoint -ApprovedAddresses $publicAddress -ConnectedAddress ([System.Net.IPAddress]::Parse($publicAddress[0])) | Out-Null
+$passed.Add('pinned HTTPS remote endpoint')
+Assert-Throws 'DNS rebinding remote endpoint' 'MSI_ACQUISITION_SOURCE_REJECTED' {
+    Assert-G04DCPinnedRemoteEndpoint -ApprovedAddresses $publicAddress -ConnectedAddress ([System.Net.IPAddress]::Parse('127.0.0.1'))
+}
+$firstTransition = Resolve-G04DCRedirectTransition -CurrentUri ([uri]$expected.Url) -StatusCode 302 -Location $mirrorUri.AbsoluteUri -RedirectCount 0 -SeenUris @($expected.Url)
+$secondUri = [uri]'https://download2.example.org/tdf/libreoffice/stable/26.2.5/win/x86_64/LibreOffice_26.2.5_Win_x86-64.msi'
+$secondTransition = Resolve-G04DCRedirectTransition -CurrentUri $firstTransition.nextUri -StatusCode 307 -Location $secondUri.AbsoluteUri -RedirectCount $firstTransition.redirectCount -SeenUris @($expected.Url, $mirrorUri.AbsoluteUri)
+$finalTransition = Resolve-G04DCRedirectTransition -CurrentUri $secondTransition.nextUri -StatusCode 200 -Location $null -RedirectCount $secondTransition.redirectCount -SeenUris @($expected.Url, $mirrorUri.AbsoluteUri, $secondUri.AbsoluteUri)
+if (!$firstTransition.redirect -or !$secondTransition.redirect -or !$finalTransition.final -or $finalTransition.redirectCount -ne 2) { throw 'Multi-hop HTTPS redirect model failed.' }
+$passed.Add('multi-hop HTTPS redirect')
+$current = [uri]$expected.Url
+$seen = [System.Collections.Generic.List[string]]::new()
+$seen.Add($current.AbsoluteUri)
+$count = 0
+for ($index = 1; $index -le 8; $index++) {
+    $next = "https://mirror$index.example.org/tdf/libreoffice/stable/26.2.5/win/x86_64/LibreOffice_26.2.5_Win_x86-64.msi"
+    $step = Resolve-G04DCRedirectTransition -CurrentUri $current -StatusCode 302 -Location $next -RedirectCount $count -SeenUris @($seen.ToArray())
+    $count = $step.redirectCount
+    $current = $step.nextUri
+    $seen.Add($current.AbsoluteUri)
+}
+$eightHopFinal = Resolve-G04DCRedirectTransition -CurrentUri $current -StatusCode 200 -Location $null -RedirectCount $count -SeenUris @($seen.ToArray())
+if (!$eightHopFinal.final -or $eightHopFinal.redirectCount -ne 8) { throw 'Exact eight-hop redirect boundary failed.' }
+$passed.Add('exact eight-hop redirect boundary')
+Assert-Throws 'ninth-hop rejection' 'MSI_ACQUISITION_SOURCE_REJECTED' {
+    Resolve-G04DCRedirectTransition -CurrentUri $current -StatusCode 302 -Location 'https://ninth.example.org/LibreOffice_26.2.5_Win_x86-64.msi' -RedirectCount 8 -SeenUris @($seen.ToArray())
+}
+Assert-Throws 'redirect loop' 'MSI_ACQUISITION_SOURCE_REJECTED' {
+    Resolve-G04DCRedirectTransition -CurrentUri $mirrorUri -StatusCode 302 -Location $expected.Url -RedirectCount 1 -SeenUris @($expected.Url, $mirrorUri.AbsoluteUri)
+}
+Assert-Throws 'redirect missing Location' 'MSI_ACQUISITION_SOURCE_REJECTED' {
+    Resolve-G04DCRedirectTransition -CurrentUri ([uri]$expected.Url) -StatusCode 302 -Location $null -RedirectCount 0 -SeenUris @($expected.Url)
+}
+Assert-Throws 'HTTP downgrade' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'http://mirror.example.org/LibreOffice_26.2.5_Win_x86-64.msi') -ResolvedAddresses $publicAddress }
+Assert-Throws 'non-default port' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://mirror.example.org:8443/LibreOffice_26.2.5_Win_x86-64.msi') -ResolvedAddresses $publicAddress }
+Assert-Throws 'acquisition URI userinfo' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://user@mirror.example.org/LibreOffice_26.2.5_Win_x86-64.msi') -ResolvedAddresses $publicAddress }
+Assert-Throws 'acquisition URI empty userinfo' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://@mirror.example.org/LibreOffice_26.2.5_Win_x86-64.msi') -ResolvedAddresses $publicAddress }
+Assert-Throws 'acquisition URI fragment' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://mirror.example.org/LibreOffice_26.2.5_Win_x86-64.msi#fragment') -ResolvedAddresses $publicAddress }
+Assert-Throws 'localhost target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://localhost/LibreOffice_26.2.5_Win_x86-64.msi') -ResolvedAddresses @('93.184.216.34') }
+Assert-Throws 'IPv4 loopback target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('127.0.0.1') }
+Assert-Throws 'IPv6 loopback target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('::1') }
+Assert-Throws 'RFC1918 private target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('10.12.0.1') }
+Assert-Throws 'link-local target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('169.254.2.3') }
+Assert-Throws 'multicast target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('224.0.0.1') }
+Assert-Throws 'reserved target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('198.51.100.5') }
+Assert-Throws 'unspecified target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri $mirrorUri -ResolvedAddresses @('0.0.0.0') }
+Assert-Throws 'raw IP literal target' 'MSI_ACQUISITION_SOURCE_REJECTED' { Assert-G04DCAcquisitionUri -Uri ([uri]'https://93.184.216.34/LibreOffice_26.2.5_Win_x86-64.msi') -ResolvedAddresses $publicAddress }
+Assert-Throws 'unexpected final filename or path' 'MSI_ACQUISITION_SOURCE_REJECTED' {
+    Resolve-G04DCRedirectTransition -CurrentUri ([uri]'https://mirror.example.org/LibreOffice-substituted.msi') -StatusCode 200 -Location $null -RedirectCount 1 -SeenUris @()
+}
+Assert-Throws 'truncated acquisition body' 'MSI_ACQUISITION_SIZE_INVALID' {
+    $input = [IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes('ab'))
+    $output = [IO.MemoryStream]::new()
+    try { Copy-G04DCBoundedHttpsBody -Response ([pscustomobject]@{ contentLength = 3L; transferEncoding = $null; stream = $input }) -Output $output -ExpectedBytes 3L }
+    finally { $output.Dispose(); $input.Dispose() }
+}
+Assert-Throws 'oversized acquisition body' 'MSI_ACQUISITION_SIZE_INVALID' {
+    $input = [IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes('abcd'))
+    $output = [IO.MemoryStream]::new()
+    try { Copy-G04DCBoundedHttpsBody -Response ([pscustomobject]@{ contentLength = -1L; transferEncoding = $null; stream = $input }) -Output $output -ExpectedBytes 3L }
+    finally { $output.Dispose(); $input.Dispose() }
+}
+$chunkedInput = [IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes("3`r`nabc`r`n0`r`n`r`n"))
+$chunkedOutput = [IO.MemoryStream]::new()
+try {
+    Copy-G04DCBoundedHttpsBody -Response ([pscustomobject]@{ contentLength = -1L; transferEncoding = 'chunked'; stream = $chunkedInput }) -Output $chunkedOutput -ExpectedBytes 3L | Out-Null
+    if ([Text.Encoding]::ASCII.GetString($chunkedOutput.ToArray()) -cne 'abc') { throw 'Chunked HTTPS body decode mismatch.' }
+}
+finally { $chunkedOutput.Dispose(); $chunkedInput.Dispose() }
+$passed.Add('bounded chunked acquisition body')
+Assert-Throws 'failed-download cleanup ownership' 'CLEANUP_OWNERSHIP_MISMATCH' {
+    Assert-G04DCFailedDownloadCleanup -Evidence ([pscustomobject]@{ exactFailedDownload = 'C:\owned\candidate.msi'; markerOwned = $false; removed = $true })
+}
+$redirectEvidence = [pscustomobject][ordered]@{
+    initialUri = $expected.Url
+    redirectCount = 1
+    finalUri = $mirrorUri.AbsoluteUri
+    hops = @(
+        [pscustomobject][ordered]@{ requestedUri = $expected.Url; statusCode = 302; location = $mirrorUri.AbsoluteUri; resolvedEffectiveUri = $mirrorUri.AbsoluteUri; hostname = 'download.documentfoundation.org'; resolvedAddresses = $publicAddress; connectedAddress = $publicAddress[0]; remoteEndpoint = "$($publicAddress[0]):443" },
+        [pscustomobject][ordered]@{ requestedUri = $mirrorUri.AbsoluteUri; statusCode = 200; location = $null; resolvedEffectiveUri = $mirrorUri.AbsoluteUri; hostname = 'mirror.example.org'; resolvedAddresses = $publicAddress; connectedAddress = $publicAddress[0]; remoteEndpoint = "$($publicAddress[0]):443" }
+    )
+}
+Assert-G04DCRedirectChainEvidence -Evidence $redirectEvidence | Out-Null
+$passed.Add('complete redirect-chain evidence')
+$productionAcquisition = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..\..\apps'), (Join-Path $PSScriptRoot '..\..\packages') -File -Recurse | Where-Object {
+    (Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue) -match 'Invoke-G04DCAcquireMsi|download\.documentfoundation\.org'
+})
+if ($productionAcquisition.Count -ne 0) { throw 'Production application contains a G04D-C acquisition path.' }
+$passed.Add('no production acquisition path')
 
 Assert-Throws 'ambiguous MSI feature ownership' 'AMBIGUOUS_FEATURE_OWNERSHIP' {
     Assert-G04DCFeatureAnalysis -Analysis ([pscustomobject]@{ ambiguous = $true; ambiguityReasons = @('shared protected component'); candidateMinimumFeatureSet = @('gm_Root') })
@@ -235,5 +346,5 @@ try {
 }
 finally { Remove-Item -LiteralPath $artifactRoot -Recurse -Force }
 
-if ($passed.Count -ne 53) { throw "Expected 53 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 89) { throw "Expected 89 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

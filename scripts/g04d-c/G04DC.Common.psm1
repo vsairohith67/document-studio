@@ -78,11 +78,373 @@ function Get-G04DCAuthenticodeEvidence {
     finally { $chain.Dispose() }
 }
 
+function Test-G04DCRestrictedIpAddress {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [System.Net.IPAddress]$Address)
+
+    if ($Address.IsIPv4MappedToIPv6) { $Address = $Address.MapToIPv4() }
+    $bytes = $Address.GetAddressBytes()
+    if ($Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return (
+            $bytes[0] -eq 0 -or
+            $bytes[0] -eq 10 -or
+            $bytes[0] -eq 127 -or
+            ($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127) -or
+            ($bytes[0] -eq 169 -and $bytes[1] -eq 254) -or
+            ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or
+            ($bytes[0] -eq 192 -and $bytes[1] -eq 0 -and $bytes[2] -in @(0, 2)) -or
+            ($bytes[0] -eq 192 -and $bytes[1] -in @(31, 52, 88, 175)) -or
+            ($bytes[0] -eq 192 -and $bytes[1] -eq 168) -or
+            ($bytes[0] -eq 198 -and $bytes[1] -in @(18, 19, 51)) -or
+            ($bytes[0] -eq 203 -and $bytes[1] -eq 0 -and $bytes[2] -eq 113) -or
+            $bytes[0] -ge 224
+        )
+    }
+    if ($Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+        $globalUnicast = ($bytes[0] -band 0xE0) -eq 0x20
+        $special2001 = $bytes[0] -eq 0x20 -and $bytes[1] -eq 0x01 -and ($bytes[2] -band 0xFE) -eq 0
+        $documentation = ($bytes[0] -eq 0x20 -and $bytes[1] -eq 0x01 -and $bytes[2] -eq 0x0D -and $bytes[3] -eq 0xB8) -or
+            ($bytes[0] -eq 0x3F -and $bytes[1] -eq 0xFF)
+        return $Address.Equals([System.Net.IPAddress]::IPv6None) -or
+            $Address.Equals([System.Net.IPAddress]::IPv6Loopback) -or
+            $Address.IsIPv6LinkLocal -or $Address.IsIPv6Multicast -or $Address.IsIPv6SiteLocal -or
+            (($bytes[0] -band 0xFE) -eq 0xFC) -or !$globalUnicast -or $special2001 -or $documentation
+    }
+    return $true
+}
+
 function Assert-G04DCAcquisitionUri {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)] [uri]$Uri)
-    if ($Uri.Scheme -cne 'https' -or $Uri.Host -cne 'download.documentfoundation.org' -or $Uri.Port -ne 443 -or ![string]::IsNullOrEmpty($Uri.UserInfo)) {
-        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Effective acquisition URI is not the exact owner-approved HTTPS origin.'
+    param(
+        [Parameter(Mandatory = $true)] [uri]$Uri,
+        [switch]$CanonicalFirstRequest,
+        [AllowEmptyCollection()] [string[]]$ResolvedAddresses
+    )
+    $expected = Get-G04DCExpectedMsi
+    $strongAuthority = $Uri.GetComponents([UriComponents]::StrongAuthority, [UriFormat]::UriEscaped)
+    if (!$Uri.IsAbsoluteUri -or $Uri.AbsoluteUri.Length -gt 4096 -or $Uri.Scheme -cne 'https' -or $Uri.Port -ne 443 -or
+        $strongAuthority.Contains('@') -or ![string]::IsNullOrEmpty($Uri.Fragment)) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Acquisition URI must be absolute HTTPS on the default port with no userinfo or fragment.'
+    }
+    if ($CanonicalFirstRequest -and $Uri.AbsoluteUri -cne $expected.Url) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] First request URI does not exactly match the canonical TDF URI.'
+    }
+    $literalHost = $Uri.DnsSafeHost.Trim('[', ']')
+    $literal = $null
+    if ([System.Net.IPAddress]::TryParse($literalHost, [ref]$literal)) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Raw IP-literal acquisition hosts are prohibited.'
+    }
+    $hostname = $Uri.IdnHost.TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($hostname) -or $hostname.Length -gt 253 -or $hostname -ieq 'localhost' -or $hostname.EndsWith('.localhost', [StringComparison]::OrdinalIgnoreCase)) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Localhost acquisition targets are prohibited.'
+    }
+    $addressText = @(if ($PSBoundParameters.ContainsKey('ResolvedAddresses')) {
+        @($ResolvedAddresses)
+    }
+    else {
+        try { @([System.Net.Dns]::GetHostAddresses($hostname) | ForEach-Object { $_.ToString() }) }
+        catch { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Acquisition hostname DNS resolution failed.' }
+    })
+    if ($addressText.Count -eq 0) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Acquisition hostname resolved to no addresses.' }
+    $addresses = [System.Collections.Generic.List[System.Net.IPAddress]]::new()
+    foreach ($text in @($addressText | Sort-Object -Unique)) {
+        $address = $null
+        if (![System.Net.IPAddress]::TryParse([string]$text, [ref]$address) -or (Test-G04DCRestrictedIpAddress -Address $address)) {
+            throw '[MSI_ACQUISITION_SOURCE_REJECTED] Acquisition hostname resolves to loopback, link-local, private, multicast, reserved, or unspecified address space.'
+        }
+        $addresses.Add($address)
+    }
+    return [pscustomobject][ordered]@{
+        uri = $Uri.AbsoluteUri
+        hostname = $hostname
+        resolvedAddresses = @($addresses.ToArray() | ForEach-Object { $_.ToString() } | Sort-Object -Unique)
+    }
+}
+
+function Assert-G04DCPinnedRemoteEndpoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$ApprovedAddresses,
+        [Parameter(Mandatory = $true)] [System.Net.IPAddress]$ConnectedAddress
+    )
+    if (Test-G04DCRestrictedIpAddress -Address $ConnectedAddress) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Connected remote endpoint is in prohibited address space.'
+    }
+    $matched = $false
+    foreach ($text in $ApprovedAddresses) {
+        $approved = $null
+        if ([System.Net.IPAddress]::TryParse($text, [ref]$approved)) {
+            if ($approved.IsIPv4MappedToIPv6) { $approved = $approved.MapToIPv4() }
+            $actual = $ConnectedAddress
+            if ($actual.IsIPv4MappedToIPv6) { $actual = $actual.MapToIPv4() }
+            if ($approved.Equals($actual)) { $matched = $true; break }
+        }
+    }
+    if (!$matched) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Connected remote endpoint was not one of the prevalidated public addresses.'
+    }
+    return $true
+}
+
+function Read-G04DCHttpsHeaderBlock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [System.IO.Stream]$Stream,
+        [int]$MaximumBytes = 16384
+    )
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    while ($true) {
+        $value = $Stream.ReadByte()
+        if ($value -lt 0) { throw '[MSI_ACQUISITION_FAILED] HTTPS response ended before its header block completed.' }
+        if ($bytes.Count -ge $MaximumBytes) { throw '[MSI_ACQUISITION_FAILED] HTTPS response header block exceeded the bounded ceiling.' }
+        $bytes.Add([byte]$value)
+        $count = $bytes.Count
+        if ($count -ge 4 -and $bytes[$count - 4] -eq 13 -and $bytes[$count - 3] -eq 10 -and $bytes[$count - 2] -eq 13 -and $bytes[$count - 1] -eq 10) { break }
+    }
+    return [Text.Encoding]::ASCII.GetString($bytes.ToArray())
+}
+
+function Read-G04DCHttpsLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [System.IO.Stream]$Stream,
+        [int]$MaximumBytes = 1024
+    )
+    $bytes = [System.Collections.Generic.List[byte]]::new()
+    while ($true) {
+        $value = $Stream.ReadByte()
+        if ($value -lt 0) { throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS body ended before its framing completed.' }
+        if ($bytes.Count -ge $MaximumBytes) { throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS body framing line exceeded the bounded ceiling.' }
+        $bytes.Add([byte]$value)
+        $count = $bytes.Count
+        if ($count -ge 2 -and $bytes[$count - 2] -eq 13 -and $bytes[$count - 1] -eq 10) {
+            return [Text.Encoding]::ASCII.GetString($bytes.ToArray(), 0, $count - 2)
+        }
+    }
+}
+
+function Invoke-G04DCPinnedHttpsRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [uri]$Uri,
+        [Parameter(Mandatory = $true)] [string[]]$ApprovedAddresses
+    )
+    $selectedText = @($ApprovedAddresses | Sort-Object -Unique)[0]
+    $selected = $null
+    if (![System.Net.IPAddress]::TryParse($selectedText, [ref]$selected) -or (Test-G04DCRestrictedIpAddress -Address $selected)) {
+        throw '[MSI_ACQUISITION_SOURCE_REJECTED] Pinned HTTPS transport received an invalid or prohibited address.'
+    }
+    $tcp = [System.Net.Sockets.TcpClient]::new($selected.AddressFamily)
+    $tcp.ReceiveTimeout = 120000
+    $tcp.SendTimeout = 60000
+    $ssl = $null
+    try {
+        $tcp.Connect($selected, 443)
+        $remote = [System.Net.IPEndPoint]$tcp.Client.RemoteEndPoint
+        Assert-G04DCPinnedRemoteEndpoint -ApprovedAddresses $ApprovedAddresses -ConnectedAddress $remote.Address | Out-Null
+        $network = $tcp.GetStream()
+        $ssl = [System.Net.Security.SslStream]::new($network, $false)
+        $certificates = [System.Security.Cryptography.X509Certificates.X509CertificateCollection]::new()
+        $ssl.AuthenticateAsClient($Uri.IdnHost, $certificates, [System.Security.Authentication.SslProtocols]::Tls12, $true)
+        $requestTarget = $Uri.PathAndQuery
+        if ([string]::IsNullOrEmpty($requestTarget)) { $requestTarget = '/' }
+        $requestText = "GET $requestTarget HTTP/1.1`r`nHost: $($Uri.IdnHost)`r`nUser-Agent: DocumentStudio-G04D-C-Proof/2.0`r`nAccept: */*`r`nAccept-Encoding: identity`r`nConnection: close`r`n`r`n"
+        $requestBytes = [Text.Encoding]::ASCII.GetBytes($requestText)
+        $ssl.Write($requestBytes, 0, $requestBytes.Length)
+        $ssl.Flush()
+
+        $headerBlock = Read-G04DCHttpsHeaderBlock -Stream $ssl
+        $lines = @($headerBlock -split "`r`n")
+        if ($lines.Count -lt 3 -or $lines[0] -notmatch '^HTTP/1\.[01] ([0-9]{3})(?: |$)') {
+            throw '[MSI_ACQUISITION_FAILED] HTTPS response status line is invalid.'
+        }
+        $statusCode = [int]$Matches[1]
+        $headers = @{}
+        for ($lineIndex = 1; $lineIndex -lt $lines.Count; $lineIndex++) {
+            $line = $lines[$lineIndex]
+            if ([string]::IsNullOrEmpty($line)) { break }
+            if ($line[0] -eq ' ' -or $line[0] -eq "`t" -or $line.IndexOf(':') -le 0) {
+                throw '[MSI_ACQUISITION_FAILED] HTTPS response contains invalid or folded headers.'
+            }
+            $separator = $line.IndexOf(':')
+            $name = $line.Substring(0, $separator).Trim()
+            $value = $line.Substring($separator + 1).Trim()
+            if ($name -notmatch '^[!#$%&''*+.^_`|~0-9A-Za-z-]+$') { throw '[MSI_ACQUISITION_FAILED] HTTPS response contains an invalid header name.' }
+            if ($headers.ContainsKey($name)) { $headers[$name] = @($headers[$name]) + $value }
+            else { $headers[$name] = [string[]]@($value) }
+        }
+        $location = $null
+        if ($headers.ContainsKey('Location')) {
+            if (@($headers['Location']).Count -ne 1) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Redirect response contains multiple Location values.' }
+            $location = [string]$headers['Location'][0]
+        }
+        $contentLength = -1L
+        if ($headers.ContainsKey('Content-Length')) {
+            $lengthValues = @($headers['Content-Length'] | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
+            if ($lengthValues.Count -ne 1 -or $lengthValues[0] -notmatch '^[0-9]+$' -or ![long]::TryParse($lengthValues[0], [ref]$contentLength)) {
+                throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS response Content-Length is invalid or ambiguous.'
+            }
+        }
+        $transferEncoding = if ($headers.ContainsKey('Transfer-Encoding')) { (@($headers['Transfer-Encoding']) -join ',').Trim() } else { $null }
+        if ($contentLength -ge 0 -and ![string]::IsNullOrEmpty($transferEncoding)) {
+            throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS response contains ambiguous Content-Length and Transfer-Encoding framing.'
+        }
+        $contentEncoding = if ($headers.ContainsKey('Content-Encoding')) { (@($headers['Content-Encoding']) -join ',').Trim() } else { $null }
+        if (![string]::IsNullOrEmpty($contentEncoding) -and $contentEncoding -ine 'identity') {
+            throw '[MSI_ACQUISITION_SIZE_INVALID] Encoded HTTPS response bodies are prohibited.'
+        }
+        return [pscustomobject][ordered]@{
+            statusCode = $statusCode
+            location = $location
+            contentLength = $contentLength
+            transferEncoding = $transferEncoding
+            stream = $ssl
+            tcpClient = $tcp
+            connectedAddress = $remote.Address.ToString()
+            remoteEndpoint = $remote.ToString()
+        }
+    }
+    catch {
+        if ($ssl) { $ssl.Dispose() }
+        $tcp.Dispose()
+        throw
+    }
+}
+
+function Close-G04DCPinnedHttpsResponse {
+    [CmdletBinding()]
+    param([AllowNull()] $Response)
+    if ($Response) {
+        if ($Response.stream) { $Response.stream.Dispose() }
+        if ($Response.tcpClient) { $Response.tcpClient.Dispose() }
+    }
+}
+
+function Copy-G04DCBoundedHttpsBody {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Response,
+        [Parameter(Mandatory = $true)] [System.IO.Stream]$Output,
+        [Parameter(Mandatory = $true)] [long]$ExpectedBytes
+    )
+    if ($Response.contentLength -ge 0 -and [long]$Response.contentLength -ne $ExpectedBytes) {
+        throw '[MSI_ACQUISITION_SIZE_INVALID] Response Content-Length does not equal the frozen package size.'
+    }
+    $buffer = New-Object byte[] 1048576
+    $totalBytes = 0L
+    if (![string]::IsNullOrEmpty([string]$Response.transferEncoding)) {
+            if ([string]$Response.transferEncoding -ine 'chunked') { throw '[MSI_ACQUISITION_SIZE_INVALID] Unsupported HTTPS body transfer encoding.' }
+            while ($true) {
+                $chunkLine = Read-G04DCHttpsLine -Stream $Response.stream
+                $chunkToken = ($chunkLine -split ';', 2)[0].Trim()
+                if ($chunkToken -notmatch '^[0-9A-Fa-f]+$' -or $chunkToken.Length -gt 16) { throw '[MSI_ACQUISITION_SIZE_INVALID] Invalid chunked HTTPS body framing.' }
+                $chunkLength = [Convert]::ToInt64($chunkToken, 16)
+                if ($chunkLength -eq 0) {
+                    $trailerBytes = 0
+                    while ($true) {
+                        $trailer = Read-G04DCHttpsLine -Stream $Response.stream -MaximumBytes 16384
+                        $trailerBytes += $trailer.Length + 2
+                        if ($trailerBytes -gt 16384) { throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS trailer block exceeded the bounded ceiling.' }
+                        if ($trailer.Length -eq 0) { break }
+                    }
+                    break
+                }
+                $remaining = $chunkLength
+                while ($remaining -gt 0) {
+                    $wanted = [int][Math]::Min([long]$buffer.Length, $remaining)
+                    $read = $Response.stream.Read($buffer, 0, $wanted)
+                    if ($read -le 0) { throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS body was truncated.' }
+                    if ($totalBytes + $read -gt $ExpectedBytes) { throw '[MSI_ACQUISITION_SIZE_INVALID] Stream exceeded the exact byte ceiling.' }
+                    $Output.Write($buffer, 0, $read)
+                    $totalBytes += $read
+                    $remaining -= $read
+                }
+                if ($Response.stream.ReadByte() -ne 13 -or $Response.stream.ReadByte() -ne 10) { throw '[MSI_ACQUISITION_SIZE_INVALID] Invalid chunk terminator.' }
+            }
+    }
+    elseif ($Response.contentLength -ge 0) {
+            $remaining = [long]$Response.contentLength
+            while ($remaining -gt 0) {
+                $wanted = [int][Math]::Min([long]$buffer.Length, $remaining)
+                $read = $Response.stream.Read($buffer, 0, $wanted)
+                if ($read -le 0) { throw '[MSI_ACQUISITION_SIZE_INVALID] HTTPS body was truncated.' }
+                if ($totalBytes + $read -gt $ExpectedBytes) { throw '[MSI_ACQUISITION_SIZE_INVALID] Stream exceeded the exact byte ceiling.' }
+                $Output.Write($buffer, 0, $read)
+                $totalBytes += $read
+                $remaining -= $read
+            }
+    }
+    else {
+            while (($read = $Response.stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                if ($totalBytes + $read -gt $ExpectedBytes) { throw '[MSI_ACQUISITION_SIZE_INVALID] Stream exceeded the exact byte ceiling.' }
+                $Output.Write($buffer, 0, $read)
+                $totalBytes += $read
+            }
+    }
+    Assert-G04DCBoundedDownloadLength -ObservedBytes $totalBytes -ExpectedBytes $ExpectedBytes -StreamComplete $true | Out-Null
+    if ($Output -is [System.IO.FileStream]) { ([System.IO.FileStream]$Output).Flush($true) }
+    else { $Output.Flush() }
+    return $totalBytes
+}
+
+function Resolve-G04DCRedirectTransition {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [uri]$CurrentUri,
+        [Parameter(Mandatory = $true)] [int]$StatusCode,
+        [AllowNull()] [string]$Location,
+        [Parameter(Mandatory = $true)] [int]$RedirectCount,
+        [AllowEmptyCollection()] [string[]]$SeenUris = @()
+    )
+    $expected = Get-G04DCExpectedMsi
+    if ($StatusCode -ge 300 -and $StatusCode -lt 400) {
+        if ([string]::IsNullOrWhiteSpace($Location)) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Redirect response omitted Location.' }
+        if ($RedirectCount -ge 8) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Ninth redirect exceeds the eight-redirect ceiling.' }
+        try { $nextUri = [uri]::new($CurrentUri, $Location) }
+        catch { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Redirect Location is not a valid URI reference.' }
+        if ($SeenUris -contains $nextUri.AbsoluteUri) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Redirect loop detected.' }
+        return [pscustomobject][ordered]@{ redirect = $true; nextUri = $nextUri; redirectCount = $RedirectCount + 1; final = $false }
+    }
+    if ($StatusCode -ne 200) { throw "[MSI_ACQUISITION_FAILED] Acquisition source returned HTTP $StatusCode." }
+    $fileName = [uri]::UnescapeDataString([IO.Path]::GetFileName($CurrentUri.AbsolutePath))
+    if ($fileName -cne $expected.FileName) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Final acquisition path does not identify the exact expected MSI filename.' }
+    return [pscustomobject][ordered]@{ redirect = $false; nextUri = $null; redirectCount = $RedirectCount; final = $true }
+}
+
+function Assert-G04DCRedirectChainEvidence {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Evidence)
+    $expected = Get-G04DCExpectedMsi
+    $hops = @($Evidence.hops)
+    if ([string]$Evidence.initialUri -cne $expected.Url -or $hops.Count -lt 1 -or $hops.Count -gt 9 -or
+        [int]$Evidence.redirectCount -gt 8 -or [string]$Evidence.finalUri -cne [string]$hops[-1].resolvedEffectiveUri) {
+        throw '[MSI_ACQUISITION_EVIDENCE_INVALID] Redirect-chain bounds or terminal URI evidence is invalid.'
+    }
+    foreach ($hop in $hops) {
+        foreach ($property in @('requestedUri', 'statusCode', 'location', 'resolvedEffectiveUri', 'hostname', 'resolvedAddresses', 'connectedAddress', 'remoteEndpoint')) {
+            if (!$hop.PSObject.Properties[$property]) { throw "[MSI_ACQUISITION_EVIDENCE_INVALID] Redirect hop omitted $property." }
+        }
+    }
+    return $true
+}
+
+function Assert-G04DCBoundedDownloadLength {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [long]$ObservedBytes,
+        [Parameter(Mandatory = $true)] [long]$ExpectedBytes,
+        [Parameter(Mandatory = $true)] [bool]$StreamComplete
+    )
+    if ($ObservedBytes -gt $ExpectedBytes) { throw '[MSI_ACQUISITION_SIZE_INVALID] Stream exceeded the exact byte ceiling.' }
+    if (!$StreamComplete -or $ObservedBytes -ne $ExpectedBytes) { throw '[MSI_ACQUISITION_SIZE_INVALID] Stream was truncated before the frozen package size.' }
+    return $true
+}
+
+function Assert-G04DCFailedDownloadCleanup {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Evidence)
+    if (![bool]$Evidence.markerOwned -or ![bool]$Evidence.removed -or [string]::IsNullOrWhiteSpace([string]$Evidence.exactFailedDownload)) {
+        throw '[CLEANUP_OWNERSHIP_MISMATCH] Exact failed-download cleanup ownership was not proven.'
     }
     return $true
 }
@@ -237,90 +599,139 @@ function Invoke-G04DCAcquireMsi {
         [Parameter(Mandatory = $true)] [string]$EvidenceDirectory
     )
     $expected = Get-G04DCExpectedMsi
-    if (Test-Path -LiteralPath $Destination) {
-        throw "[CLEANUP_OWNERSHIP_MISMATCH] Refusing to overwrite MSI path: $Destination"
+    $destinationCanonical = [IO.Path]::GetFullPath($Destination)
+    if (Test-Path -LiteralPath $destinationCanonical) {
+        throw "[CLEANUP_OWNERSHIP_MISMATCH] Refusing to overwrite MSI path: $destinationCanonical"
     }
-    $parent = Split-Path -Parent $Destination
+    $parent = Split-Path -Parent $destinationCanonical
     if (!(Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent | Out-Null }
+    $parentItem = Get-Item -LiteralPath $parent -Force
+    if (!$parentItem.PSIsContainer -or [bool]($parentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw '[CLEANUP_OWNERSHIP_MISMATCH] Download parent is not a canonical non-reparse directory.'
+    }
     $redirectChain = [System.Collections.Generic.List[object]]::new()
+    $seenUris = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $currentUri = [uri]$expected.Url
     $response = $null
+    $redirectCount = 0
+    $downloadCreated = $false
+    $cleanupEvidence = $null
+    $finalUri = $null
     try {
-        for ($hop = 0; $hop -lt 8; $hop++) {
-            try { Assert-G04DCAcquisitionUri -Uri $currentUri | Out-Null }
-            catch {
-                $redirectChain.Add([pscustomobject][ordered]@{ requestedUri = $currentUri.AbsoluteUri; statusCode = $null; location = $null; acceptedOrigin = $false })
-                Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-acquisition-source.json') -Value ([ordered]@{
-                    expectedUri = $expected.Url
-                    requiredScheme = 'https'
-                    requiredHost = 'download.documentfoundation.org'
-                    redirects = @($redirectChain.ToArray())
-                    accepted = $false
-                    reason = 'Effective acquisition URI left the exact owner-approved origin; mirrors are prohibited.'
-                })
-                throw '[MSI_ACQUISITION_SOURCE_REJECTED] Official URL redirected to a mirror or another origin.'
+        while ($true) {
+            if (!$seenUris.Add($currentUri.AbsoluteUri)) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Redirect loop detected.' }
+            $uriEvidence = Assert-G04DCAcquisitionUri -Uri $currentUri -CanonicalFirstRequest:($seenUris.Count -eq 1)
+            $response = Invoke-G04DCPinnedHttpsRequest -Uri $currentUri -ApprovedAddresses @($uriEvidence.resolvedAddresses)
+            $statusCode = [int]$response.statusCode
+            $location = [string]$response.location
+            $resolvedEffectiveUri = if ($statusCode -ge 300 -and $statusCode -lt 400 -and ![string]::IsNullOrWhiteSpace($location)) {
+                try { ([uri]::new($currentUri, $location)).AbsoluteUri } catch { $null }
             }
-            $request = [System.Net.HttpWebRequest]::Create($currentUri)
-            $request.AllowAutoRedirect = $false
-            $request.Timeout = 30000
-            $request.ReadWriteTimeout = 30000
-            $request.UserAgent = 'DocumentStudio-G04D-C-Proof/1.0'
-            try { $response = [System.Net.HttpWebResponse]$request.GetResponse() }
-            catch {
-                Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-acquisition-source.json') -Value ([ordered]@{
-                    expectedUri = $expected.Url
-                    requiredScheme = 'https'
-                    requiredHost = 'download.documentfoundation.org'
-                    redirects = @($redirectChain.ToArray())
-                    accepted = $false
-                    reason = 'The exact approved origin did not return a usable bounded HTTP response.'
-                    failureType = $_.Exception.GetType().FullName
-                })
-                throw '[MSI_ACQUISITION_FAILED] Exact approved origin request failed.'
-            }
-            $statusCode = [int]$response.StatusCode
-            $location = [string]$response.Headers['Location']
-            $redirectChain.Add([pscustomobject][ordered]@{ requestedUri = $currentUri.AbsoluteUri; statusCode = $statusCode; location = $location; acceptedOrigin = $true })
-            if ($statusCode -ge 300 -and $statusCode -lt 400) {
-                if ([string]::IsNullOrWhiteSpace($location)) { throw '[MSI_ACQUISITION_SOURCE_REJECTED] Redirect response omitted Location.' }
-                $nextUri = [uri]::new($currentUri, $location)
-                $response.Dispose()
+            else { $currentUri.AbsoluteUri }
+            $redirectChain.Add([pscustomobject][ordered]@{
+                requestedUri = $currentUri.AbsoluteUri
+                statusCode = $statusCode
+                location = if ([string]::IsNullOrEmpty($location)) { $null } else { $location }
+                resolvedEffectiveUri = $resolvedEffectiveUri
+                hostname = $uriEvidence.hostname
+                resolvedAddresses = @($uriEvidence.resolvedAddresses)
+                connectedAddress = $response.connectedAddress
+                remoteEndpoint = $response.remoteEndpoint
+            })
+            $transition = Resolve-G04DCRedirectTransition -CurrentUri $currentUri -StatusCode $statusCode -Location $location -RedirectCount $redirectCount -SeenUris @($seenUris)
+            if ($transition.redirect) {
+                $redirectCount = [int]$transition.redirectCount
+                $currentUri = $transition.nextUri
+                Close-G04DCPinnedHttpsResponse -Response $response
                 $response = $null
-                $currentUri = $nextUri
                 continue
             }
-            if ($statusCode -ne 200) { throw "[MSI_ACQUISITION_FAILED] Official source returned HTTP $statusCode." }
-            $stream = $response.GetResponseStream()
-            $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            try { $stream.CopyTo($output) }
-            finally { $output.Dispose(); $stream.Dispose() }
-            Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-acquisition-source.json') -Value ([ordered]@{
-                expectedUri = $expected.Url
-                requiredScheme = 'https'
-                requiredHost = 'download.documentfoundation.org'
-                effectiveUri = $currentUri.AbsoluteUri
-                redirects = @($redirectChain.ToArray())
-                accepted = $true
-            })
+            $finalUri = $currentUri.AbsoluteUri
+            $output = [IO.File]::Open($destinationCanonical, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $downloadCreated = $true
+            try { Copy-G04DCBoundedHttpsBody -Response $response -Output $output -ExpectedBytes ([long]$expected.SizeBytes) | Out-Null }
+            finally { $output.Dispose() }
             break
         }
-        if (!(Test-Path -LiteralPath $Destination)) { throw '[MSI_ACQUISITION_FAILED] Official-source redirect limit was exceeded.' }
+        $sourceEvidence = [pscustomobject][ordered]@{
+            schemaVersion = 2
+            initialUri = $expected.Url
+            maximumRedirects = 8
+            redirectCount = $redirectCount
+            hops = @($redirectChain.ToArray())
+            finalUri = $finalUri
+            mirrorHostnameIsTrustAnchor = $false
+            accepted = $true
+            failedDownloadCleanup = $null
+        }
+        Assert-G04DCRedirectChainEvidence -Evidence $sourceEvidence | Out-Null
+        Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-acquisition-source.json') -Value $sourceEvidence
+
+        $item = Get-Item -LiteralPath $destinationCanonical -Force
+        $fileEnvelope = [pscustomobject][ordered]@{
+            path = $item.FullName
+            regularFile = !$item.PSIsContainer
+            reparsePoint = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            sizeBytes = [long]$item.Length
+            sha256 = Get-G04DCSha256 -Path $item.FullName
+        }
+        Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-file-envelope.json') -Value $fileEnvelope
+        if (!$fileEnvelope.regularFile -or $fileEnvelope.reparsePoint -or $fileEnvelope.sizeBytes -ne [long]$expected.SizeBytes -or $fileEnvelope.sha256 -cne $expected.Sha256) {
+            throw '[MSI_IDENTITY_MISMATCH] Downloaded bytes failed the frozen regular-file, size, or SHA-256 envelope before MSI database inspection.'
+        }
+        $identity = Get-G04DCMsiIdentity -MsiPath $destinationCanonical
+        Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-identity-observed.json') -Value ([ordered]@{
+            expected = $expected
+            observed = $identity
+            acquiredAtUtc = [DateTime]::UtcNow.ToString('o')
+        })
+        $checks = Assert-G04DCMsiIdentity -Identity $identity
+        Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-identity.json') -Value ([ordered]@{
+            expected = $expected
+            observed = $identity
+            checks = $checks
+            acquiredAtUtc = [DateTime]::UtcNow.ToString('o')
+        })
+        return $identity
     }
-    finally { if ($response) { $response.Dispose() } }
-    $identity = Get-G04DCMsiIdentity -MsiPath $Destination
-    Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-identity-observed.json') -Value ([ordered]@{
-        expected = $expected
-        observed = $identity
-        acquiredAtUtc = [DateTime]::UtcNow.ToString('o')
-    })
-    $checks = Assert-G04DCMsiIdentity -Identity $identity
-    Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-identity.json') -Value ([ordered]@{
-        expected = $expected
-        observed = $identity
-        checks = $checks
-        acquiredAtUtc = [DateTime]::UtcNow.ToString('o')
-    })
-    return $identity
+    catch {
+        $original = $_
+        if ($downloadCreated -and (Test-Path -LiteralPath $destinationCanonical)) {
+            $item = Get-Item -LiteralPath $destinationCanonical -Force -ErrorAction SilentlyContinue
+            $ownedRoot = Split-Path -Parent $parent
+            $ownedMarker = Join-Path $ownedRoot '.g04d-c-owned-root'
+            $markerItem = Get-Item -LiteralPath $ownedMarker -Force -ErrorAction SilentlyContinue
+            $markerText = if ($markerItem -and !$markerItem.PSIsContainer -and ![bool]($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { [IO.File]::ReadAllText($markerItem.FullName, [Text.Encoding]::UTF8) } else { $null }
+            $owned = $item -and !$item.PSIsContainer -and ![bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+                $item.FullName -ceq $destinationCanonical -and $markerText -clike "DOCUMENT-STUDIO-G04D-C-*-OWNED`n"
+            if ($owned) { Remove-Item -LiteralPath $destinationCanonical -Force -ErrorAction Stop }
+            $cleanupEvidence = [pscustomobject][ordered]@{
+                exactFailedDownload = $destinationCanonical
+                markerPath = $ownedMarker
+                markerOwned = [bool]$owned
+                removed = !(Test-Path -LiteralPath $destinationCanonical)
+            }
+        }
+        $failureEvidence = [pscustomobject][ordered]@{
+            schemaVersion = 2
+            initialUri = $expected.Url
+            maximumRedirects = 8
+            redirectCount = $redirectCount
+            hops = @($redirectChain.ToArray())
+            finalUri = $finalUri
+            mirrorHostnameIsTrustAnchor = $false
+            accepted = $false
+            failure = $original.Exception.Message
+            failedDownloadCleanup = $cleanupEvidence
+        }
+        Write-G04DCJson -Path (Join-Path $EvidenceDirectory 'msi-acquisition-source.json') -Value $failureEvidence
+        if ($downloadCreated -and (!$cleanupEvidence -or !$cleanupEvidence.markerOwned -or !$cleanupEvidence.removed)) {
+            throw "[CLEANUP_OWNERSHIP_MISMATCH] Exact failed download cleanup did not complete. Original failure: $($original.Exception.Message)"
+        }
+        if ($downloadCreated) { Assert-G04DCFailedDownloadCleanup -Evidence $cleanupEvidence | Out-Null }
+        throw $original
+    }
+    finally { if ($response) { Close-G04DCPinnedHttpsResponse -Response $response } }
 }
 
 function Export-G04DCMsiDatabase {
@@ -1768,7 +2179,10 @@ function Assert-G04DCArtifactManifest {
 }
 
 Export-ModuleMember -Function @(
-    'Get-G04DCExpectedMsi', 'Write-G04DCJson', 'Get-G04DCSha256', 'Get-G04DCAuthenticodeEvidence', 'Assert-G04DCAcquisitionUri',
+    'Get-G04DCExpectedMsi', 'Write-G04DCJson', 'Get-G04DCSha256', 'Get-G04DCAuthenticodeEvidence',
+    'Test-G04DCRestrictedIpAddress', 'Assert-G04DCAcquisitionUri', 'Assert-G04DCPinnedRemoteEndpoint',
+    'Resolve-G04DCRedirectTransition', 'Assert-G04DCRedirectChainEvidence',
+    'Assert-G04DCBoundedDownloadLength', 'Copy-G04DCBoundedHttpsBody', 'Assert-G04DCFailedDownloadCleanup',
     'Get-G04DCCanonicalHash', 'Get-G04DCMsiIdentity', 'Assert-G04DCMsiIdentity',
     'Invoke-G04DCAcquireMsi', 'Export-G04DCMsiDatabase', 'Get-G04DCFeatureAnalysis',
     'Assert-G04DCFeatureAnalysis', 'Get-G04DCInstalledFeatureStates', 'Assert-G04DCInstalledFeatureStates',
