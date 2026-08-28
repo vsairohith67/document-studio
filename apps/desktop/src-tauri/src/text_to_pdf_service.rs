@@ -8,6 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
 use chrono::{SecondsFormat, Utc};
@@ -71,7 +73,12 @@ static SERVICE_TEST_CANCELLATION: OnceLock<Mutex<Option<(String, ServiceCheckpoi
     OnceLock::new();
 
 #[cfg(test)]
-static PUBLICATION_COMMIT_TEST_DELAY: OnceLock<Mutex<Option<(String, Duration)>>> = OnceLock::new();
+static PUBLICATION_COMMIT_TEST_EXPIRY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_OPERATION_DEADLINE_EXPIRED: Cell<bool> = const { Cell::new(false) };
+}
 
 #[derive(Clone)]
 pub struct TextToPdfService {
@@ -650,7 +657,7 @@ impl TextToPdfService {
                 requested_name: &verifying.requested_output_name,
                 job_id,
             },
-            || token.is_cancelled() || Instant::now() >= operation_deadline,
+            || token.is_cancelled() || operation_deadline_expired(operation_deadline),
             |_completed, _total| {
                 self.progress(
                     job_id,
@@ -702,7 +709,7 @@ impl TextToPdfService {
                     .map_err(|_| publication_io("publication ownership could not be released"))
             },
             move |candidate| {
-                if Instant::now() >= operation_deadline
+                if operation_deadline_expired(operation_deadline)
                     || !commit_token.try_begin_publication_commit()
                 {
                     return Err(PublicationError::Cancelled);
@@ -721,25 +728,35 @@ impl TextToPdfService {
                         verified_hash,
                     )
                     .map_err(|_| publication_io("publication intent could not be stored"))?;
-                publication_commit_test_delay(job_id);
+                publication_commit_test_expire_deadline(job_id);
                 Ok(())
             },
         )
         .map_err(|error| {
             if matches!(error, PublicationError::Cancelled)
                 && !token.is_cancelled()
-                && Instant::now() >= operation_deadline
+                && operation_deadline_expired(operation_deadline)
             {
                 operation_timeout(OperationStage::Publish)
             } else {
                 publication_error(error)
             }
         })?;
+        check_deadline_until_publication_commit(
+            operation_deadline,
+            token,
+            OperationStage::Publish,
+        )?;
         let (final_size, final_hash) =
             hash_file(&result.final_path).map_err(|_| verify_error("TXT_FINAL_REOPEN_FAILED"))?;
         if final_size != verified_size || final_hash != verified_hash {
             return Err(verify_error("TXT_FINAL_HASH_MISMATCH"));
         }
+        check_deadline_until_publication_commit(
+            operation_deadline,
+            token,
+            OperationStage::Publish,
+        )?;
         self.state
             .database()
             .set_output_published(
@@ -980,11 +997,19 @@ impl TextToPdfService {
 }
 
 fn check_deadline(deadline: Instant, stage: OperationStage) -> Result<(), OperationError> {
-    if Instant::now() >= deadline {
+    if operation_deadline_expired(deadline) {
         Err(operation_timeout(stage))
     } else {
         Ok(())
     }
+}
+
+fn operation_deadline_expired(deadline: Instant) -> bool {
+    #[cfg(test)]
+    if FORCE_OPERATION_DEADLINE_EXPIRED.with(Cell::get) {
+        return true;
+    }
+    Instant::now() >= deadline
 }
 
 fn check_deadline_until_publication_commit(
@@ -1014,21 +1039,19 @@ fn service_test_checkpoint(state: &AppState, job_id: &str, checkpoint: ServiceCh
 fn service_test_checkpoint(_state: &AppState, _job_id: &str, _checkpoint: ServiceCheckpoint) {}
 
 #[cfg(test)]
-fn publication_commit_test_delay(job_id: &str) {
-    let configured = PUBLICATION_COMMIT_TEST_DELAY
+fn publication_commit_test_expire_deadline(job_id: &str) {
+    let configured = PUBLICATION_COMMIT_TEST_EXPIRY
         .get_or_init(|| Mutex::new(None))
         .lock()
         .ok()
         .and_then(|value| value.clone());
-    if let Some((expected_job, delay)) = configured {
-        if expected_job == job_id {
-            thread::sleep(delay);
-        }
+    if configured.as_deref() == Some(job_id) {
+        FORCE_OPERATION_DEADLINE_EXPIRED.with(|expired| expired.set(true));
     }
 }
 
 #[cfg(not(test))]
-fn publication_commit_test_delay(_job_id: &str) {}
+fn publication_commit_test_expire_deadline(_job_id: &str) {}
 
 fn bounded_timeout(
     deadline: Instant,
@@ -2018,11 +2041,11 @@ mod tests {
                 &timestamp(),
             )
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        *PUBLICATION_COMMIT_TEST_DELAY
+        let deadline = Instant::now() + Duration::from_secs(600);
+        *PUBLICATION_COMMIT_TEST_EXPIRY
             .get_or_init(|| Mutex::new(None))
             .lock()
-            .unwrap() = Some((created.id.clone(), Duration::from_millis(2_200)));
+            .unwrap() = Some(created.id.clone());
         service
             .publish(
                 &created.id,
@@ -2037,9 +2060,13 @@ mod tests {
                 &mut |_| {},
             )
             .unwrap();
-        *PUBLICATION_COMMIT_TEST_DELAY.get().unwrap().lock().unwrap() = None;
+        *PUBLICATION_COMMIT_TEST_EXPIRY
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap() = None;
 
-        assert!(Instant::now() >= deadline);
+        assert!(operation_deadline_expired(deadline));
         assert!(token.commit_started());
         check_deadline_until_publication_commit(deadline, &token, OperationStage::Audit).unwrap();
         check_deadline_until_publication_commit(deadline, &token, OperationStage::Cleanup).unwrap();
@@ -2065,6 +2092,7 @@ mod tests {
             .unwrap();
         assert_eq!(completed.state, JobState::Completed);
         assert!(final_path.exists());
+        FORCE_OPERATION_DEADLINE_EXPIRED.with(|expired| expired.set(false));
     }
 
     #[test]
