@@ -1330,6 +1330,196 @@ function Get-G04DCExternalRuntimeTargetPaths {
     return $result
 }
 
+function New-G04DCRegistryValueState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [bool]$KeyExists,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$ValueName,
+        [Parameter(Mandatory = $true)] [bool]$ValuePresent,
+        [AllowNull()] [string]$ValueType,
+        [AllowNull()] $Value
+    )
+    $state = [ordered]@{
+        schemaVersion = 1
+        keyExists = $KeyExists
+        valueName = if ([string]::IsNullOrEmpty($ValueName)) { '(default)' } else { $ValueName }
+        valuePresent = $ValuePresent
+    }
+    if ($ValuePresent) {
+        $state.valueType = $ValueType
+        $state.value = $Value
+    }
+    return [pscustomobject]$state
+}
+
+function ConvertTo-G04DCBoundedRegistryValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$ValueType,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] $Value
+    )
+    $maximumBytes = 1048576
+    switch ($ValueType) {
+        'String' {
+            if ($null -eq $Value -or $Value -isnot [string] -or ([Text.Encoding]::Unicode.GetByteCount([string]$Value) -gt $maximumBytes)) {
+                throw '[REGISTRY_STATE_CAPTURE_FAILED] REG_SZ evidence is null, non-string, or exceeds the bounded value ceiling.'
+            }
+            return [string]$Value
+        }
+        'ExpandString' {
+            if ($null -eq $Value -or $Value -isnot [string] -or ([Text.Encoding]::Unicode.GetByteCount([string]$Value) -gt $maximumBytes)) {
+                throw '[REGISTRY_STATE_CAPTURE_FAILED] REG_EXPAND_SZ evidence is null, non-string, or exceeds the bounded value ceiling.'
+            }
+            return [string]$Value
+        }
+        'DWord' { return [int]$Value }
+        'QWord' { return [long]$Value }
+        'MultiString' {
+            if ($null -eq $Value -or $Value -isnot [string[]] -or @($Value).Count -gt 4096) {
+                throw '[REGISTRY_STATE_CAPTURE_FAILED] REG_MULTI_SZ evidence is null, malformed, or exceeds the bounded entry ceiling.'
+            }
+            $totalBytes = 0
+            $result = @($Value | ForEach-Object {
+                if ($null -eq $_) { throw '[REGISTRY_STATE_CAPTURE_FAILED] REG_MULTI_SZ evidence contains a null entry.' }
+                $totalBytes += [Text.Encoding]::Unicode.GetByteCount([string]$_) + 2
+                [string]$_
+            })
+            if ($totalBytes -gt $maximumBytes) { throw '[REGISTRY_STATE_CAPTURE_FAILED] REG_MULTI_SZ evidence exceeds the bounded value ceiling.' }
+            return ,$result
+        }
+        { $_ -in @('Binary', 'None') } {
+            if ($null -eq $Value -or $Value -isnot [byte[]] -or $Value.Length -gt $maximumBytes) {
+                throw "[REGISTRY_STATE_CAPTURE_FAILED] Registry $ValueType evidence is null, malformed, or exceeds the bounded value ceiling."
+            }
+            return ([BitConverter]::ToString($Value)).Replace('-', '').ToLowerInvariant()
+        }
+        default { throw "[REGISTRY_STATE_CAPTURE_FAILED] Unsupported registry value kind: $ValueType" }
+    }
+}
+
+function Test-G04DCRegistryValueNamePresent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [AllowEmptyString()] [string[]]$Names,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$ValueName
+    )
+    foreach ($name in $Names) {
+        if ([string]::Equals([string]$name, $ValueName, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Get-G04DCRegistryValueState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$ValueName,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$AccessAdapter
+    )
+    if ($Path.Length -gt 2048 -or $Path -notmatch '^Registry::HKEY_(CLASSES_ROOT|CURRENT_USER|LOCAL_MACHINE|USERS)(\\|$)' -or $ValueName.Length -gt 16383) {
+        throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry path or value name is outside the bounded provider model.'
+    }
+    if (!$AccessAdapter) {
+        $AccessAdapter = @{
+            OpenKey = {
+                param([string]$CandidatePath)
+                try {
+                    [pscustomobject][ordered]@{ keyExists = $true; handle = Get-Item -LiteralPath $CandidatePath -ErrorAction Stop }
+                }
+                catch [System.Management.Automation.ItemNotFoundException] {
+                    [pscustomobject][ordered]@{ keyExists = $false; handle = $null }
+                }
+            }
+            GetValueNames = { param($Handle) @($Handle.GetValueNames()) }
+            GetValueKind = { param($Handle, [string]$Name) $Handle.GetValueKind($Name) }
+            GetValue = {
+                param($Handle, [string]$Name)
+                $missing = [object]::new()
+                $observed = $Handle.GetValue($Name, $missing, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                [pscustomobject][ordered]@{ present = ![object]::ReferenceEquals($missing, $observed); value = $observed }
+            }
+            CloseKey = { param($Handle) if ($Handle -is [IDisposable]) { $Handle.Dispose() } }
+        }
+    }
+    foreach ($operation in @('OpenKey', 'GetValueNames', 'GetValueKind', 'GetValue', 'CloseKey')) {
+        if (!$AccessAdapter.ContainsKey($operation) -or $AccessAdapter[$operation] -isnot [scriptblock]) {
+            throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry read adapter is incomplete.'
+        }
+    }
+
+    $handle = $null
+    try {
+        $opened = & $AccessAdapter.OpenKey $Path
+        if (!$opened -or !$opened.PSObject.Properties['keyExists']) {
+            throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry provider returned an invalid key state.'
+        }
+        if (![bool]$opened.keyExists) {
+            return New-G04DCRegistryValueState -KeyExists $false -ValueName $ValueName -ValuePresent $false
+        }
+        $handle = $opened.handle
+        if ($null -eq $handle) { throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry provider returned an existing key without a read handle.' }
+        $names = @(& $AccessAdapter.GetValueNames $handle)
+        if (!(Test-G04DCRegistryValueNamePresent -Names $names -ValueName $ValueName)) {
+            return New-G04DCRegistryValueState -KeyExists $true -ValueName $ValueName -ValuePresent $false
+        }
+
+        try {
+            $valueType = [string](& $AccessAdapter.GetValueKind $handle $ValueName)
+            $valueResult = & $AccessAdapter.GetValue $handle $ValueName
+        }
+        catch [System.IO.IOException] {
+            $namesAfterRace = @(& $AccessAdapter.GetValueNames $handle)
+            if (!(Test-G04DCRegistryValueNamePresent -Names $namesAfterRace -ValueName $ValueName)) {
+                return New-G04DCRegistryValueState -KeyExists $true -ValueName $ValueName -ValuePresent $false
+            }
+            throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry value changed during classification and could not be sealed.'
+        }
+        if (!$valueResult -or !$valueResult.PSObject.Properties['present']) {
+            throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry provider returned an invalid value-read state.'
+        }
+        if (![bool]$valueResult.present) {
+            $namesAfterRace = @(& $AccessAdapter.GetValueNames $handle)
+            if (!(Test-G04DCRegistryValueNamePresent -Names $namesAfterRace -ValueName $ValueName)) {
+                return New-G04DCRegistryValueState -KeyExists $true -ValueName $ValueName -ValuePresent $false
+            }
+            throw '[REGISTRY_STATE_CAPTURE_FAILED] Registry value changed during classification and could not be sealed.'
+        }
+        $boundedValue = ConvertTo-G04DCBoundedRegistryValue -ValueType $valueType -Value $valueResult.value
+        return New-G04DCRegistryValueState -KeyExists $true -ValueName $ValueName -ValuePresent $true -ValueType $valueType -Value $boundedValue
+    }
+    catch {
+        if ($_.Exception.Message.StartsWith('[REGISTRY_STATE_CAPTURE_FAILED]', [StringComparison]::Ordinal)) { throw }
+        throw "[REGISTRY_STATE_CAPTURE_FAILED] Read-only registry classification failed ($($_.Exception.GetType().FullName))."
+    }
+    finally {
+        if ($null -ne $handle) {
+            try { & $AccessAdapter.CloseKey $handle }
+            catch { throw "[REGISTRY_STATE_CAPTURE_FAILED] Registry read-handle cleanup failed ($($_.Exception.GetType().FullName))." }
+        }
+    }
+}
+
+function Get-G04DCRegistryDefaultValueState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$AccessAdapter
+    )
+    $arguments = @{ Path = $Path; ValueName = '' }
+    if ($AccessAdapter) { $arguments.AccessAdapter = $AccessAdapter }
+    $state = Get-G04DCRegistryValueState @arguments
+    $defaultState = [ordered]@{
+        schemaVersion = [int]$state.schemaVersion
+        keyExists = [bool]$state.keyExists
+        defaultValuePresent = [bool]$state.valuePresent
+    }
+    if ([bool]$state.valuePresent) {
+        $defaultState.defaultValueType = [string]$state.valueType
+        $defaultState.defaultValue = $state.value
+    }
+    return [pscustomobject]$defaultState
+}
+
 function ConvertTo-G04DCPackedGuid {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)] [string]$Guid)
@@ -1367,23 +1557,23 @@ function Get-G04DCMsiRegistrationState {
         [pscustomobject][ordered]@{ path = $_; pathPresent = Test-Path -LiteralPath $_; values = @(Get-G04DCRegistryValues -Path $_) }
     })
     $upgradePath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\UpgradeCodes\$packedUpgrade"
-    $upgradeValue = if (Test-Path -LiteralPath $upgradePath) { Get-ItemPropertyValue -LiteralPath $upgradePath -Name $packedProduct -ErrorAction SilentlyContinue } else { $null }
+    $upgradeValueState = Get-G04DCRegistryValueState -Path $upgradePath -ValueName $packedProduct
     $componentRegistrations = @($ComponentCodes | Where-Object { $_ } | Sort-Object -Unique | ForEach-Object {
         $componentCode = $_
         $packedComponent = ConvertTo-G04DCPackedGuid -Guid $componentCode
         $systemPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components\$packedComponent"
         $userPath = "Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Installer\Components\$packedComponent"
-        $systemValue = if (Test-Path -LiteralPath $systemPath) { Get-ItemPropertyValue -LiteralPath $systemPath -Name $packedProduct -ErrorAction SilentlyContinue } else { $null }
-        $userValue = if (Test-Path -LiteralPath $userPath) { Get-ItemPropertyValue -LiteralPath $userPath -Name $packedProduct -ErrorAction SilentlyContinue } else { $null }
+        $systemValueState = Get-G04DCRegistryValueState -Path $systemPath -ValueName $packedProduct
+        $userValueState = Get-G04DCRegistryValueState -Path $userPath -ValueName $packedProduct
         [pscustomobject][ordered]@{
             componentCode = $componentCode
             packedComponent = $packedComponent
             systemPath = $systemPath
-            systemProductValuePresent = $null -ne $systemValue
-            systemProductValue = [string]$systemValue
+            systemProductValuePresent = [bool]$systemValueState.valuePresent
+            systemProductValueState = $systemValueState
             userPath = $userPath
-            userProductValuePresent = $null -ne $userValue
-            userProductValue = [string]$userValue
+            userProductValuePresent = [bool]$userValueState.valuePresent
+            userProductValueState = $userValueState
         }
     })
     return [pscustomobject][ordered]@{
@@ -1394,8 +1584,8 @@ function Get-G04DCMsiRegistrationState {
         productStateDefault = 5
         productRegistryTargets = $productRegistryTargets
         upgradeCodePath = $upgradePath
-        upgradeProductValuePresent = $null -ne $upgradeValue
-        upgradeProductValue = [string]$upgradeValue
+        upgradeProductValuePresent = [bool]$upgradeValueState.valuePresent
+        upgradeProductValueState = $upgradeValueState
         componentRegistrations = $componentRegistrations
         localPackage = [pscustomobject][ordered]@{
             path = $localPackage
@@ -1545,11 +1735,13 @@ function Get-G04DCMachineState {
         $extension = $_
         $classKey = "Registry::HKEY_CLASSES_ROOT\$extension"
         $choiceKey = "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$extension\UserChoice"
+        $classDefaultState = Get-G04DCRegistryDefaultValueState -Path $classKey
+        $userChoiceProgIdState = Get-G04DCRegistryValueState -Path $choiceKey -ValueName 'ProgId'
         [pscustomobject][ordered]@{
             extension = $extension
-            classDefault = if (Test-Path -LiteralPath $classKey) { [string](Get-ItemPropertyValue -LiteralPath $classKey -Name '(default)' -ErrorAction SilentlyContinue) } else { $null }
-            userChoiceProgId = if (Test-Path -LiteralPath $choiceKey) { [string](Get-ItemPropertyValue -LiteralPath $choiceKey -Name 'ProgId' -ErrorAction SilentlyContinue) } else { $null }
-            userChoicePresent = Test-Path -LiteralPath $choiceKey
+            classDefaultState = $classDefaultState
+            userChoiceProgIdState = $userChoiceProgIdState
+            userChoicePresent = [bool]$userChoiceProgIdState.keyExists
         }
     })
     $fontRoots = @(
@@ -1644,7 +1836,7 @@ function Get-G04DCMachineState {
     } | Sort-Object PSChildName | ForEach-Object {
         [pscustomobject][ordered]@{
             key = $_.PSChildName
-            defaultValue = [string](Get-ItemPropertyValue -LiteralPath $_.PSPath -Name '(default)' -ErrorAction SilentlyContinue)
+            defaultValueState = Get-G04DCRegistryDefaultValueState -Path "Registry::HKEY_CLASSES_ROOT\$($_.PSChildName)"
         }
     })
     $startupKeys = @(
@@ -1748,9 +1940,13 @@ function Get-G04DCMachineState {
         foreach ($registryRoot in $roots) {
             $path = "$registryRoot\$([string]$row.Key)"
             $name = if ([string]::IsNullOrEmpty([string]$row.Name)) { '(default)' } else { [string]$row.Name }
-            $pathPresent = Test-Path -LiteralPath $path
-            $value = if ($pathPresent) { Get-ItemPropertyValue -LiteralPath $path -Name $name -ErrorAction SilentlyContinue } else { $null }
-            $protectedTargets.Add([pscustomobject][ordered]@{ path = $path; name = $name; pathPresent = $pathPresent; value = [string]$value })
+            $valueState = if ($name -ceq '(default)') {
+                Get-G04DCRegistryDefaultValueState -Path $path
+            }
+            else {
+                Get-G04DCRegistryValueState -Path $path -ValueName $name
+            }
+            $protectedTargets.Add([pscustomobject][ordered]@{ path = $path; name = $name; pathPresent = [bool]$valueState.keyExists; valueState = $valueState })
         }
     }
     $protectedTargets = @($protectedTargets.ToArray() | Sort-Object path, name -Unique)
@@ -1781,7 +1977,7 @@ function Get-G04DCMachineState {
     $pendingReboot = [pscustomobject][ordered]@{
         componentBasedServicing = Test-Path -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
         windowsUpdate = Test-Path -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
-        pendingFileRenameOperations = @((Get-ItemPropertyValue -LiteralPath $pendingFileRenameKey -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue))
+        pendingFileRenameOperationsState = Get-G04DCRegistryValueState -Path $pendingFileRenameKey -ValueName 'PendingFileRenameOperations'
     }
     $serviceDigestRows = @($services)
     $msiRegistration = Get-G04DCMsiRegistrationState -ComponentCodes $ProtectedMsiComponentCodes
@@ -2190,6 +2386,7 @@ Export-ModuleMember -Function @(
     'Get-G04DCMutationClosure', 'Assert-G04DCMinimalMutationClosure', 'Assert-G04DCAdminMutationClosure',
     'Assert-G04DCInstalledFileOwnership',
     'Get-G04DCExternalRuntimeTargetPaths',
+    'Get-G04DCRegistryValueState', 'Get-G04DCRegistryDefaultValueState',
     'ConvertTo-G04DCPackedGuid', 'Get-G04DCMsiRegistrationState', 'Assert-G04DCMsiRegistrationAbsent', 'Assert-G04DCMsiRegistrationInstalled',
     'Get-G04DCMachineState', 'Compare-G04DCMachineState',
     'Assert-G04DCNonMutation', 'Assert-G04DCRunnerIsolation', 'Assert-G04DCExternalRuntimeDependencies',
