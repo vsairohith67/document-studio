@@ -83,6 +83,8 @@ enum RendererTestAction {
     Timeout,
     Crash,
     Cancel,
+    CancelPendingCallback,
+    CancelAfterControllerQueued,
     WithholdCallback,
     FailCallback,
 }
@@ -90,6 +92,15 @@ enum RendererTestAction {
 #[cfg(test)]
 static RENDERER_TEST_FAULT: OnceLock<Mutex<Option<(RendererCheckpoint, RendererTestAction)>>> =
     OnceLock::new();
+
+#[cfg(test)]
+static LATE_ENVIRONMENT_CALLBACK_IGNORED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static LATE_CONTROLLER_CALLBACK_CLOSED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+static QUEUED_CONTROLLER_OWNER_CLOSED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone)]
 pub struct TextRenderRequest {
@@ -220,7 +231,10 @@ fn test_checkpoint(
             authority.invalidate();
             Err(RendererFailure::Cancelled)
         }
-        RendererTestAction::WithholdCallback | RendererTestAction::FailCallback => Ok(()),
+        RendererTestAction::CancelPendingCallback
+        | RendererTestAction::CancelAfterControllerQueued
+        | RendererTestAction::WithholdCallback
+        | RendererTestAction::FailCallback => Ok(()),
     }
 }
 
@@ -334,8 +348,10 @@ fn render_on_initialized_sta(
     let environment = create_environment(request, authority, operation_deadline)?;
     test_checkpoint(authority, RendererCheckpoint::EnvironmentCreated)?;
     let runtime_version = browser_version(&environment)?;
-    let controller = create_controller(&environment, host.hwnd(), authority, operation_deadline)?;
-    let _controller_owner = ControllerOwner(controller.clone());
+    let controller_owner =
+        create_controller(&environment, host.hwnd(), authority, operation_deadline)?;
+    let controller = controller_owner.0.clone();
+    let _controller_owner = controller_owner;
     test_checkpoint(authority, RendererCheckpoint::ControllerCreated)?;
     if authority.cancellation.is_cancelled() {
         // SAFETY: this controller belongs to the current STA and generation.
@@ -513,15 +529,22 @@ fn create_environment(
                         )));
                         return Ok(());
                     }
+                    RendererTestAction::CancelPendingCallback => {
+                        callback_authority.cancellation.request_for_test();
+                        callback_authority.invalidate();
+                    }
                     _ => {}
                 }
             }
-            if !callback_authority.owns_generation(
-                &expected_job,
-                &expected_generation,
-                expected_version,
-            ) || callback_authority.completion_token != expected_completion_token
+            if !callback_authority.is_current(&expected_job, &expected_generation, expected_version)
+                || callback_authority.completion_token != expected_completion_token
             {
+                #[cfg(test)]
+                if test_callback_action(RendererCheckpoint::EnvironmentCallback)
+                    == Some(RendererTestAction::CancelPendingCallback)
+                {
+                    LATE_ENVIRONMENT_CALLBACK_IGNORED.store(true, Ordering::Release);
+                }
                 return Ok(());
             }
             let result = status
@@ -574,7 +597,7 @@ fn create_controller(
     parent: HWND,
     authority: &Arc<CallbackAuthority>,
     operation_deadline: Instant,
-) -> Result<ICoreWebView2Controller, RendererFailure> {
+) -> Result<ControllerOwner, RendererFailure> {
     let (sender, receiver) = mpsc::channel();
     #[cfg(test)]
     let withheld_sender = sender.clone();
@@ -600,24 +623,41 @@ fn create_controller(
                         }
                         return Ok(());
                     }
+                    RendererTestAction::CancelPendingCallback => {
+                        callback_authority.cancellation.request_for_test();
+                        callback_authority.invalidate();
+                    }
                     _ => {}
                 }
             }
-            if !callback_authority.owns_generation(
-                &expected_job,
-                &expected_generation,
-                expected_version,
-            ) || callback_authority.completion_token != expected_completion_token
+            if !callback_authority.is_current(&expected_job, &expected_generation, expected_version)
+                || callback_authority.completion_token != expected_completion_token
             {
                 if let Some(controller) = controller {
                     // SAFETY: a stale late-created controller is closed on its callback STA.
                     let _ = unsafe { controller.Close() };
+                    #[cfg(test)]
+                    if test_callback_action(RendererCheckpoint::ControllerCallback)
+                        == Some(RendererTestAction::CancelPendingCallback)
+                    {
+                        LATE_CONTROLLER_CALLBACK_CLOSED.store(true, Ordering::Release);
+                    }
                 }
                 return Ok(());
             }
-            let result = status
-                .and_then(|_| controller.ok_or_else(|| windows::core::Error::from(E_POINTER)));
+            let result = status.and_then(|_| {
+                controller
+                    .map(ControllerOwner)
+                    .ok_or_else(|| windows::core::Error::from(E_POINTER))
+            });
             let _ = sender.send(result);
+            #[cfg(test)]
+            if test_callback_action(RendererCheckpoint::ControllerCallback)
+                == Some(RendererTestAction::CancelAfterControllerQueued)
+            {
+                callback_authority.cancellation.request_for_test();
+                callback_authority.invalidate();
+            }
             Ok(())
         },
     ));
@@ -1037,17 +1077,18 @@ fn receive_with_pump<T>(
 ) -> Result<T, RendererFailure> {
     let started = Instant::now();
     loop {
+        if authority.cancellation.is_cancelled() {
+            authority.invalidate();
+            if let Some(controller) = controller {
+                // SAFETY: only the controller owned by this renderer STA is closed.
+                let _ = unsafe { controller.Close() };
+            }
+            return Err(RendererFailure::Cancelled);
+        }
         match receiver.try_recv() {
             Ok(value) => return Ok(value),
             Err(TryRecvError::Disconnected) => return Err(RendererFailure::Native),
             Err(TryRecvError::Empty) => {}
-        }
-        if authority.cancellation.is_cancelled() && controller.is_some() {
-            authority.invalidate();
-            if let Some(controller) = controller {
-                let _ = unsafe { controller.Close() };
-            }
-            return Err(RendererFailure::Cancelled);
         }
         if started.elapsed() >= timeout || Instant::now() >= operation_deadline {
             authority.invalidate();
@@ -1157,6 +1198,8 @@ impl Drop for ControllerOwner {
     fn drop(&mut self) {
         // SAFETY: the guard is created and dropped on the controller's owning STA.
         let _ = unsafe { self.0.Close() };
+        #[cfg(test)]
+        QUEUED_CONTROLLER_OWNER_CLOSED.store(true, Ordering::Release);
     }
 }
 
@@ -1573,6 +1616,38 @@ mod tests {
     }
 
     #[test]
+    fn receive_with_pump_cancels_creation_without_waiting_for_a_controller() {
+        let registry = crate::app_state::CancellationRegistry::default();
+        let token = registry.register("job");
+        let authority = Arc::new(CallbackAuthority {
+            job_id: "job".to_owned(),
+            generation: "generation".to_owned(),
+            completion_token: "one-shot".to_owned(),
+            lifecycle_version: 7,
+            active: AtomicBool::new(true),
+            completed: AtomicBool::new(false),
+            cancellation: token,
+        });
+        let (_pending_sender, receiver) = mpsc::channel::<()>();
+        registry.request("job");
+        let started = Instant::now();
+        let result = receive_with_pump(
+            &receiver,
+            &authority,
+            CREATION_TIMEOUT,
+            Instant::now() + CREATION_TIMEOUT,
+            None,
+        );
+
+        assert!(matches!(result, Err(RendererFailure::Cancelled)));
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "creation cancellation must not wait for the 30-second callback timeout"
+        );
+        assert!(!authority.active.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn response_headers_are_no_store_nosniff_and_u32_bounded() {
         let headers = response_headers("text/plain", 7).unwrap();
         assert!(headers.contains("Content-Length: 7\r\n"));
@@ -1722,6 +1797,24 @@ mod tests {
                 RendererTestAction::FailCallback,
                 "TXT_RENDERER_FAILED",
             ),
+            (
+                21,
+                RendererCheckpoint::EnvironmentCallback,
+                RendererTestAction::CancelPendingCallback,
+                "CANCELLED",
+            ),
+            (
+                22,
+                RendererCheckpoint::ControllerCallback,
+                RendererTestAction::CancelPendingCallback,
+                "CANCELLED",
+            ),
+            (
+                23,
+                RendererCheckpoint::ControllerCallback,
+                RendererTestAction::CancelAfterControllerQueued,
+                "CANCELLED",
+            ),
         ] {
             let root = lane.path().join(format!("case-{index}"));
             let udf = root.join("udf");
@@ -1736,6 +1829,10 @@ mod tests {
                 .get_or_init(|| Mutex::new(None))
                 .lock()
                 .unwrap() = Some((checkpoint, action));
+            LATE_ENVIRONMENT_CALLBACK_IGNORED.store(false, Ordering::Release);
+            LATE_CONTROLLER_CALLBACK_CLOSED.store(false, Ordering::Release);
+            QUEUED_CONTROLLER_OWNER_CLOSED.store(false, Ordering::Release);
+            let started = Instant::now();
             let error = render_text_pdf(
                 TextRenderRequest {
                     job_id,
@@ -1766,6 +1863,44 @@ mod tests {
             .unwrap_err();
             *RENDERER_TEST_FAULT.get().unwrap().lock().unwrap() = None;
             assert_eq!(error.code, expected_code, "{checkpoint:?} {action:?}");
+            if matches!(
+                action,
+                RendererTestAction::CancelPendingCallback
+                    | RendererTestAction::CancelAfterControllerQueued
+            ) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "creation cancellation must not wait for the 30-second callback timeout"
+                );
+                assert!(
+                    !raw_pdf_path.exists(),
+                    "creation cancellation must not produce a raw PDF"
+                );
+                match (checkpoint, action) {
+                    (
+                        RendererCheckpoint::EnvironmentCallback,
+                        RendererTestAction::CancelPendingCallback,
+                    ) => assert!(
+                        LATE_ENVIRONMENT_CALLBACK_IGNORED.load(Ordering::Acquire),
+                        "late environment callback must remain generation-inactive"
+                    ),
+                    (
+                        RendererCheckpoint::ControllerCallback,
+                        RendererTestAction::CancelPendingCallback,
+                    ) => assert!(
+                        LATE_CONTROLLER_CALLBACK_CLOSED.load(Ordering::Acquire),
+                        "late-created controller must be closed on its callback STA"
+                    ),
+                    (
+                        RendererCheckpoint::ControllerCallback,
+                        RendererTestAction::CancelAfterControllerQueued,
+                    ) => assert!(
+                        QUEUED_CONTROLLER_OWNER_CLOSED.load(Ordering::Acquire),
+                        "a controller queued before cancellation must be closed on its owning STA"
+                    ),
+                    _ => unreachable!(),
+                }
+            }
             if raw_pdf_path.exists() {
                 fs::remove_file(raw_pdf_path).unwrap();
             }

@@ -51,7 +51,7 @@ use crate::text_to_pdf::{
 use crate::text_to_pdf_renderer::{render_text_pdf, TextRenderEvidence, TextRenderRequest};
 use crate::viewer_sessions::ViewerJobSource;
 use crate::windows_security::{
-    delete_open_file, identity_from_file, open_directory_without_delete_share,
+    delete_open_file, file_identity, identity_from_file, open_directory_without_delete_share,
     open_for_identity_and_delete, FileIdentity,
 };
 use crate::workspace::JobWorkspace;
@@ -62,6 +62,7 @@ const QPDF_JSON_CAPTURE_LIMIT: usize = 32 * 1024 * 1024;
 const TOTAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
 const RENDERER_UDF_CLEANUP_MAX_WAIT: Duration = Duration::from_secs(10);
 const RENDERER_UDF_CLEANUP_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const RENDERER_WORKSPACE_GUARD_COUNT: usize = 5;
 const UDF_MARKER: &str = ".document-studio-txt-renderer-v1";
 const TOTAL_PROGRESS_STEPS: u64 = 18;
 
@@ -104,7 +105,7 @@ struct RendererWorkspace {
     marker_value: String,
     generation: String,
     identity: FileIdentity,
-    _ownership_guards: Vec<File>,
+    ownership_guards: Vec<File>,
 }
 
 impl TextToPdfService {
@@ -258,14 +259,14 @@ impl TextToPdfService {
             Err(error) if error.code == "CANCELLED" => self.finish_cancelled(
                 job_id,
                 workspace.as_ref(),
-                renderer_workspace.as_ref(),
+                renderer_workspace.take(),
                 &mut on_event,
             ),
             Err(error) => {
                 self.finish_failed(
                     job_id,
                     workspace.as_ref(),
-                    renderer_workspace.as_ref(),
+                    renderer_workspace.take(),
                     &error,
                     &mut on_event,
                 )?;
@@ -386,7 +387,7 @@ impl TextToPdfService {
             marker_value: renderer_workspace.marker_value.clone(),
             generation: renderer_workspace.generation.clone(),
             identity: renderer_workspace.identity,
-            _ownership_guards: Vec::new(),
+            ownership_guards: Vec::new(),
         });
         self.transition(
             job_id,
@@ -579,7 +580,7 @@ impl TextToPdfService {
             false,
             on_event,
         )?;
-        cleanup_renderer_workspace(&workspace, &renderer_workspace)?;
+        cleanup_renderer_workspace(&workspace, renderer_workspace)?;
         service_test_checkpoint(&self.state, job_id, ServiceCheckpoint::Cleanup);
         check_deadline_until_publication_commit(
             operation_deadline,
@@ -864,7 +865,7 @@ impl TextToPdfService {
         &self,
         job_id: &str,
         workspace: Option<&JobWorkspace>,
-        renderer_workspace: Option<&RendererWorkspace>,
+        renderer_workspace: Option<RendererWorkspace>,
         on_event: &mut F,
     ) -> Result<JobRecord, OperationError>
     where
@@ -917,7 +918,7 @@ impl TextToPdfService {
         &self,
         job_id: &str,
         workspace: Option<&JobWorkspace>,
-        renderer_workspace: Option<&RendererWorkspace>,
+        renderer_workspace: Option<RendererWorkspace>,
         error: &OperationError,
         on_event: &mut F,
     ) -> Result<(), OperationError>
@@ -976,7 +977,7 @@ impl TextToPdfService {
         &self,
         job_id: &str,
         workspace: Option<&JobWorkspace>,
-        renderer_workspace: Option<&RendererWorkspace>,
+        renderer_workspace: Option<RendererWorkspace>,
     ) -> Result<(), OperationError> {
         let job = self.current_job(job_id)?;
         let output = job.outputs.first().ok_or_else(metadata_error)?;
@@ -1597,16 +1598,20 @@ fn create_renderer_workspace(
         marker_value,
         generation,
         identity,
-        _ownership_guards: ownership_guards,
+        ownership_guards,
     })
 }
 
 fn cleanup_renderer_workspace(
     workspace: &JobWorkspace,
-    renderer: &RendererWorkspace,
+    renderer: RendererWorkspace,
 ) -> Result<(), OperationError> {
     if !renderer.path.exists() {
-        return Ok(());
+        return if renderer.ownership_guards.is_empty() {
+            Ok(())
+        } else {
+            Err(cleanup_error())
+        };
     }
     reject_reparse_components(&renderer.path).map_err(|_| cleanup_error())?;
     let expected_parent = workspace.temporary.join("renderer-udfs");
@@ -1615,15 +1620,40 @@ fn cleanup_renderer_workspace(
     {
         return Err(cleanup_error());
     }
+    if !matches!(
+        renderer.ownership_guards.len(),
+        0 | RENDERER_WORKSPACE_GUARD_COUNT
+    ) {
+        return Err(cleanup_error());
+    }
+    if let Some(udf_guard) = renderer.ownership_guards.last() {
+        if identity_from_file(udf_guard).map_err(|_| cleanup_error())? != renderer.identity {
+            return Err(cleanup_error());
+        }
+    }
+    if file_identity(&renderer.path).map_err(|_| cleanup_error())? != renderer.identity {
+        return Err(cleanup_error());
+    }
     let marker = fs::read_to_string(renderer.path.join(UDF_MARKER)).map_err(|_| cleanup_error())?;
     if marker != renderer.marker_value {
+        return Err(cleanup_error());
+    }
+    let RendererWorkspace {
+        path,
+        identity,
+        ownership_guards,
+        ..
+    } = renderer;
+    drop(ownership_guards);
+    reject_reparse_components(&path).map_err(|_| cleanup_error())?;
+    if file_identity(&path).map_err(|_| cleanup_error())? != identity {
         return Err(cleanup_error());
     }
     let cleanup_deadline = Instant::now()
         .checked_add(RENDERER_UDF_CLEANUP_MAX_WAIT)
         .ok_or_else(cleanup_error)?;
     loop {
-        match fs::remove_dir_all(&renderer.path) {
+        match fs::remove_dir_all(&path) {
             Ok(()) => return Ok(()),
             Err(_) if Instant::now() < cleanup_deadline => {
                 let remaining = cleanup_deadline.saturating_duration_since(Instant::now());
@@ -2336,15 +2366,68 @@ mod tests {
         let renderer = create_renderer_workspace(&workspace, &job_id).unwrap();
         let udf = renderer.path.clone();
         let identity = renderer.identity;
+        let cleanup_candidate = RendererWorkspace {
+            path: renderer.path.clone(),
+            marker_value: renderer.marker_value.clone(),
+            generation: renderer.generation.clone(),
+            identity,
+            ownership_guards: Vec::new(),
+        };
         let moved_udf = udf.with_file_name("replacement-attempt");
         drop(renderer);
         fs::rename(&udf, &moved_udf).unwrap();
         fs::create_dir(&udf).unwrap();
+        fs::write(udf.join(UDF_MARKER), &cleanup_candidate.marker_value).unwrap();
         assert!(!crate::text_to_pdf_renderer::user_data_identity_is_current(
             &udf, identity
         ));
-        fs::remove_dir(&udf).unwrap();
+        assert!(cleanup_renderer_workspace(&workspace, cleanup_candidate).is_err());
+        assert!(udf.exists(), "replacement path must never be deleted");
+        fs::remove_dir_all(&udf).unwrap();
         fs::rename(&moved_udf, &udf).unwrap();
+        state.workspaces.cleanup_job(&job_id).unwrap();
+    }
+
+    #[test]
+    fn renderer_workspace_cleanup_releases_guards_only_after_exact_validation() {
+        let lane = tempfile::tempdir().unwrap();
+        let state = crate::initialize_runtime(&lane.path().join("app-data"), Utc::now()).unwrap();
+        let job_id = Uuid::new_v4().hyphenated().to_string();
+        let workspace = state.workspaces.create_job(&job_id).unwrap();
+        let renderer = create_renderer_workspace(&workspace, &job_id).unwrap();
+        let udf = renderer.path.clone();
+        assert_eq!(
+            renderer.ownership_guards.len(),
+            RENDERER_WORKSPACE_GUARD_COUNT
+        );
+        assert_eq!(
+            identity_from_file(renderer.ownership_guards.last().unwrap()).unwrap(),
+            renderer.identity
+        );
+
+        cleanup_renderer_workspace(&workspace, renderer).unwrap();
+        assert!(
+            !udf.exists(),
+            "the exact renderer root must be removable after validated guard release"
+        );
+        state.workspaces.cleanup_job(&job_id).unwrap();
+    }
+
+    #[test]
+    fn renderer_workspace_cleanup_does_not_delete_after_marker_validation_fails() {
+        let lane = tempfile::tempdir().unwrap();
+        let state = crate::initialize_runtime(&lane.path().join("app-data"), Utc::now()).unwrap();
+        let job_id = Uuid::new_v4().hyphenated().to_string();
+        let workspace = state.workspaces.create_job(&job_id).unwrap();
+        let renderer = create_renderer_workspace(&workspace, &job_id).unwrap();
+        let udf = renderer.path.clone();
+        fs::write(udf.join(UDF_MARKER), "wrong owner").unwrap();
+
+        assert!(cleanup_renderer_workspace(&workspace, renderer).is_err());
+        assert!(
+            udf.exists(),
+            "cleanup must not start until marker validation authorizes it"
+        );
         state.workspaces.cleanup_job(&job_id).unwrap();
     }
 
