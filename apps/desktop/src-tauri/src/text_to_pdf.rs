@@ -399,7 +399,12 @@ fn is_noncharacter(code: u32) -> bool {
 }
 
 fn admitted_script(code: u32) -> Option<AdmittedScript> {
-    if matches!(code, 0x0900..=0x097f | 0xa8e0..=0xa8ff) {
+    if matches!(code, 0x2028 | 0x2029) {
+        // Unicode mandatory line/paragraph separators are not normalized TXT
+        // logical lines. Reject them before WebView2 so they cannot bypass the
+        // LF-owned line-count and per-line byte limits during layout.
+        None
+    } else if matches!(code, 0x0900..=0x097f | 0xa8e0..=0xa8ff) {
         Some(AdmittedScript::Devanagari)
     } else if matches!(code, 0x0c00..=0x0c7f) {
         Some(AdmittedScript::Telugu)
@@ -985,6 +990,14 @@ mod tests {
             preflight_text(&vec![b'a'; 65_537]).unwrap_err().code,
             "TXT_LINE_BYTES_LIMIT"
         );
+    }
+
+    #[test]
+    fn unicode_mandatory_breaks_cannot_bypass_logical_line_limits() {
+        for separator in ['\u{2028}', '\u{2029}'] {
+            let error = preflight_text(separator.to_string().as_bytes()).unwrap_err();
+            assert_eq!(error.code, "TXT_UNSUPPORTED_UNICODE");
+        }
     }
 
     #[test]

@@ -130,6 +130,10 @@ Require-Text $textCore @(
   "default-src 'none'", "script-src 'none'", "connect-src 'none'", "style-src 'self'", "font-src 'self'",
   'font-synthesis:none', 'white-space:pre-wrap', 'overflow-wrap:anywhere', 'tab-size:4'
 ) 'input, response and canonical document boundary'
+Require-Text $textCore @(
+  'matches!(code, 0x2028 | 0x2029)',
+  "for separator in ['\u{2028}', '\u{2029}']"
+) 'mandatory Unicode-separator rejection boundary'
 
 Require-Text $rendererProduction @(
   'DOCUMENT_URL', 'CSS_URL',
@@ -144,7 +148,7 @@ Require-Text $rendererProduction @(
   'SetAreBrowserAcceleratorKeysEnabled(false)', 'PrintToPdf', 'SetIsVisible(false)',
   'SetAllowExternalDrop(false)', 'owns_generation', 'complete_once', 'controller.Close()',
   'CallbackGuard', 'completion_token', 'Weak<CallbackAuthority>', 'ControllerOwner',
-  'deny_stale_resource_request'
+  'deny_stale_resource_request', 'user_data_identity_is_current', 'encode_wide'
 ) 'hidden WebView2 resource and callback boundary'
 foreach ($forbidden in @('ExecuteScript', 'AddHostObject', 'PostWebMessage', 'QueryInterface', 'transmute', 'AddRef', 'http://', 'localhost', '127.0.0.1', 'file://', 'data:')) {
   if ($rendererProduction.Contains($forbidden)) { throw "G04E1 renderer production source contains a prohibited path: $forbidden" }
@@ -163,7 +167,7 @@ Require-Text $serviceProduction @(
   '/Rotate', '/OpenAction', '/JavaScript', '/AcroForm', '/Names', 'UDF_MARKER',
   'validate_recovery_renderer_workspaces', 'cleanup_renderer_workspace', 'clear_unpublished_intent',
   'DependencyDiagnostic', 'id: "webview2"', 'runtime_version',
-  'check_deadline_until_publication_commit'
+  'check_deadline_until_publication_commit', 'open_directory_without_delete_share'
 ) 'verification, publication, recovery and diagnostic boundary'
 foreach ($forbidden in @('std::process::Command', 'cmd.exe', 'powershell.exe', 'ShellExecute', 'runtime download')) {
   if ($rendererProduction.Contains($forbidden) -or $serviceProduction.Contains($forbidden)) {
@@ -223,9 +227,14 @@ if (!$ci.Contains('npm run verify:g04e1 --workspace @document-studio/desktop')) 
   throw 'G04E1 boundary verifier is not wired into exact-head CI.'
 }
 Require-Text $ci @(
+  'merge-tree:',
+  'ref: ${{ github.event.pull_request.head.sha || github.sha }}',
+  'EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}',
+  'EXPECTED_BASE: ${{ github.event.pull_request.base.sha || github.sha }}',
+  'test "$(git rev-parse HEAD^2)" = "$EXPECTED_HEAD"',
   'native_renderer_fault_matrix_closes_exact_generation_at_bounded_checkpoints',
   'native_text_service_cancellation_matrix_cleans_owned_state_and_preserves_commits',
   'native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts'
-) 'native exact-head CI proof'
+) 'exact feature-head, merge-tree and native CI proof'
 
 Write-Output 'G04E1 exact dependencies, immutable fonts/OFL, strict UTF-8 and Unicode bounds, hidden intercepted WebView2, no-network callbacks, qpdf verification/publication/recovery, opaque IPC, accessible UI, no migration and minimum capability boundaries verified.'

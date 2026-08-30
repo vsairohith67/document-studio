@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,11 +40,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::app_state::CancellationToken;
 use crate::contracts::{OperationError, OperationStage};
+use crate::path_policy::reject_reparse_components;
 use crate::text_to_pdf::{
     AdmittedScript, TextToPdfSettings, CONTENT_SECURITY_POLICY, CSS_URL, DOCUMENT_URL,
     NOTO_DEVANAGARI_BYTES, NOTO_DEVANAGARI_URL, NOTO_SANS_BYTES, NOTO_SANS_URL, NOTO_TELUGU_BYTES,
     NOTO_TELUGU_URL, TXT_MAX_SERVED_BYTES,
 };
+use crate::windows_security::{file_identity, FileIdentity};
 
 const CREATION_TIMEOUT: Duration = Duration::from_secs(30);
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -95,6 +97,7 @@ pub struct TextRenderRequest {
     pub renderer_generation: String,
     pub lifecycle_version: u64,
     pub user_data_directory: PathBuf,
+    pub user_data_identity: FileIdentity,
     pub raw_pdf_path: PathBuf,
     pub html: Arc<[u8]>,
     pub css: Arc<[u8]>,
@@ -318,7 +321,7 @@ fn render_on_initialized_sta(
     authority: &Arc<CallbackAuthority>,
     operation_deadline: Instant,
 ) -> Result<TextRenderEvidence, RendererFailure> {
-    if !request.user_data_directory.is_dir()
+    if !user_data_identity_is_current(&request.user_data_directory, request.user_data_identity)
         || request.raw_pdf_path.exists()
         || request
             .raw_pdf_path
@@ -442,7 +445,7 @@ fn render_on_initialized_sta(
         }
         Ok(())
     }));
-    let output = HSTRING::from(request.raw_pdf_path.as_os_str().to_string_lossy().as_ref());
+    let output = path_hstring(&request.raw_pdf_path);
     test_checkpoint(authority, RendererCheckpoint::PrintStarted)?;
     // SAFETY: callback carries generation ownership; it reports only to this STA.
     unsafe { webview7.PrintToPdf(&output, &print_settings, &print_handler) }?;
@@ -527,13 +530,10 @@ fn create_environment(
             Ok(())
         },
     ));
-    let udf = HSTRING::from(
-        request
-            .user_data_directory
-            .as_os_str()
-            .to_string_lossy()
-            .as_ref(),
-    );
+    if !user_data_identity_is_current(&request.user_data_directory, request.user_data_identity) {
+        return Err(RendererFailure::Native);
+    }
+    let udf = path_hstring(&request.user_data_directory);
     // SAFETY: WebView2 receives generated COM options and a job-owned UDF.
     unsafe {
         webview2_com::Microsoft::Web::WebView2::Win32::CreateCoreWebView2EnvironmentWithOptions(
@@ -552,7 +552,21 @@ fn create_environment(
     );
     #[cfg(test)]
     drop(withheld_sender);
-    result?.map_err(RendererFailure::from)
+    let environment = result?.map_err(RendererFailure::from)?;
+    if !user_data_identity_is_current(&request.user_data_directory, request.user_data_identity) {
+        return Err(RendererFailure::Native);
+    }
+    Ok(environment)
+}
+
+fn path_hstring(path: &Path) -> HSTRING {
+    HSTRING::from_wide(&path.as_os_str().encode_wide().collect::<Vec<_>>())
+}
+
+pub(crate) fn user_data_identity_is_current(path: &Path, expected: FileIdentity) -> bool {
+    reject_reparse_components(path).is_ok()
+        && path.is_dir()
+        && file_identity(path).is_ok_and(|actual| actual == expected)
 }
 
 fn create_controller(
@@ -1712,6 +1726,7 @@ mod tests {
             let root = lane.path().join(format!("case-{index}"));
             let udf = root.join("udf");
             fs::create_dir_all(&udf).unwrap();
+            let user_data_identity = file_identity(&udf).unwrap();
             let raw_pdf_path = root.join("raw.pdf");
             let job_id = Uuid::new_v4().hyphenated().to_string();
             let generation = Uuid::new_v4().hyphenated().to_string();
@@ -1727,6 +1742,7 @@ mod tests {
                     renderer_generation: generation,
                     lifecycle_version: 1,
                     user_data_directory: udf,
+                    user_data_identity,
                     raw_pdf_path: raw_pdf_path.clone(),
                     html: html.clone(),
                     css: css.clone(),

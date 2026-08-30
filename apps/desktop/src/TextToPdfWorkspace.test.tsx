@@ -142,6 +142,24 @@ describe('G04E1 TXT to PDF workspace', () => {
     );
   });
 
+  it('keeps source selection locked until a terminal snapshot owns cleanup', async () => {
+    const user = userEvent.setup();
+    let resolveSnapshot: ((snapshot: JobRecord) => void) | undefined;
+    const terminalSnapshot = new Promise<JobRecord>((resolve) => { resolveSnapshot = resolve; });
+    mocks.get.mockReturnValue(terminalSnapshot);
+    render(<TextToPdfWorkspace onBusyChange={vi.fn()} onOpenViewer={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Choose TXT' }));
+    await user.click(screen.getByRole('button', { name: 'Choose' }));
+    await user.click(screen.getByRole('button', { name: 'Create verified PDF' }));
+
+    await act(async () => { mocks.progressHandler?.(completedEvent()); });
+    expect((screen.getByRole('button', { name: 'Replace' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Choose' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => { resolveSnapshot?.(job('completed')); });
+    expect(((await screen.findByRole('button', { name: 'Choose TXT' })) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('has bounded explanations, no document preview, and no accessibility violations', async () => {
     const user = userEvent.setup();
     const { container } = render(<TextToPdfWorkspace onBusyChange={vi.fn()} onOpenViewer={vi.fn()} />);

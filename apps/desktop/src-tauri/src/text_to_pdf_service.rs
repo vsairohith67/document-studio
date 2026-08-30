@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -50,7 +50,10 @@ use crate::text_to_pdf::{
 };
 use crate::text_to_pdf_renderer::{render_text_pdf, TextRenderEvidence, TextRenderRequest};
 use crate::viewer_sessions::ViewerJobSource;
-use crate::windows_security::{delete_open_file, identity_from_file, open_for_identity_and_delete};
+use crate::windows_security::{
+    delete_open_file, identity_from_file, open_directory_without_delete_share,
+    open_for_identity_and_delete, FileIdentity,
+};
 use crate::workspace::JobWorkspace;
 
 const QPDF_NORMALIZE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -100,6 +103,8 @@ struct RendererWorkspace {
     path: PathBuf,
     marker_value: String,
     generation: String,
+    identity: FileIdentity,
+    _ownership_guards: Vec<File>,
 }
 
 impl TextToPdfService {
@@ -380,6 +385,8 @@ impl TextToPdfService {
             path: renderer_workspace.path.clone(),
             marker_value: renderer_workspace.marker_value.clone(),
             generation: renderer_workspace.generation.clone(),
+            identity: renderer_workspace.identity,
+            _ownership_guards: Vec::new(),
         });
         self.transition(
             job_id,
@@ -426,6 +433,7 @@ impl TextToPdfService {
                 renderer_generation: renderer_workspace.generation.clone(),
                 lifecycle_version: running.version,
                 user_data_directory: renderer_workspace.path.clone(),
+                user_data_identity: renderer_workspace.identity,
                 raw_pdf_path: raw_pdf_path.clone(),
                 html,
                 css,
@@ -972,6 +980,9 @@ impl TextToPdfService {
     ) -> Result<(), OperationError> {
         let job = self.current_job(job_id)?;
         let output = job.outputs.first().ok_or_else(metadata_error)?;
+        let preserve_commit_ambiguity = job.state == JobState::Publishing
+            && output.status == OutputStatus::Publishing
+            && output.final_path.is_some();
         if let Some(partial_path) = output.partial_path.as_deref() {
             let partial_path = Path::new(partial_path);
             let destination = Path::new(&job.destination_directory);
@@ -996,10 +1007,12 @@ impl TextToPdfService {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return Err(cleanup_error()),
             }
-            self.state
-                .database()
-                .clear_owned_partial(job_id, &partial_path.to_string_lossy())
-                .map_err(|_| metadata_error())?;
+            if !preserve_commit_ambiguity {
+                self.state
+                    .database()
+                    .clear_owned_partial(job_id, &partial_path.to_string_lossy())
+                    .map_err(|_| metadata_error())?;
+            }
         }
         if let (Some(workspace), Some(renderer_workspace)) = (workspace, renderer_workspace) {
             cleanup_renderer_workspace(workspace, renderer_workspace)?;
@@ -1548,11 +1561,27 @@ fn create_renderer_workspace(
     job_id: &str,
 ) -> Result<RendererWorkspace, OperationError> {
     let generation = Uuid::new_v4().hyphenated().to_string();
+    let workspace_parent = workspace.root.parent().ok_or_else(workspace_error)?;
+    reject_reparse_components(workspace_parent).map_err(|_| workspace_error())?;
+    reject_reparse_components(&workspace.root).map_err(|_| workspace_error())?;
+    reject_reparse_components(&workspace.temporary).map_err(|_| workspace_error())?;
+    let mut ownership_guards = vec![
+        open_directory_without_delete_share(workspace_parent).map_err(|_| workspace_error())?,
+        open_directory_without_delete_share(&workspace.root).map_err(|_| workspace_error())?,
+        open_directory_without_delete_share(&workspace.temporary).map_err(|_| workspace_error())?,
+    ];
     let parent = workspace.temporary.join("renderer-udfs");
     fs::create_dir(&parent).map_err(|_| workspace_error())?;
+    reject_reparse_components(&parent).map_err(|_| workspace_error())?;
+    ownership_guards
+        .push(open_directory_without_delete_share(&parent).map_err(|_| workspace_error())?);
     let path = parent.join(&generation);
     fs::create_dir(&path).map_err(|_| workspace_error())?;
     reject_reparse_components(&path).map_err(|_| workspace_error())?;
+    ownership_guards
+        .push(open_directory_without_delete_share(&path).map_err(|_| workspace_error())?);
+    let identity = identity_from_file(ownership_guards.last().ok_or_else(workspace_error)?)
+        .map_err(|_| workspace_error())?;
     let marker_value = format!("job={job_id}\ngeneration={generation}\n");
     let mut marker = OpenOptions::new()
         .write(true)
@@ -1567,6 +1596,8 @@ fn create_renderer_workspace(
         path,
         marker_value,
         generation,
+        identity,
+        _ownership_guards: ownership_guards,
     })
 }
 
@@ -2294,6 +2325,27 @@ mod tests {
         let recovered = crate::recovery::resolve_interrupted(&state, &job.id).unwrap();
         assert_eq!(recovered.state, JobState::Interrupted);
         assert!(!workspace.root.exists());
+    }
+
+    #[test]
+    fn renderer_workspace_identity_rejects_a_replaced_udf_path() {
+        let lane = tempfile::tempdir().unwrap();
+        let state = crate::initialize_runtime(&lane.path().join("app-data"), Utc::now()).unwrap();
+        let job_id = Uuid::new_v4().hyphenated().to_string();
+        let workspace = state.workspaces.create_job(&job_id).unwrap();
+        let renderer = create_renderer_workspace(&workspace, &job_id).unwrap();
+        let udf = renderer.path.clone();
+        let identity = renderer.identity;
+        let moved_udf = udf.with_file_name("replacement-attempt");
+        drop(renderer);
+        fs::rename(&udf, &moved_udf).unwrap();
+        fs::create_dir(&udf).unwrap();
+        assert!(!crate::text_to_pdf_renderer::user_data_identity_is_current(
+            &udf, identity
+        ));
+        fs::remove_dir(&udf).unwrap();
+        fs::rename(&moved_udf, &udf).unwrap();
+        state.workspaces.cleanup_job(&job_id).unwrap();
     }
 
     #[test]

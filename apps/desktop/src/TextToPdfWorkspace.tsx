@@ -85,18 +85,23 @@ export function TextToPdfWorkspace({
         setProgress(event);
         setAnnouncement(event.message);
         if (terminalStates.has(event.state)) {
-          setBusy(false);
           void api.jobs.get({ jobId: event.jobId }).then((snapshot) => {
             if (!active) return;
             setJob(snapshot);
             setSource(null);
             sourceRef.current = null;
+            setBusy(false);
             if (snapshot.state === 'completed') {
               queueMicrotask(() => result.current?.focus());
             } else {
               queueMicrotask(() => openButton.current?.focus());
             }
-          }).catch((reason: unknown) => active && setError(operationErrorMessage(reason)));
+          }).catch((reason: unknown) => {
+            if (!active) return;
+            setBusy(false);
+            setError(operationErrorMessage(reason));
+            queueMicrotask(() => openButton.current?.focus());
+          });
         }
       },
     );
