@@ -730,7 +730,6 @@ impl TextToPdfService {
                         verified_hash,
                     )
                     .map_err(|_| publication_io("publication intent could not be stored"))?;
-                publication_commit_test_expire_deadline(job_id);
                 Ok(())
             },
         )
@@ -744,6 +743,7 @@ impl TextToPdfService {
                 publication_error(error)
             }
         })?;
+        publication_commit_test_expire_deadline(job_id);
         check_deadline_until_publication_commit(
             operation_deadline,
             token,
