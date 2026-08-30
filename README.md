@@ -2,7 +2,7 @@
 
 **Document Studio** is a privacy-first, high-performance document workspace planned for desktop first, followed by an optional web service and mobile capture companion.
 
-This repository contains the Document Studio product specifications and the accepted Windows foundation, PDF Merge, G03 Viewer/Core PDF, G04A lossless-compression and G04B images-to-PDF slices. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing, the `diagnostic.copy` reference operation, and accepted local PDF operations. **G04B — COMPLETE** on accepted main `6940a1381822a5872f4c345cc0e5cd15b2e6294c`. **G04B2 — active implementation** on `feat/g04b2-pdf-to-images`, adding PDF-to-images with the existing accepted PDF.js 6.2.108 renderer and `image` 0.25.10 encoder; G04B2 is not accepted or complete.
+This repository contains the Document Studio product specifications and accepted local Windows foundations through the G04F1 merge on main `a664dea4755122deefceac9d6ef699a920acc398`. The desktop application is a Tauri 2, Rust, React, TypeScript and Vite workspace with metadata-only SQLite, typed IPC, durable jobs, secure temporary workspaces, progressive PDF.js viewing and verified local PDF operations. **G04E1 is an unmerged implementation candidate** on `codex/ds-g04e1-txt-to-pdf-v1`; it adds only `text.to-pdf@1.0.0` and must stop at the owner merge gate.
 
 ## Current delivery status
 
@@ -24,8 +24,9 @@ G01 proved the safety architecture before a production document engine was adopt
 - G04A adds accepted lossless structural PDF compression through the existing qpdf sandbox and publication boundary.
 - G04B adds accepted bounded local `image.to-pdf@1.0.0` for JPEG/JPG, PNG and WebP.
 - G04B2 adds `pdf.to-images@1.0.0` for ordered JPEG, PNG and lossless WebP output at 72/150/300 DPI through sequential private PDF.js canvases, authenticated raw IPC and Rust encoding.
-- G04C2B is accepted on the starting main and adds the fixed `balanced-v1` Optimize profile: safe photographic streams may be recompressed locally, every affected page is verified, and no file is created unless both 5% and 64 KiB are saved. G04D Office conversion, G04E text/Markdown/local-HTML conversion and G04F scheduling/execution remain later slices. OCR, repair, PDF/A, editing, redaction, cloud, accounts and AI remain later goals.
-- G04F1 adds a branch-only, metadata-only preview foundation for 1–128 ordered `pdf.compress-lossless@1.0.0` jobs. It recomputes a private canonical proof and atomically creates queued/planned metadata, but has no scheduler, execution, automatic resume or batch progress engine. It remains pending the owner merge gate.
+- G04C2B is accepted on main and adds the fixed `balanced-v1` Optimize profile: safe photographic streams may be recompressed locally, every affected page is verified, and no file is created unless both 5% and 64 KiB are saved.
+- G04F1 is accepted on main and adds a metadata-only preview foundation for 1–128 ordered `pdf.compress-lossless@1.0.0` jobs. It recomputes a private canonical proof and atomically creates queued/planned metadata, but has no scheduler, execution, automatic resume or batch progress engine.
+- G04E1 adds one strict UTF-8 `text.to-pdf@1.0.0` candidate. A hidden Rust-owned WebView2 serves only generated HTML/CSS and three exact packaged static Noto Regular fonts from an intercepted `.invalid` origin, prints privately, normalizes through accepted qpdf 12.3.2, verifies the reopened PDF and publishes without overwrite. It adds no Office, Markdown, HTML-input, CSV/JSON/XML, batch-execution, network-server, migration or system-font path.
 
 ## Start here
 
@@ -38,6 +39,7 @@ G01 proved the safety architecture before a production document engine was adopt
 7. Read `docs/implementation-log/G04B-image-pdf-conversion.md`, `docs/implementation-log/G04B2-pdf-to-images.md` and ADR-013 for the independently gated conversion paths.
 8. Read `docs/implementation-log/G04C2-corpus-recovery.md`, `docs/implementation-log/G04C2B-balanced-compression.md` and ADR-016 for the frozen corpus and owner-gated balanced path.
 9. Read `docs/implementation-log/G04F1-batch-preview-foundation.md` and ADR-017 for the batch preview/atomic metadata boundary.
+10. Read `docs/implementation-log/G04E1-txt-to-pdf.md` and ADR-019 for the hidden intercepted TXT renderer, Unicode/font gates and verification evidence.
 
 ## Validate and run on Windows
 
@@ -49,6 +51,7 @@ npm ci --ignore-scripts
 npm run typecheck
 npm test
 npm run test:browser --workspace @document-studio/desktop
+npm run verify:g04e1 --workspace @document-studio/desktop
 cargo test --workspace --all-targets --locked
 npm --workspace @document-studio/desktop run tauri -- dev
 ```
@@ -82,8 +85,8 @@ The development window provides PDF Merge, Viewer, the accepted G04A Optimize wo
 - `.github/`, `CONTRIBUTING.md`, `SECURITY.md` - repository workflow, issue/PR templates and security reporting.
 - `CHANGELOG.md`, `THIRD_PARTY_NOTICES.md` - release history and dependency/model adoption gate.
 
-Current implementation version: `0.5.1-g04b2-pdf-to-images-dev`
-Implementation date: `22 August 2026`
+Current implementation version: `0.8.0-g04e1-text-to-pdf-dev`
+Implementation date: `28 August 2026`
 
 ## Goal Mode build workflow
 

@@ -3,7 +3,13 @@ import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
 const repoRoot = resolve(import.meta.dirname, '..', '..', '..');
-const evidenceDirectory = resolve(repoRoot, 'target', 'g04b-browser-visual-evidence');
+const cargoTargetRoot = process.env.CARGO_TARGET_DIR
+  ? resolve(repoRoot, process.env.CARGO_TARGET_DIR)
+  : resolve(repoRoot, 'target');
+const evidenceRoot = process.env.DOCUMENT_STUDIO_BROWSER_EVIDENCE_ROOT
+  ? resolve(process.env.DOCUMENT_STUDIO_BROWSER_EVIDENCE_ROOT)
+  : cargoTargetRoot;
+const evidenceDirectory = resolve(evidenceRoot, 'g04b-browser-visual-evidence');
 const evidenceFiles = ['source.png', 'output.pdf'];
 
 mkdirSync(evidenceDirectory, { recursive: true });

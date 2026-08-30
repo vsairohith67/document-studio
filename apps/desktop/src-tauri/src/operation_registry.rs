@@ -12,6 +12,7 @@ use crate::contracts::{
     PDF_TO_IMAGES_VERSION, QPDF_DEPENDENCY_ID,
 };
 use crate::path_policy::validate_output_name;
+use crate::text_to_pdf::{TEXT_TO_PDF_OPERATION_ID, TEXT_TO_PDF_VERSION};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationKind {
@@ -46,6 +47,7 @@ pub fn all_manifests() -> Vec<OperationManifest> {
         pdf_compress_lossless_manifest(),
         pdf_compress_balanced_manifest(),
         image_to_pdf_manifest(),
+        text_to_pdf_manifest(),
         pdf_to_images_manifest(),
         extract_pages_manifest(),
         remove_pages_manifest(),
@@ -271,6 +273,45 @@ pub fn image_to_pdf_manifest() -> OperationManifest {
             "publication-hash",
         ],
     )
+}
+
+pub fn text_to_pdf_manifest() -> OperationManifest {
+    let mut value = manifest(
+        TEXT_TO_PDF_OPERATION_ID,
+        TEXT_TO_PDF_VERSION,
+        "TXT to PDF",
+        "convert",
+        "Converts one strict UTF-8 TXT file into a verified local PDF using fixed packaged fonts.",
+        vec!["text/plain"],
+        1,
+        1,
+        "application/pdf",
+        vec!["document-studio-core", QPDF_DEPENDENCY_ID],
+        vec![
+            "regular-non-reparse-file",
+            "strict-utf8",
+            "bounded-unicode",
+            "approved-font-cmap",
+            "intercepted-webview2-resources",
+            "network-denial",
+            "qpdf-strict-check",
+            "pdf-security-inventory",
+            "embedded-font-inventory",
+            "source-immutability",
+            "publication-hash",
+            "final-reopen",
+        ],
+    );
+    value.settings_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pageSize", "orientation"],
+        "properties": {
+            "pageSize": { "enum": ["a4", "letter"] },
+            "orientation": { "enum": ["portrait", "landscape"] }
+        }
+    });
+    value
 }
 
 pub fn pdf_to_images_manifest() -> OperationManifest {
@@ -542,7 +583,7 @@ mod tests {
     #[test]
     fn registry_exposes_accepted_g04b2_and_g04c2b_manifests() {
         let manifests = all_manifests();
-        assert_eq!(manifests.len(), 11);
+        assert_eq!(manifests.len(), 12);
         assert_eq!(manifests[0].id, "diagnostic.copy");
         assert_eq!(manifests[1].id, "pdf.merge");
         assert_eq!(manifests[1].inputs.minimum, 2);
@@ -569,15 +610,30 @@ mod tests {
             ["image/jpeg", "image/png", "image/webp"]
         );
         assert_eq!(manifests[4].dependencies, ["document-studio-core", "qpdf"]);
-        assert_eq!(manifests[5].id, "pdf.to-images");
+        assert_eq!(manifests[5].id, "text.to-pdf");
         assert_eq!(manifests[5].version, "1.0.0");
-        assert_eq!(manifests[5].outputs.multiplicity, "multiple");
+        assert_eq!(manifests[5].inputs.accepted_mime_types, ["text/plain"]);
         assert_eq!(
-            manifests[5].dependencies,
+            manifests[5].settings_schema,
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["pageSize", "orientation"],
+                "properties": {
+                    "pageSize": { "enum": ["a4", "letter"] },
+                    "orientation": { "enum": ["portrait", "landscape"] }
+                }
+            })
+        );
+        assert_eq!(manifests[6].id, "pdf.to-images");
+        assert_eq!(manifests[6].version, "1.0.0");
+        assert_eq!(manifests[6].outputs.multiplicity, "multiple");
+        assert_eq!(
+            manifests[6].dependencies,
             ["document-studio-core", "pdfjs", "qpdf"]
         );
         assert_eq!(
-            manifests[6..]
+            manifests[7..]
                 .iter()
                 .map(|manifest| manifest.id.as_str())
                 .collect::<Vec<_>>(),
@@ -589,7 +645,7 @@ mod tests {
                 "pdf.split",
             ]
         );
-        assert!(manifests[6..]
+        assert!(manifests[7..]
             .iter()
             .all(|manifest| { manifest.version == "1.0.0" && manifest.dependencies == ["qpdf"] }));
     }

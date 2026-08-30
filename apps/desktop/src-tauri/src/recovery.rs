@@ -1,13 +1,15 @@
+use std::fs;
 use std::path::Path;
 
 use crate::app_state::AppState;
 use crate::contracts::{
-    JobRecord, JobState, OperationError, OperationStage, BALANCED_COMPRESSION_OPERATION_ID,
-    DIAGNOSTIC_COPY_OPERATION_ID, LEGACY_CLEANUP_PROVEN, LEGACY_CLEANUP_UNPROVEN,
-    LEGACY_DIAGNOSTIC_COPY_VERSION,
+    JobRecord, JobState, OperationError, OperationStage, OutputStatus,
+    BALANCED_COMPRESSION_OPERATION_ID, DIAGNOSTIC_COPY_OPERATION_ID, LEGACY_CLEANUP_PROVEN,
+    LEGACY_CLEANUP_UNPROVEN, LEGACY_DIAGNOSTIC_COPY_VERSION,
 };
 use crate::database::{Database, DatabaseError};
 use crate::publication::{hash_file, is_exact_owned_partial_path, partial_ownership_result_code};
+use crate::text_to_pdf::TEXT_TO_PDF_OPERATION_ID;
 use crate::windows_security::{delete_open_file, identity_from_file, open_for_identity_and_delete};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -218,27 +220,36 @@ fn reconcile_current_job(
     if matches!(job.state, JobState::Publishing | JobState::Interrupted)
         && publication_proof_matches_all(state, &job)?
     {
-        if !cleanup_partial(state, &job)? || !cleanup_workspace(state, &job)? {
-            interrupt_with_cleanup_error(state, &job)?;
+        {
+            let mut database = state.database();
+            for output in &job.outputs {
+                let evidence = database
+                    .publication_evidence_at(&job.id, output.ordinal)?
+                    .ok_or(DatabaseError::TerminalEvidenceMissing)?;
+                if evidence.status == OutputStatus::Publishing {
+                    database.set_output_published_at(
+                        &job.id,
+                        output.ordinal,
+                        &evidence.resolved_name,
+                        &evidence.final_path,
+                        evidence.size_bytes,
+                        &evidence.sha256,
+                        evidence.partial_path.as_deref(),
+                    )?;
+                }
+            }
+        }
+        let published_job = state
+            .database()
+            .get_job(&job.id)?
+            .ok_or(DatabaseError::JobConflict)?;
+        if !cleanup_partial(state, &published_job)? || !cleanup_workspace(state, &published_job)? {
+            interrupt_with_cleanup_error(state, &published_job)?;
             report.cleanup_failures += 1;
             report.interrupted += 1;
             return Ok(());
         }
         let mut database = state.database();
-        for output in &job.outputs {
-            let evidence = database
-                .publication_evidence_at(&job.id, output.ordinal)?
-                .ok_or(DatabaseError::TerminalEvidenceMissing)?;
-            database.set_output_published_at(
-                &job.id,
-                output.ordinal,
-                &evidence.resolved_name,
-                &evidence.final_path,
-                evidence.size_bytes,
-                &evidence.sha256,
-                None,
-            )?;
-        }
         let current = database
             .get_job(&job.id)?
             .ok_or(DatabaseError::JobConflict)?;
@@ -254,6 +265,22 @@ fn reconcile_current_job(
             )?;
         }
         report.completed_publications += 1;
+        return Ok(());
+    }
+
+    if has_unresolved_text_publication(&job) {
+        if !cleanup_workspace(state, &job)? {
+            interrupt_with_cleanup_error(state, &job)?;
+            report.cleanup_failures += 1;
+        } else {
+            let mut database = state.database();
+            database.record_error_once(&job.id, &publication_reconciliation_error())?;
+            let current = database
+                .get_job(&job.id)?
+                .ok_or(DatabaseError::JobConflict)?;
+            database.mark_interrupted(&job.id, current.state)?;
+        }
+        report.interrupted += 1;
         return Ok(());
     }
 
@@ -278,8 +305,16 @@ fn reconcile_current_job(
             )?;
         }
         database.record_error_once(&job.id, &worker_stopped_error(job.state))?;
-        transition_to_failed(&mut database, &job)?;
-        report.failed += 1;
+        if job.operation_id == TEXT_TO_PDF_OPERATION_ID {
+            let current = database
+                .get_job(&job.id)?
+                .ok_or(DatabaseError::JobConflict)?;
+            database.mark_interrupted(&job.id, current.state)?;
+            report.interrupted += 1;
+        } else {
+            transition_to_failed(&mut database, &job)?;
+            report.failed += 1;
+        }
     } else {
         interrupt_with_cleanup_error(state, &job)?;
         report.cleanup_failures += 1;
@@ -351,6 +386,15 @@ fn cleanup_partial(state: &AppState, job: &JobRecord) -> Result<bool, DatabaseEr
 }
 
 fn cleanup_workspace(state: &AppState, job: &JobRecord) -> Result<bool, DatabaseError> {
+    if job.operation_id == crate::text_to_pdf::TEXT_TO_PDF_OPERATION_ID
+        && crate::text_to_pdf_service::validate_recovery_renderer_workspaces(
+            &state.workspaces.root().join(&job.id),
+            &job.id,
+        )
+        .is_err()
+    {
+        return Ok(false);
+    }
     if state.workspaces.cleanup_job(&job.id).is_err() {
         return Ok(false);
     }
@@ -383,14 +427,28 @@ fn publication_proof_matches_all(state: &AppState, job: &JobRecord) -> Result<bo
         else {
             return Ok(false);
         };
-        if evidence.status != crate::contracts::OutputStatus::Published {
+        let committed_but_unfinalized = job.operation_id == TEXT_TO_PDF_OPERATION_ID
+            && evidence.status == OutputStatus::Publishing
+            && evidence.partial_path.as_deref().is_some_and(|partial| {
+                is_exact_owned_partial_path(
+                    Path::new(&job.destination_directory),
+                    &job.id,
+                    Path::new(partial),
+                ) && matches!(fs::symlink_metadata(partial), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            });
+        if evidence.status != OutputStatus::Published && !committed_but_unfinalized {
             return Ok(false);
         }
         let final_path = Path::new(&evidence.final_path);
-        if !final_path.is_file() {
+        if final_path.parent() != Some(Path::new(&job.destination_directory))
+            || final_path.file_name() != Some(evidence.resolved_name.as_ref())
+        {
             return Ok(false);
         }
-        let Ok((size, hash)) = hash_file(final_path) else {
+        let Ok((canonical, _)) = crate::path_policy::canonical_regular_file(final_path) else {
+            return Ok(false);
+        };
+        let Ok((size, hash)) = hash_file(&canonical) else {
             return Ok(false);
         };
         if size != evidence.size_bytes || hash != evidence.sha256 {
@@ -398,6 +456,34 @@ fn publication_proof_matches_all(state: &AppState, job: &JobRecord) -> Result<bo
         }
     }
     Ok(true)
+}
+
+fn has_unresolved_text_publication(job: &JobRecord) -> bool {
+    job.operation_id == TEXT_TO_PDF_OPERATION_ID
+        && job.outputs.iter().any(|output| {
+            output.status == OutputStatus::Publishing
+                && output.final_path.as_deref().is_some_and(|final_path| {
+                    let Some(partial_path) = output.partial_path.as_deref() else {
+                        return false;
+                    };
+                    is_exact_owned_partial_path(
+                        Path::new(&job.destination_directory),
+                        &job.id,
+                        Path::new(partial_path),
+                    ) && matches!(fs::symlink_metadata(partial_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                        && !matches!(fs::symlink_metadata(final_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+                })
+        })
+}
+
+fn publication_reconciliation_error() -> OperationError {
+    OperationError::safe(
+        "TXT_PUBLICATION_RECONCILIATION_REQUIRED",
+        "Published output requires reconciliation",
+        "A committed TXT PDF could not be proven byte-for-byte; the user file was preserved and the durable publication intent remains retryable.",
+        OperationStage::Recovery,
+        false,
+    )
 }
 
 fn partial_publication_error(published: usize, expected: usize) -> OperationError {

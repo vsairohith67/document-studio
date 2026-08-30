@@ -19,6 +19,15 @@
 - OCRmyPDF: https://github.com/ocrmypdf/OCRmyPDF
 - Tesseract: https://github.com/tesseract-ocr/tesseract
 - LibreOffice: https://www.libreoffice.org/
+- WebView2 `ICoreWebView2_7::PrintToPdf`: https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_7/printtopdf
+- WebView2 `ICoreWebView2Environment6::CreatePrintSettings`: https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment6/createprintsettings
+- WebView2 all-source resource filter: https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2_22/addwebresourcerequestedfilterwithrequestsourcekinds
+- Windows `IStream`: https://learn.microsoft.com/en-us/windows/win32/api/objidl/nn-objidl-istream
+- Windows `SHCreateMemStream`: https://learn.microsoft.com/en-us/windows/win32/api/shlwapi/nf-shlwapi-shcreatememstream
+- `webview2-com` 0.38.2: https://crates.io/crates/webview2-com/0.38.2
+- Noto Sans v2.015 archive: https://github.com/notofonts/latin-greek-cyrillic/releases/download/NotoSans-v2.015/NotoSans-v2.015.zip
+- Noto Sans Devanagari v2.006 archive: https://github.com/notofonts/devanagari/releases/download/NotoSansDevanagari-v2.006/NotoSansDevanagari-v2.006.zip
+- Noto Sans Telugu v2.005 archive: https://github.com/notofonts/telugu/releases/download/NotoSansTelugu-v2.005/NotoSansTelugu-v2.005.zip
 - Gotenberg: https://github.com/gotenberg/gotenberg
 - Docling: https://github.com/docling-project/docling
 - Granite Docling 258M: https://huggingface.co/ibm-granite/granite-docling-258M

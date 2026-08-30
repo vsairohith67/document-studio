@@ -351,6 +351,39 @@ pub enum QpdfContractError {
     StagingPath,
     #[error("qpdf returned an unexpected status")]
     UnexpectedExit,
+    #[error("TXT-to-PDF normalization paths must be exact owned staging paths")]
+    TextNormalizationPath,
+}
+
+pub const TEXT_RAW_STAGING_RELATIVE_PATH: &str = r"staging\text-webview-raw.pdf";
+pub const TEXT_NORMALIZED_STAGING_RELATIVE_PATH: &str = r"staging\text-normalized.pdf";
+
+pub fn build_text_pdf_normalization_arguments(
+    input_relative_path: &Path,
+    output_relative_path: &Path,
+) -> Result<Vec<OsString>, QpdfContractError> {
+    if input_relative_path != Path::new(TEXT_RAW_STAGING_RELATIVE_PATH)
+        || output_relative_path != Path::new(TEXT_NORMALIZED_STAGING_RELATIVE_PATH)
+        || !input_relative_path.as_os_str().is_ascii()
+        || !output_relative_path.as_os_str().is_ascii()
+    {
+        return Err(QpdfContractError::TextNormalizationPath);
+    }
+    let mut input = OsString::from("--file=");
+    input.push(input_relative_path);
+    Ok(vec![
+        OsString::from("--empty"),
+        OsString::from("--suppress-recovery"),
+        OsString::from("--stream-data=preserve"),
+        OsString::from("--object-streams=preserve"),
+        OsString::from("--remove-info"),
+        OsString::from("--remove-metadata"),
+        OsString::from("--remove-page-labels"),
+        OsString::from("--pages"),
+        input,
+        OsString::from("--"),
+        output_relative_path.as_os_str().to_owned(),
+    ])
 }
 
 pub fn snapshot_relative_path(ordinal: u32) -> PathBuf {

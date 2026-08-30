@@ -110,3 +110,38 @@ G04A adds no new production dependency. `pdf.compress-lossless@1.0.0` reuses the
 On 22 August 2026 the exact direct crates and their resolved codec/compression subtree had no exact-version matches from the GitHub Advisory API/RustSec data reviewed for this gate. This is point-in-time evidence; every update and release must repeat the advisory, checksum, licence and notices review.
 
 G04B2 adopts no new package. `pdf.to-images@1.0.0` reuses the already pinned local `pdfjs-dist` 6.2.108 display API/worker for private canvas rendering and existing `image` 0.25.10 for Rust-side durable encoding. The exact PDF.js 191-file asset manifest, Apache-2.0 notices, local-only staging and no-CDN policy remain unchanged. The application does not add PDFium, MuPDF, Poppler, PDFBox, libvips, an executable/DLL, runtime download, PATH/system discovery, shell access, an app-defined custom protocol or network capability. WebView2 is an installed platform runtime; its current version is recorded diagnostically and is not promised to produce byte-identical Skia pixels across runtime revisions.
+
+## G04E1 hidden WebView2 TXT renderer adoption
+
+[ADR-019](adr/ADR-019-hidden-webview2-text-pdf-renderer.md) approves exactly two
+direct Windows-target manifest edges. Both packages were already present in
+the accepted `Cargo.lock`; resolution changes only the Document Studio package
+dependency list and introduces no package, version, checksum, or registry
+change.
+
+| Crate | Exact version | crates.io SHA-256 | Licence | Direct Windows-only purpose and boundary |
+|---|---:|---|---|---|
+| `webview2-com` | 0.38.2 | `7130243a7a5b33c54a444e54842e6a9e133de08b5ad7b5861cd8ed9a6a5bc96a` | MIT | Generated WebView2 COM interfaces for all-resource interception, denial events, print settings and `PrintToPdf`; upstream `wravery/webview2-rs`; no bundled runtime, runtime download, alternate renderer, or network path |
+| `windows` | 0.61.3 | `9babd3a767a4c1aef6900409f85f5d53ce2544ccdfaa86dad48c91782c6d6893` | MIT OR Apache-2.0 | `default-features = false`, exactly `Win32_System_Com` and `Win32_UI_Shell`; typed `IStream`, `IStream::Stat`, and `SHCreateMemStream` only |
+
+Tauri/Wry's transitive WebView2 dependency is not a usable direct Rust
+interface and Tauri does not re-export the required revisioned COM types. No
+direct `webview2-com-sys` or `windows-core` edge is added; no manual COM
+identity, vtable, reference counting, or raw stream helper is permitted.
+WebView2 remains the platform-provided Evergreen runtime. Review advisories
+monthly and versions quarterly; every update requires owner approval, exact
+lock/provenance review, compile-surface requalification, real WebView2 and
+no-network evidence, output verification, exact-head CI and independent
+review.
+
+### G04E1 packaged static font resources
+
+Only these unmodified hinted Regular TrueType files are bundled. No Bold, Italic, variable face, system installation or runtime download is permitted. Each repository-owned license path contains the upstream OFL-1.1 text and copyright statement; `font-manifest.json` additionally records names, cmap evidence and OpenType table inventory.
+
+| File | Bytes | SHA-256 | Official source archive and SHA-256 | Repository/tag/commit | Licence |
+|---|---:|---|---|---|---|
+| `NotoSans-Regular.ttf` | 621,572 | `478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823` | `NotoSans-v2.015.zip`; `0c34df072a3fa7efbb7cbf34950e1f971a4447cffe365d3a359e2d4089b958f5` | `notofonts/latin-greek-cyrillic`; `NotoSans-v2.015`; `c4a321e123e4d4ff315f57f4e0adf294fe3a95be` | OFL-1.1 |
+| `NotoSansDevanagari-Regular.ttf` | 244,284 | `306b53ecfb182a504dd8a7446093c316387d2fd8dc350d0792ed1753fe0996cd` | `NotoSansDevanagari-v2.006.zip`; `4c582c103f0a42836338df07148b23a0aa080cce8393ddc4364af87eb22ebd85` | `notofonts/devanagari`; `NotoSansDevanagari-v2.006`; `bb8d2566a1708ef2dcc6396ee2eb261a18967f76` | OFL-1.1 |
+| `NotoSansTelugu-Regular.ttf` | 235,176 | `b274780b69d1d23fe84b55e809a152cb2ac5306d33864b1f87622f6971871aae` | `NotoSansTelugu-v2.005.zip`; `3553e00ca341dc06f4a143c604dd93a1342553169b5a06dc8b0ff50ab6eba0a2` | `notofonts/telugu`; `NotoSansTelugu-v2.005`; `e97c3409a8347d68cccd06a82a68b418c315ee0c` | OFL-1.1 |
+
+The packaged TTF aggregate is exactly 1,101,032 bytes. Updates require new owner admission, official archive/file hash proof, name/version/static/table/cmap requalification, OFL/notice review, PDF embedded-font inventory and exact-head native/CI evidence.

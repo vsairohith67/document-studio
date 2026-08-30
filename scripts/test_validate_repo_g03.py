@@ -20,7 +20,7 @@ def rejected(mutator, label: str) -> None:
 rejected(lambda value: value.__setitem__('state', str(value['state']) + '\nG03 READY TO STAGE'), 'stale ready state')
 rejected(lambda value: value.__setitem__('state', str(value['state']) + '\nG03 is not complete'), 'stale incomplete status')
 rejected(lambda value: value.__setitem__('state', str(value['state']) + '\nG04 remains blocked'), 'stale G04 block')
-rejected(lambda value: value.__setitem__('state', str(value['state']).replace('G04B2 — active implementation', 'G04B2 planning')), 'missing active G04B2 status')
+rejected(lambda value: value.__setitem__('state', str(value['state']).replace('accepted on main at merge b5901a7baca58b3acb1ee00027e42b0059c59fd4', 'G04B2 planning')), 'missing accepted G04B2 status')
 rejected(lambda value: value['asset_manifest'].__setitem__('files', []), 'missing exact asset allow-list')
 rejected(lambda value: value.__setitem__('state', str(value['state']) + '\nAll virtualizer items are visible'), 'overscan visibility claim')
 rejected(lambda value: value.__setitem__('session', str(value['session']).replace('16_777_216', '16_000_000')), 'canvas constant drift')

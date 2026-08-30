@@ -45,3 +45,7 @@ Accessibility audit, localization, signed updates, clean-machine packaging, benc
 ## Phase 9+ - Web/mobile/plugin ecosystem
 
 Optional cloud control plane, browser-local router, mobile capture companion, signature requests and plugin SDK.
+
+## G04E1 bounded delivery note
+
+The G04E1 candidate delivers only `text.to-pdf@1.0.0` after the accepted G04F1 main base. It does not advance the broader roadmap entries for Markdown, local HTML, structured data, Office conversion, batch execution/scheduling, OCR or G05. Those remain separately owner-gated. G04E1 itself is not accepted until its exact-head CI, independent review and owner merge gate complete.

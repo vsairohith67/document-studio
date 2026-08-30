@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "operation": "text.to-pdf@1.0.0",
+  "policy": {
+    "family": "DocumentStudioText",
+    "weight": 400,
+    "style": "normal",
+    "fontSynthesis": "none",
+    "systemFallback": false,
+    "variableFonts": false,
+    "validation": "SHA-256, sfnt table inventory, name records, OS/2 weight and cmap membership are checked before renderer creation"
+  },
+  "fonts": [
+    {
+      "logicalId": "noto-sans-regular",
+      "path": "resources/fonts/g04e1/NotoSans-Regular.ttf",
+      "licensePath": "resources/fonts/g04e1/licenses/NotoSans-OFL-1.1.txt",
+      "familyName": "Noto Sans",
+      "fullName": "Noto Sans Regular",
+      "postScriptName": "NotoSans-Regular",
+      "version": "Version 2.015; ttfautohint (v1.8.4.7-5d5b)",
+      "weight": 400,
+      "style": "Regular",
+      "bytes": 621572,
+      "sha256": "478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823",
+      "source": {
+        "repository": "notofonts/latin-greek-cyrillic",
+        "tag": "NotoSans-v2.015",
+        "commit": "c4a321e123e4d4ff315f57f4e0adf294fe3a95be",
+        "archive": "https://github.com/notofonts/latin-greek-cyrillic/releases/download/NotoSans-v2.015/NotoSans-v2.015.zip",
+        "archiveSha256": "0c34df072a3fa7efbb7cbf34950e1f971a4447cffe365d3a359e2d4089b958f5",
+        "archiveMember": "NotoSans/hinted/ttf/NotoSans-Regular.ttf"
+      },
+      "spdxLicense": "OFL-1.1",
+      "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)",
+      "cmapCoverageEvidence": ["U+0020-007E", "U+00A0-024F", "U+0300-036F", "U+2000-206F", "U+20A0-21FF"],
+      "openTypeTables": ["GDEF", "GPOS", "GSUB", "OS/2", "cmap", "cvt ", "fpgm", "gasp", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "post", "prep"]
+    },
+    {
+      "logicalId": "noto-sans-devanagari-regular",
+      "path": "resources/fonts/g04e1/NotoSansDevanagari-Regular.ttf",
+      "licensePath": "resources/fonts/g04e1/licenses/NotoSansDevanagari-OFL-1.1.txt",
+      "familyName": "Noto Sans Devanagari",
+      "fullName": "Noto Sans Devanagari Regular",
+      "postScriptName": "NotoSansDevanagari-Regular",
+      "version": "Version 2.006; ttfautohint (v1.8.4.7-5d5b)",
+      "weight": 400,
+      "style": "Regular",
+      "bytes": 244284,
+      "sha256": "306b53ecfb182a504dd8a7446093c316387d2fd8dc350d0792ed1753fe0996cd",
+      "source": {
+        "repository": "notofonts/devanagari",
+        "tag": "NotoSansDevanagari-v2.006",
+        "commit": "bb8d2566a1708ef2dcc6396ee2eb261a18967f76",
+        "archive": "https://github.com/notofonts/devanagari/releases/download/NotoSansDevanagari-v2.006/NotoSansDevanagari-v2.006.zip",
+        "archiveSha256": "4c582c103f0a42836338df07148b23a0aa080cce8393ddc4364af87eb22ebd85",
+        "archiveMember": "NotoSansDevanagari/hinted/ttf/NotoSansDevanagari-Regular.ttf"
+      },
+      "spdxLicense": "OFL-1.1",
+      "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/devanagari)",
+      "cmapCoverageEvidence": ["U+0900-097F", "U+A8E0-A8FF", "U+200C-200D"],
+      "openTypeTables": ["GDEF", "GPOS", "GSUB", "OS/2", "cmap", "cvt ", "fpgm", "gasp", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "post", "prep"]
+    },
+    {
+      "logicalId": "noto-sans-telugu-regular",
+      "path": "resources/fonts/g04e1/NotoSansTelugu-Regular.ttf",
+      "licensePath": "resources/fonts/g04e1/licenses/NotoSansTelugu-OFL-1.1.txt",
+      "familyName": "Noto Sans Telugu",
+      "fullName": "Noto Sans Telugu Regular",
+      "postScriptName": "NotoSansTelugu-Regular",
+      "version": "Version 2.005; ttfautohint (v1.8.4.7-5d5b)",
+      "weight": 400,
+      "style": "Regular",
+      "bytes": 235176,
+      "sha256": "b274780b69d1d23fe84b55e809a152cb2ac5306d33864b1f87622f6971871aae",
+      "source": {
+        "repository": "notofonts/telugu",
+        "tag": "NotoSansTelugu-v2.005",
+        "commit": "e97c3409a8347d68cccd06a82a68b418c315ee0c",
+        "archive": "https://github.com/notofonts/telugu/releases/download/NotoSansTelugu-v2.005/NotoSansTelugu-v2.005.zip",
+        "archiveSha256": "3553e00ca341dc06f4a143c604dd93a1342553169b5a06dc8b0ff50ab6eba0a2",
+        "archiveMember": "NotoSansTelugu/hinted/ttf/NotoSansTelugu-Regular.ttf"
+      },
+      "spdxLicense": "OFL-1.1",
+      "copyright": "Copyright 2022 The Noto Project Authors (https://github.com/notofonts/telugu)",
+      "cmapCoverageEvidence": ["U+0C00-0C7F", "U+200C-200D"],
+      "openTypeTables": ["GDEF", "GPOS", "GSUB", "OS/2", "cmap", "cvt ", "fpgm", "gasp", "glyf", "head", "hhea", "hmtx", "loca", "maxp", "name", "post", "prep"]
+    }
+  ]
+}

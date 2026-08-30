@@ -28,7 +28,7 @@ Convert to PDF,Excel to PDF,XLS/XLSX/ODS conversion with sheet/range options,2,L
 Convert to PDF,PowerPoint to PDF,PPT/PPTX/ODP conversion,2,LibreOffice,"Desktop, Web",Must
 Convert to PDF,Markdown to PDF,Render Markdown with print themes and syntax highlighting,2,Chromium/HTML pipeline,"Desktop, Web",Should
 Convert to PDF,HTML to PDF,Render local HTML or approved URLs with page controls,2,Chromium/Gotenberg,"Desktop, Web",Should
-Convert to PDF,Text to PDF,Convert TXT/CSV/JSON/XML to formatted PDF,2,native renderer,"Desktop, Web",Should
+Convert to PDF,Text to PDF,Convert one strict UTF-8 TXT file to a verified PDF with fixed packaged Regular fonts,2,hidden intercepted WebView2 plus qpdf verification,Desktop,Should
 Convert to PDF,Email to PDF,Convert EML/MSG with headers and attachments index,5,Docling/mail parser,"Desktop, Web",Could
 Convert to PDF,SVG to PDF,Preserve vector content when possible,3,resvg/Cairo,"Desktop, Web",Should
 Convert to PDF,Archive package to PDF,Combine mixed supported inputs into an ordered PDF binder,4,workflow engine,"Desktop, Web",Could

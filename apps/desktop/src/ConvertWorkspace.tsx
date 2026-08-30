@@ -6,11 +6,13 @@ import type {
   JobWarning,
   ProgressEvent,
   SystemStatus,
+  ViewerDocumentMetadata,
 } from '@document-studio/contracts';
 import { api, createProgressReconciler, operationErrorMessage } from './api';
 import { NoBenefitResult } from './JobCompletionOutcome';
 import { formatBytes } from './sizeReporting';
 import { PdfToImagesWorkspace } from './PdfToImagesWorkspace';
+import { TextToPdfWorkspace } from './TextToPdfWorkspace';
 
 const terminalStates = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 const acceptedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -30,7 +32,7 @@ interface ConvertWorkspaceProps {
   system: SystemStatus | null;
   dependencies: DependencyDiagnostic[];
   onOpenMerge: () => void;
-  onOpenViewer: () => void;
+  onOpenViewer: (document?: ViewerDocumentMetadata) => void;
   onOpenOptimize: () => void;
   onOpenBatch?: () => void;
 }
@@ -52,7 +54,8 @@ export function ConvertWorkspace({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('');
-  const [direction, setDirection] = useState<'images-to-pdf' | 'pdf-to-images'>('images-to-pdf');
+  const [direction, setDirection] = useState<'images-to-pdf' | 'pdf-to-images' | 'text-to-pdf'>('images-to-pdf');
+  const [textBusy, setTextBusy] = useState(false);
   const nextSelectionId = useRef(0);
   const jobId = useRef<string | null>(null);
   const busyRef = useRef(false);
@@ -218,7 +221,7 @@ export function ConvertWorkspace({
       <aside className="rail" aria-label="Primary navigation">
         <div className="brand" aria-label="Document Studio">DS</div>
         <button className="rail-button" onClick={onOpenMerge}>Merge</button>
-        <button className="rail-button" onClick={onOpenViewer}>Viewer</button>
+        <button className="rail-button" onClick={() => onOpenViewer()}>Viewer</button>
         <button className="rail-button" onClick={onOpenOptimize}>Optimize</button>
         <button className="rail-button active" aria-current="page">Convert</button>
         <button className="rail-button" onClick={onOpenBatch}>Batch</button>
@@ -226,14 +229,15 @@ export function ConvertWorkspace({
       </aside>
       <main className="workspace">
         <header className="page-header">
-          <div><p className="eyebrow">CONVERT · LOCAL ONLY</p><h1>Images and PDF conversion</h1><p className="lede">Create a verified PDF from ordered local images without uploading files or replacing an existing output.</p></div>
+          <div><p className="eyebrow">CONVERT · LOCAL ONLY</p><h1>Document conversion</h1><p className="lede">Create verified local outputs from bounded images, PDFs, or strict UTF-8 text without uploading private documents.</p></div>
           <div className="privacy-badge"><span aria-hidden="true">●</span>{system?.offlineByDefault ? 'Offline by default' : 'Checking local status'}</div>
         </header>
         <div className="conversion-tabs" role="tablist" aria-label="Conversion direction">
-          <button type="button" role="tab" aria-selected={direction === 'images-to-pdf'} className={direction === 'images-to-pdf' ? 'active' : ''} onClick={() => setDirection('images-to-pdf')} disabled={busy}>Images to PDF</button>
-          <button type="button" role="tab" aria-selected={direction === 'pdf-to-images'} className={direction === 'pdf-to-images' ? 'active' : ''} onClick={() => setDirection('pdf-to-images')} disabled={busy}>PDF to images</button>
+          <button type="button" role="tab" aria-selected={direction === 'images-to-pdf'} className={direction === 'images-to-pdf' ? 'active' : ''} onClick={() => setDirection('images-to-pdf')} disabled={busy || textBusy}>Images to PDF</button>
+          <button type="button" role="tab" aria-selected={direction === 'pdf-to-images'} className={direction === 'pdf-to-images' ? 'active' : ''} onClick={() => setDirection('pdf-to-images')} disabled={busy || textBusy}>PDF to images</button>
+          <button type="button" role="tab" aria-selected={direction === 'text-to-pdf'} className={direction === 'text-to-pdf' ? 'active' : ''} onClick={() => setDirection('text-to-pdf')} disabled={busy || textBusy}>TXT to PDF</button>
         </div>
-        {direction === 'pdf-to-images' ? <PdfToImagesWorkspace /> : <>
+        {direction === 'pdf-to-images' ? <PdfToImagesWorkspace /> : direction === 'text-to-pdf' ? <TextToPdfWorkspace onBusyChange={setTextBusy} onOpenViewer={onOpenViewer} /> : <>
         {error && <div className="error-banner" role="alert">{error}</div>}
         <div className="sr-announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
         <section className="convert-layout" aria-label="Images to PDF workspace">

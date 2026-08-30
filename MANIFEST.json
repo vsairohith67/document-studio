@@ -1,12 +1,12 @@
 {
   "product": "Document Studio",
-  "version": "0.7.0-g04f1-batch-preview-dev",
-  "audit_date": "26 August 2026",
+  "version": "0.8.0-g04e1-text-to-pdf-dev",
+  "audit_date": "28 August 2026",
   "feature_count": 132,
   "canonical_report": "report/Document_Studio_Master_Blueprint.docx",
   "canonical_pdf": "report/Document_Studio_Master_Blueprint.pdf",
   "phase0_prompt": "codex/prompts/01-foundation.md",
-  "current_goal": "G04F1 — durable batch preview foundation",
+  "current_goal": "G04E1 — bounded local TXT-to-PDF conversion",
   "current_goal_prompt": "codex/prompts/04-compression-conversion.md",
   "prototype": "apps/prototype/index.html",
   "final_recheck": "FINAL_RECHECK.md",
@@ -25,6 +25,7 @@
     "npm run verify:g04b2 --workspace @document-studio/desktop",
     "npm run verify:g04c2a --workspace @document-studio/desktop",
     "npm run verify:g04f1 --workspace @document-studio/desktop",
+    "npm run verify:g04e1 --workspace @document-studio/desktop",
     "npm run build",
     "cargo fmt --all -- --check",
     "cargo clippy --workspace --all-targets --locked -- -D warnings",
@@ -32,7 +33,7 @@
     "npm --workspace @document-studio/desktop run tauri -- build --no-bundle"
   ],
   "report_pages": 44,
-  "publication_status": "G04F1 is implemented on a branch rooted at accepted post-G04C2B main 198f29fae206b21dbd9d8a9b4689f5865b94420d and remains pending owner review, exact-head CI and merge. It adds no scheduler, child execution, worker start, merge, tag or release.",
+  "publication_status": "G04E1 is implemented on codex/ds-g04e1-txt-to-pdf-v1 rooted at accepted post-G04F1 main a664dea4755122deefceac9d6ef699a920acc398. It remains unmerged pending local acceptance, exact-head CI, independent review and the owner merge gate. No Office conversion, batch execution, migration, tag, package, release or deployment is included.",
   "foundation_operation": "diagnostic.copy",
   "production_operation": {
     "id": "pdf.merge",
@@ -104,6 +105,19 @@
     "preview": "Private canonical UTF-8 JSON proof with a sanitized path/identity/hash-free IPC response",
     "creation": "Full recomputation, exact hash/version, one-live CAS, and atomic batch/job/input/planned-output/spec/link metadata",
     "excluded": ["scheduler", "child execution", "worker start", "automatic resume", "balanced compression batches", "other operations"]
+  },
+  "text_to_pdf_operation": {
+    "id": "text.to-pdf",
+    "version": "1.0.0",
+    "status": "implemented on the G04E1 branch; pending exact-head acceptance and owner merge",
+    "input": "Exactly one local regular non-reparse .txt file; strict UTF-8; 8,388,608 raw bytes; 100,000 logical lines; 65,536 UTF-8 bytes per normalized line",
+    "settings": {"pageSize": ["a4", "letter"], "orientation": ["portrait", "landscape"]},
+    "renderer": "Dedicated hidden Rust-owned WebView2 STA using exact in-memory .invalid-origin HTML, CSS and three static Noto Regular fonts with all-resource interception and no network fallback",
+    "normalization": "Accepted qpdf 12.3.2 page-only builder in the zero-capability AppContainer and owned Job Object",
+    "verification": "Source immutability, strict qpdf/security/page/font inventory, no-overwrite publication and final reopen size/hash equality",
+    "dependencies": ["webview2-com 0.38.2 (Windows direct)", "windows 0.61.3 with Win32_System_Com and Win32_UI_Shell only"],
+    "migration": "none",
+    "excluded": ["Markdown", "HTML input", "CSV", "JSON", "XML", "Office conversion", "batch execution", "network server", "system font installation"]
   },
   "database_policy": "Metadata only; document bodies and extracted content are prohibited.",
   "repository_governance": [
