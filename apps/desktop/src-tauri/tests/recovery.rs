@@ -554,8 +554,9 @@ fn txt_recovery_adopts_matching_final_after_post_move_metadata_failure() {
             "2026-08-30T07:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let canonical_destination = job_destination(&job);
+    let final_path = canonical_destination.join("recovery-copy.bin");
+    let partial_path = canonical_destination.join(format!(
         ".document-studio-{}-66666666-6666-4666-8666-666666666666.partial",
         job.id
     ));
@@ -651,8 +652,9 @@ fn txt_recovery_preserves_mismatched_commit_ambiguity_and_durable_intent() {
             "2026-08-30T07:00:00Z",
         )
         .unwrap();
-    let final_path = destination.path().join("recovery-copy.bin");
-    let partial_path = destination.path().join(format!(
+    let canonical_destination = job_destination(&job);
+    let final_path = canonical_destination.join("recovery-copy.bin");
+    let partial_path = canonical_destination.join(format!(
         ".document-studio-{}-77777777-7777-4777-8777-777777777777.partial",
         job.id
     ));
