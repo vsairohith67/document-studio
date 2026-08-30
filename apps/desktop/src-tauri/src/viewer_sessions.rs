@@ -13,8 +13,8 @@ use uuid::Uuid;
 
 use crate::app_state::CancellationToken;
 use crate::contracts::{
-    DestinationGrant, OperationError, OperationStage, ViewerDocumentMetadata, ViewerRangeRequest,
-    ViewerSessionRequest,
+    DestinationGrant, OperationError, OperationStage, TextInputMetadata, ViewerDocumentMetadata,
+    ViewerRangeRequest, ViewerSessionRequest,
 };
 use crate::path_policy::{canonical_directory, canonical_regular_file};
 use crate::windows_security::{identity_from_file, open_viewer_readonly, FileIdentity};
@@ -48,6 +48,13 @@ struct ViewerSession {
     last_access: Mutex<Instant>,
     active: Arc<AtomicBool>,
     reads_in_flight: AtomicUsize,
+    kind: SessionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    Pdf,
+    Text,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +164,7 @@ impl ViewerSessionManager {
             last_access: Mutex::new(Instant::now()),
             active: Arc::new(AtomicBool::new(true)),
             reads_in_flight: AtomicUsize::new(0),
+            kind: SessionKind::Pdf,
         });
         sessions.insert(id.clone(), session);
         Ok(ViewerDocumentMetadata {
@@ -167,6 +175,93 @@ impl ViewerSessionManager {
             modified_at,
             mime_type: "application/pdf".to_owned(),
             file_identity: identity.to_string(),
+        })
+    }
+
+    pub fn open_verified_pdf(
+        &self,
+        selected_path: &Path,
+        expected_size: u64,
+        expected_sha256: &str,
+    ) -> Result<ViewerDocumentMetadata, OperationError> {
+        let metadata = self.open_pdf(selected_path)?;
+        let verified = crate::publication::hash_file(selected_path)
+            .is_ok_and(|(size, sha256)| size == expected_size && sha256 == expected_sha256);
+        if verified {
+            return Ok(metadata);
+        }
+        let _ = self.close(&ViewerSessionRequest {
+            session_id: metadata.session_id,
+            generation: metadata.generation,
+        });
+        Err(published_output_changed())
+    }
+
+    pub fn open_txt(&self, selected_path: &Path) -> Result<TextInputMetadata, OperationError> {
+        let (canonical_path, expected_identity) =
+            canonical_regular_file(selected_path).map_err(|_| unsafe_text_source())?;
+        let display_name = canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(unsafe_text_source)?
+            .to_owned();
+        if !canonical_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
+        {
+            return Err(unsupported_text_source());
+        }
+        let file = open_viewer_readonly(&canonical_path).map_err(|_| unsafe_text_source())?;
+        let identity = identity_from_file(&file).map_err(|_| unsafe_text_source())?;
+        if identity != expected_identity {
+            return Err(source_changed());
+        }
+        let metadata = file.metadata().map_err(|_| unsafe_text_source())?;
+        if !metadata.is_file() || metadata.len() > crate::text_to_pdf::TXT_MAX_RAW_BYTES as u64 {
+            return Err(text_size_limit());
+        }
+        let modified_at = modified_timestamp(&metadata).map_err(|_| unsafe_text_source())?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("viewer session registry mutex poisoned");
+        sessions.retain(|_, session| !session.is_expired());
+        if sessions.len() >= VIEWER_MAX_SESSIONS {
+            return Err(OperationError::safe(
+                "TXT_SESSION_LIMIT",
+                "Too many local documents are open",
+                "Close an open document before selecting another TXT file.",
+                OperationStage::Inspect,
+                true,
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let generation = self.next_generation.fetch_add(1, Ordering::AcqRel);
+        let session = Arc::new(ViewerSession {
+            id: id.clone(),
+            generation,
+            source_path: canonical_path,
+            file: Arc::new(file),
+            identity,
+            size_bytes: metadata.len(),
+            modified_at: modified_at.clone(),
+            display_name: display_name.clone(),
+            created_at: Instant::now(),
+            last_access: Mutex::new(Instant::now()),
+            active: Arc::new(AtomicBool::new(true)),
+            reads_in_flight: AtomicUsize::new(0),
+            kind: SessionKind::Text,
+        });
+        sessions.insert(id.clone(), session);
+        Ok(TextInputMetadata {
+            session_id: id,
+            generation,
+            display_name,
+            size_bytes: metadata.len(),
+            modified_at,
+            mime_type: "text/plain".to_owned(),
         })
     }
 
@@ -230,6 +325,29 @@ impl ViewerSessionManager {
         generation: u64,
     ) -> Result<ViewerJobSource, OperationError> {
         let session = self.get(session_id, generation)?;
+        if session.kind != SessionKind::Pdf {
+            return Err(session_expired());
+        }
+        session.validate_unchanged()?;
+        Ok(ViewerJobSource {
+            path: session.source_path.clone(),
+            display_name: session.display_name.clone(),
+            size_bytes: session.size_bytes,
+            modified_at: session.modified_at.clone(),
+            file_identity: session.identity.to_string(),
+            session,
+        })
+    }
+
+    pub fn source_for_text_job(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<ViewerJobSource, OperationError> {
+        let session = self.get(session_id, generation)?;
+        if session.kind != SessionKind::Text {
+            return Err(session_expired());
+        }
         session.validate_unchanged()?;
         Ok(ViewerJobSource {
             path: session.source_path.clone(),
@@ -384,6 +502,39 @@ impl ViewerSession {
 }
 
 impl ViewerJobSource {
+    pub fn session_request(&self) -> ViewerSessionRequest {
+        ViewerSessionRequest {
+            session_id: self.session.id.clone(),
+            generation: self.session.generation,
+        }
+    }
+
+    pub fn read_all_bounded(
+        &self,
+        maximum: usize,
+        token: &CancellationToken,
+    ) -> Result<(Vec<u8>, String), OperationError> {
+        self.session.validate_unchanged()?;
+        let size = usize::try_from(self.size_bytes).map_err(|_| text_size_limit())?;
+        if size > maximum {
+            return Err(text_size_limit());
+        }
+        if token.is_cancelled() {
+            return Err(OperationError::safe(
+                "CANCELLED",
+                "TXT-to-PDF conversion was cancelled",
+                "No TXT content was retained.",
+                OperationStage::Preflight,
+                false,
+            ));
+        }
+        let mut bytes = vec![0_u8; size];
+        read_exact_at(&self.session.file, &mut bytes, 0).map_err(|_| source_changed())?;
+        self.session.validate_unchanged()?;
+        let hash = hex_digest(&Sha256::digest(&bytes));
+        Ok((bytes, hash))
+    }
+
     pub fn copy_snapshot(
         &self,
         destination: &Path,
@@ -520,10 +671,50 @@ fn unsupported_source() -> OperationError {
 fn source_changed() -> OperationError {
     OperationError::safe(
         "SOURCE_CHANGED",
-        "The source PDF changed",
-        "Close this document and open it again before continuing.",
+        "The source document changed",
+        "Close this document and select it again before continuing.",
         OperationStage::Inspect,
         true,
+    )
+}
+
+fn unsafe_text_source() -> OperationError {
+    OperationError::safe(
+        "PATH_UNSAFE",
+        "The selected TXT path is not safe",
+        "Choose one regular local .txt file without links or special path syntax.",
+        OperationStage::Inspect,
+        false,
+    )
+}
+
+fn unsupported_text_source() -> OperationError {
+    OperationError::safe(
+        "TXT_EXTENSION_REQUIRED",
+        "Choose a .txt file",
+        "TXT-to-PDF accepts exactly one local file with a .txt extension.",
+        OperationStage::Inspect,
+        false,
+    )
+}
+
+fn text_size_limit() -> OperationError {
+    OperationError::safe(
+        "TXT_SIZE_LIMIT",
+        "The TXT file is too large",
+        "TXT input is limited to 8,388,608 bytes.",
+        OperationStage::Preflight,
+        false,
+    )
+}
+
+fn published_output_changed() -> OperationError {
+    OperationError::safe(
+        "TXT_PUBLISHED_OUTPUT_CHANGED",
+        "The published TXT PDF changed",
+        "The saved file no longer matches its verified publication evidence.",
+        OperationStage::Verify,
+        false,
     )
 }
 
@@ -580,9 +771,11 @@ fn snapshot_failed() -> OperationError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ViewerSessionManager, VIEWER_MAX_RANGE_BYTES, VIEWER_MAX_SESSIONS, VIEWER_RANGE_CHUNK_BYTES,
+        hex_digest, ViewerSessionManager, VIEWER_MAX_RANGE_BYTES, VIEWER_MAX_SESSIONS,
+        VIEWER_RANGE_CHUNK_BYTES,
     };
     use crate::contracts::{ViewerRangeRequest, ViewerSessionRequest};
+    use sha2::{Digest, Sha256};
     use std::fs::OpenOptions;
     use std::io::Write;
     use tempfile::tempdir;
@@ -742,5 +935,75 @@ mod tests {
             manager.read_range(&request).unwrap_err().code,
             "VIEWER_SESSION_EXPIRED"
         );
+    }
+
+    #[test]
+    fn text_session_is_opaque_bounded_and_retains_the_exact_readonly_file() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("private.TXT");
+        std::fs::write(&path, "English हिन्दी తెలుగు").unwrap();
+        let manager = ViewerSessionManager::default();
+        let metadata = manager.open_txt(&path).unwrap();
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(!serialized.contains(directory.path().to_string_lossy().as_ref()));
+        let source = manager
+            .source_for_text_job(&metadata.session_id, metadata.generation)
+            .unwrap();
+        let token = crate::app_state::CancellationRegistry::default().register("text-test");
+        let (bytes, hash) = source
+            .read_all_bounded(crate::text_to_pdf::TXT_MAX_RAW_BYTES, &token)
+            .unwrap();
+        assert_eq!(bytes, "English हिन्दी తెలుగు".as_bytes());
+        assert_eq!(hash.len(), 64);
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+    }
+
+    #[test]
+    fn text_session_rejects_wrong_extension_and_more_than_exact_eight_mib() {
+        let directory = tempdir().unwrap();
+        let wrong = directory.path().join("notes.md");
+        std::fs::write(&wrong, b"plain").unwrap();
+        let manager = ViewerSessionManager::default();
+        assert_eq!(
+            manager.open_txt(&wrong).unwrap_err().code,
+            "TXT_EXTENSION_REQUIRED"
+        );
+        let oversized = directory.path().join("oversized.txt");
+        std::fs::write(
+            &oversized,
+            vec![0_u8; crate::text_to_pdf::TXT_MAX_RAW_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            manager.open_txt(&oversized).unwrap_err().code,
+            "TXT_SIZE_LIMIT"
+        );
+    }
+
+    #[test]
+    fn verified_pdf_session_hashes_after_retaining_and_closes_on_mismatch() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("verified.pdf");
+        let bytes = minimal_pdf();
+        std::fs::write(&path, &bytes).unwrap();
+        let manager = ViewerSessionManager::default();
+        let expected = hex_digest(&Sha256::digest(&bytes));
+        let metadata = manager
+            .open_verified_pdf(&path, bytes.len() as u64, &expected)
+            .unwrap();
+        manager
+            .close(&ViewerSessionRequest {
+                session_id: metadata.session_id,
+                generation: metadata.generation,
+            })
+            .unwrap();
+        assert_eq!(
+            manager
+                .open_verified_pdf(&path, bytes.len() as u64, &"0".repeat(64))
+                .unwrap_err()
+                .code,
+            "TXT_PUBLISHED_OUTPUT_CHANGED"
+        );
+        assert!(manager.sessions.lock().unwrap().is_empty());
     }
 }

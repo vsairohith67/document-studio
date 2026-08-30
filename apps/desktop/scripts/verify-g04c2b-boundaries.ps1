@@ -230,7 +230,8 @@ foreach ($required in @(
   'InvokeBody::Raw(bytes)',
   'jobs_balanced_audit',
   'Ok(redact_viewer_job_paths(job))',
-  'let balanced = job.operation_id == BALANCED_COMPRESSION_OPERATION_ID;',
+  'let may_expose_published_output = matches!(',
+  'BALANCED_COMPRESSION_OPERATION_ID | TEXT_TO_PDF_OPERATION_ID',
   'private_candidate.outputs[0].final_path.is_none()'
 )) {
   if (!$ipc.Contains($required)) { throw "G04C2B Rust IPC is missing: $required" }

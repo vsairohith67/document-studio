@@ -1,7 +1,8 @@
 param(
   [ValidateSet('None', 'ViteNotReady', 'CdpNotReady')]
   [string]$FailureInjection = 'None',
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  [string]$EvidenceBase = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,7 +11,19 @@ Add-Type -AssemblyName System.Net.Http
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 $repositoryRoot = (Resolve-Path (Join-Path $desktopRoot '..\..')).Path
 $repositoryRootForward = $repositoryRoot.Replace('\', '/')
-$cacheRoot = Join-Path $repositoryRoot '.cache'
+$cacheRoot = if ([string]::IsNullOrWhiteSpace($EvidenceBase)) {
+  Join-Path $repositoryRoot '.cache'
+} else {
+  [System.IO.Path]::GetFullPath($EvidenceBase)
+}
+$cargoTargetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+  Join-Path $repositoryRoot 'target'
+} elseif ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+  [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+} else {
+  [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $env:CARGO_TARGET_DIR))
+}
+$desktopExecutable = Join-Path $cargoTargetRoot 'debug\document-studio.exe'
 $evidenceRoot = Join-Path $cacheRoot ('g03-webview2-' + [guid]::NewGuid().ToString('N'))
 $appData = Join-Path $evidenceRoot 'app-data'
 $g04b2Output = Join-Path $appData 'g04b2-output'
@@ -453,7 +466,7 @@ try {
   if (Get-NetTCPConnection -LocalPort $cdpPort -State Listen -ErrorAction SilentlyContinue) {
     throw 'CDP_PORT_INVALID: the reserved loopback port did not release before application launch.'
   }
-  $desktop = Start-Process -FilePath (Join-Path $repositoryRoot 'target\debug\document-studio.exe') `
+  $desktop = Start-Process -FilePath $desktopExecutable `
     -WorkingDirectory $repositoryRoot -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput (Join-Path $evidenceRoot 'desktop.stdout.log') `
     -RedirectStandardError (Join-Path $evidenceRoot 'desktop.stderr.log')

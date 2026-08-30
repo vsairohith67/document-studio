@@ -6,6 +6,7 @@ import pdfMergeFixtures from '../fixtures/pdf-merge-contracts.json';
 import pdfCompressLosslessFixtures from '../fixtures/pdf-compress-lossless-contracts.json';
 import pdfCompressBalancedFixtures from '../fixtures/pdf-compress-balanced-contracts.json';
 import pdfToImagesFixtures from '../fixtures/pdf-to-images-contracts.json';
+import textToPdfFixtures from '../fixtures/text-to-pdf-contracts.json';
 import batchFixtures from '../fixtures/batch-preview-contracts.json';
 import batchSchema from '../batch.schema.json';
 import ipcSchema from '../ipc.schema.json';
@@ -30,6 +31,10 @@ const validateJobsCreateRequest = ajv.compile({
 const validatePdfToImagesRequest = ajv.compile({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $ref: `${ipcSchema.$id}#/$defs/pdfToImagesJobCreateRequest`,
+});
+const validateTextToPdfRequest = ajv.compile({
+  $schema: 'https://json-schema.org/draft/2020-12/schema',
+  $ref: `${ipcSchema.$id}#/$defs/textToPdfJobCreateRequest`,
 });
 const validateBatchPreviewRequest = ajv.compile({
   $schema: 'https://json-schema.org/draft/2020-12/schema',
@@ -108,6 +113,23 @@ describe('foundation contracts', () => {
 
   it('rejects progress events that leak unapproved fields', () => {
     expect(validateProgress({ ...fixtures.progressEvent, sourcePath: 'C:\\secret.txt' })).toBe(false);
+  });
+});
+
+describe('text.to-pdf contracts', () => {
+  it('accepts only the frozen local TXT manifest and two-setting request', () => {
+    expect(validateOperation(textToPdfFixtures.operationManifest), JSON.stringify(validateOperation.errors)).toBe(true);
+    expect(validateTextToPdfRequest(textToPdfFixtures.request), JSON.stringify(validateTextToPdfRequest.errors)).toBe(true);
+  });
+
+  it.each([
+    ['extra setting', { settings: { ...textToPdfFixtures.request.settings, fontSize: 12 } }],
+    ['unsupported page size', { settings: { ...textToPdfFixtures.request.settings, pageSize: 'legal' } }],
+    ['unsupported orientation', { settings: { ...textToPdfFixtures.request.settings, orientation: 'auto' } }],
+    ['non-PDF name', { requestedOutputName: 'notes.txt' }],
+    ['raw path', { inputPath: 'C:\\private\\notes.txt' }],
+  ])('rejects %s', (_label, patch) => {
+    expect(validateTextToPdfRequest({ ...textToPdfFixtures.request, ...patch })).toBe(false);
   });
 });
 

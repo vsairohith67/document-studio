@@ -24,3 +24,9 @@ PDF Merge is the first Phase 1 production operation. It accepts 2–128 local PD
 G03 adds one local-PDF viewer with progressive virtual pages/thumbnails, navigation, zoom/fit, temporary view rotation, selectable text and bounded incremental search. It adds one organizer for unique page selection, exact permutation reorder, removal with at least one page retained, 90/180/270-degree output rotation, extraction in selected order, and split by every page, fixed count or an explicit full-document non-overlapping partition. Split is limited to 128 outputs.
 
 The viewer does not promise OCR or preservation/editing of bookmarks, attachments, forms, annotations or signatures. G03 does not include linearization, image conversion, compression, repair, crop, watermark, page numbering, freeform editing, printing, cloud or AI.
+
+## G04E1 implemented candidate
+
+G04E1 implements exactly `text.to-pdf@1.0.0`: one local regular non-reparse `.txt` file, strict UTF-8 and bounded admitted English/Devanagari/Telugu Unicode, A4 or Letter, portrait or landscape, and one independently verified PDF. Rendering uses fixed 11 pt Regular packaged fonts and a hidden intercepted WebView2; no text preview or document body enters React, events, diagnostics or durable history.
+
+Markdown, user HTML/CSS, CSV, JSON, XML, email, URLs, Office documents, batch execution, page numbering, syntax highlighting and system fonts are excluded. The operation remains an unmerged candidate until the owner merge gate.

@@ -10,3 +10,8 @@
 apps/desktop/src-tauri/resources/qpdf/12.3.2/licenses/share__doc__qpdf__manual-html___sources__license.rst.txt -text -diff
 apps/desktop/src-tauri/resources/qpdf/12.3.2/licenses/share__doc__qpdf__manual-html__license.html -text -diff
 apps/desktop/src-tauri/resources/qpdf/12.3.2/qpdf-manifest.json text eol=lf
+
+# Preserve the three owner-approved upstream OFL notices byte-for-byte.
+apps/desktop/src-tauri/resources/fonts/g04e1/licenses/NotoSans-OFL-1.1.txt -text -diff
+apps/desktop/src-tauri/resources/fonts/g04e1/licenses/NotoSansDevanagari-OFL-1.1.txt -text -diff
+apps/desktop/src-tauri/resources/fonts/g04e1/licenses/NotoSansTelugu-OFL-1.1.txt -text -diff

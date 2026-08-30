@@ -1,0 +1,43 @@
+{
+  "operationManifest": {
+    "id": "text.to-pdf",
+    "version": "1.0.0",
+    "name": "TXT to PDF",
+    "category": "convert",
+    "description": "Converts one strict UTF-8 TXT file into a verified local PDF using fixed packaged fonts.",
+    "risk": "normal",
+    "locality": "local",
+    "inputs": {
+      "acceptedMimeTypes": ["text/plain"],
+      "minimum": 1,
+      "maximum": 1,
+      "allowDirectories": false
+    },
+    "settingsSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pageSize", "orientation"],
+      "properties": {
+        "pageSize": { "enum": ["a4", "letter"] },
+        "orientation": { "enum": ["portrait", "landscape"] }
+      }
+    },
+    "outputs": { "mimeType": "application/pdf", "multiplicity": "single" },
+    "dependencies": ["document-studio-core", "qpdf"],
+    "verification": [
+      "regular-non-reparse-file", "strict-utf8", "bounded-unicode",
+      "approved-font-cmap", "intercepted-webview2-resources", "network-denial",
+      "qpdf-strict-check", "pdf-security-inventory", "embedded-font-inventory",
+      "source-immutability", "publication-hash", "final-reopen"
+    ],
+    "stages": ["inspect", "preflight", "estimate", "plan", "execute", "verify", "publish", "audit", "cleanup"]
+  },
+  "request": {
+    "operationId": "text.to-pdf",
+    "inputSessionId": "400743e6-1b21-4a5c-8e7c-8d489f65c307",
+    "inputGeneration": 7,
+    "destinationGrantId": "14035919-f030-4a43-b6a6-60feccf42557",
+    "requestedOutputName": "notes.pdf",
+    "settings": { "pageSize": "a4", "orientation": "portrait" }
+  }
+}

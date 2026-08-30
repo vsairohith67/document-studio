@@ -34,6 +34,11 @@ impl CancellationToken {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn request_for_test(&self) {
+        self.state.store(CANCELLATION_REQUESTED, Ordering::Release);
+    }
+
     pub fn commit_started(&self) -> bool {
         self.state.load(Ordering::Acquire) == PUBLICATION_COMMIT_STARTED
     }

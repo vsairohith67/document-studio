@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:pdfjs-assets": "node ./scripts/test-pdfjs-assets.mjs",
-    "pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs",
+    "pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs && node ./scripts/prepare-g04e1-visual-evidence.mjs",
     "test:browser": "playwright test",
     "test:webview2": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/test-webview2-smoke.ps1",
     "verify:g03": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g03-boundaries.ps1",
@@ -24,6 +24,7 @@
     "verify:g04c2-corpus": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04c2-corpus.ps1",
     "verify:g04c2b": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04c2b-boundaries.ps1",
     "verify:g04f1": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04f1-boundaries.ps1",
+    "verify:g04e1": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-g04e1-boundaries.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

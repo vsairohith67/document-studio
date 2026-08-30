@@ -209,7 +209,15 @@ async function disposeOwnedDocument(owner: OwnedDocumentResource): Promise<void>
   }).catch(() => undefined);
 }
 
-export function ViewerWorkspace() {
+interface ViewerWorkspaceProps {
+  initialDocument?: ViewerDocumentMetadata | null;
+  onInitialDocumentConsumed?: () => void;
+}
+
+export function ViewerWorkspace({
+  initialDocument = null,
+  onInitialDocumentConsumed = () => undefined,
+}: ViewerWorkspaceProps) {
   const [viewerState, setViewerState] = useState<ViewerState>('empty');
   const [metadata, setMetadata] = useState<ViewerDocumentMetadata | null>(null);
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
@@ -253,6 +261,7 @@ export function ViewerWorkspace() {
   const focusedThumbnailRef = useRef<number | null>(null);
   const pendingOpenFocusRef = useRef(false);
   const loadSequence = useRef(0);
+  const initialDocumentRef = useRef<string | null>(null);
 
   const closeDocument = useCallback(async (restoreOpenFocus = false) => {
     loadSequence.current += 1;
@@ -407,6 +416,15 @@ export function ViewerWorkspace() {
       else await disposeOwnedDocument(owner);
     }
   }, [failCandidate]);
+
+  useEffect(() => {
+    if (!initialDocument) return;
+    const identity = `${initialDocument.sessionId}:${initialDocument.generation}`;
+    if (initialDocumentRef.current === identity) return;
+    initialDocumentRef.current = identity;
+    onInitialDocumentConsumed();
+    void loadMetadata(initialDocument);
+  }, [initialDocument, loadMetadata, onInitialDocumentConsumed]);
 
   const cancelCandidate = useCallback(async () => {
     const owner = candidateDocumentRef.current;

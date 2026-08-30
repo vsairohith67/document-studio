@@ -10,10 +10,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  merge-tree:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out GitHub pull-request merge tree
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+      - name: Prove merge-tree parents
+        env:
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD^1)" = "$EXPECTED_BASE"
+          test "$(git rev-parse HEAD^2)" = "$EXPECTED_HEAD"
+          echo "merge=$(git rev-parse HEAD)"
+          echo "tree=$(git show -s --format=%T HEAD)"
+          echo "base=$EXPECTED_BASE"
+          echo "head=$EXPECTED_HEAD"
+
   validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Prove exact validation revision and accepted base
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --no-prune origin refs/heads/main:refs/remotes/origin/main
+            test "$(git rev-parse refs/remotes/origin/main)" = "$EXPECTED_BASE"
+            git merge-base --is-ancestor "$EXPECTED_BASE" HEAD
+          fi
+          echo "head=$EXPECTED_HEAD"
+          echo "tree=$(git show -s --format=%T HEAD)"
+          echo "base=$EXPECTED_BASE"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12.10'
@@ -31,6 +68,32 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Prove exact desktop revision and accepted base
+        shell: pwsh
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $env:EXPECTED_HEAD) {
+            throw "Checkout head $head does not match $env:EXPECTED_HEAD"
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            git fetch --no-tags --no-prune origin refs/heads/main:refs/remotes/origin/main
+            if ($LASTEXITCODE -ne 0) { throw 'Accepted-base fetch failed.' }
+            $base = (git rev-parse refs/remotes/origin/main).Trim()
+            if ($base -ne $env:EXPECTED_BASE) {
+              throw "Live main $base does not match event base $env:EXPECTED_BASE"
+            }
+            git merge-base --is-ancestor $env:EXPECTED_BASE HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Accepted base is not an ancestor of exact head.' }
+          }
+          Write-Output "head=$head"
+          Write-Output "tree=$((git show -s --format=%T HEAD).Trim())"
+          Write-Output "base=$env:EXPECTED_BASE"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.19.0'
@@ -95,6 +158,7 @@ jobs:
           npm run verify:g04c2-corpus --workspace @document-studio/desktop
           npm run verify:g04c2b --workspace @document-studio/desktop
           npm run verify:g04f1 --workspace @document-studio/desktop
+          npm run verify:g04e1 --workspace @document-studio/desktop
       - name: Install locked project-local Chromium
         shell: pwsh
         env:
@@ -121,6 +185,11 @@ jobs:
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}\.cache\ms-playwright
         run: npm run test:webview2 --workspace @document-studio/desktop
+      - name: Prove hidden WebView2 TXT rendering and accepted qpdf verification
+        run: |
+          cargo test -p document-studio --lib text_to_pdf_renderer::tests::native_renderer_fault_matrix_closes_exact_generation_at_bounded_checkpoints --locked -- --ignored --exact --nocapture
+          cargo test -p document-studio --lib text_to_pdf_service::tests::native_text_service_cancellation_matrix_cleans_owned_state_and_preserves_commits --locked -- --ignored --exact --nocapture
+          cargo test -p document-studio --lib text_to_pdf_service::tests::native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts --locked -- --ignored --exact --nocapture
       - name: Compile Tauri without a bundle
         run: |
           npm --workspace @document-studio/desktop run tauri -- build --no-bundle

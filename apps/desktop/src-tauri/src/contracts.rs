@@ -466,6 +466,28 @@ pub struct JobsCreateRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextToPdfJobCreateRequest {
+    pub operation_id: String,
+    pub input_session_id: String,
+    pub input_generation: u64,
+    pub destination_grant_id: String,
+    pub requested_output_name: String,
+    pub settings: crate::text_to_pdf::TextToPdfSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TextInputMetadata {
+    pub session_id: String,
+    pub generation: u64,
+    pub display_name: String,
+    pub size_bytes: u64,
+    pub modified_at: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BatchSettings {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

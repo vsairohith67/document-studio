@@ -75,7 +75,7 @@ foreach ($required in @(
 if (!$viewerTests.Contains('G04B images-to-PDF output matches its source pixels through the accepted PDF.js renderer')) {
   throw 'G04B browser-backed visual evidence is missing.'
 }
-if (!$package.Contains('"pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs"')) {
+if (!$package.Contains('"pretest:browser": "node ./scripts/prepare-g04b-visual-evidence.mjs && node ./scripts/prepare-g04e1-visual-evidence.mjs"')) {
   throw 'G04B native visual fixture producer must run before Playwright timing starts.'
 }
 foreach ($required in @(
@@ -86,7 +86,8 @@ foreach ($required in @(
 )) {
   if (!$visualProducer.Contains($required)) { throw "G04B pre-browser visual producer is missing: $required" }
 }
-if (!$viewerTests.Contains("'target', 'g04b-browser-visual-evidence'")) {
+if (!$viewerTests.Contains('DOCUMENT_STUDIO_BROWSER_EVIDENCE_ROOT') -or
+    !$viewerTests.Contains("resolve(browserEvidenceRoot, 'g04b-browser-visual-evidence')")) {
   throw 'G04B browser visual test is not consuming the pre-generated native evidence.'
 }
 if ($registry -notmatch 'IMAGE_TO_PDF_OPERATION_ID' -or

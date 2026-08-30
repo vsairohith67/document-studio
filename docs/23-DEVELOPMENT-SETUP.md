@@ -149,3 +149,19 @@ No model is installed during the foundation. The model manager must require user
 - Phase 0 acceptance checklist and any deviations.
 
 Never mark the toolchain ready based on installation alone; preserve reproducible evidence that the starter builds and runs on the target machine.
+
+## G04E1 lane-local validation
+
+Use a lane-owned `CARGO_TARGET_DIR`, temporary root, Playwright cache and WebView2 UDF. Do not use the primary persistent WebView2 profile or another lane's evidence/process/runtime directories. Before native WebView2 or single-instance tests, inspect process and listener ownership and never terminate another authorized lane.
+
+```powershell
+$env:CARGO_TARGET_DIR = 'C:\Dev\document-studio-worktrees\_resources\g04e1-txt-to-pdf-v1\cargo-target'
+cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib text_to_pdf::tests --locked
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib text_to_pdf_renderer::tests --locked
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib text_to_pdf_service::tests --locked
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib text_to_pdf_service::tests::native_webview2_qpdf_acceptance_covers_all_page_settings_and_mixed_scripts --locked -- --ignored --exact --nocapture
+npm.cmd run verify:g04e1 --workspace @document-studio/desktop
+```
+
+The native test uses only synthetic repository-owned text and temporary destinations. It does not install a font, start a listener, process a user document or retain the generated PDF after exact cleanup. Run expensive native/browser/build stages sequentially.

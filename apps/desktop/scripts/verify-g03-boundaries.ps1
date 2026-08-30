@@ -82,8 +82,8 @@ if ($worker.Count -ne 1 -or $worker[0].sha256 -ne 'b4e582882f5e811f4d1b7b511f68d
 
 $tauriConfigurationPath = Join-Path $desktopRoot 'src-tauri\tauri.conf.json'
 $tauriConfigurationHash = Get-Sha256File $tauriConfigurationPath
-if ($tauriConfigurationHash -ne '28ffc1d8a8b2b54c05312726a38fb8a83986fcd120404087a83c31fe912c87ca') {
-  throw 'tauri.conf.json changed from the natively tested G04B2 production configuration.'
+if ($tauriConfigurationHash -ne '0ba42a45cec2a2b63b2c1129265d87556ba6a5fa9fcffeff7e1ea64dceaddffe') {
+  throw 'tauri.conf.json changed from the G04E1 configuration that adds only the exact approved font resource tree.'
 }
 $tauri = Get-Content -Raw $tauriConfigurationPath | ConvertFrom-Json
 if ($tauri.app.security.csp -ne $expectedCsp) {
@@ -93,6 +93,9 @@ if (@($tauri.app.windows).Count -ne 1 -or
     $tauri.app.windows[0].label -and $tauri.app.windows[0].label -ne 'main' -or
     $tauri.app.windows[0].create -eq $false) {
   throw 'Production must retain exactly one automatically created main window.'
+}
+if (($tauri.bundle.resources -join '|') -ne 'resources/qpdf/12.3.2/**/*|resources/fonts/g04e1/**/*') {
+  throw 'Production bundle resources are not exactly the accepted qpdf tree and approved G04E1 font tree.'
 }
 $capability = Get-Content -Raw (Join-Path $desktopRoot 'src-tauri\capabilities\default.json') | ConvertFrom-Json
 if (($capability.permissions -join '|') -ne 'core:default|dialog:allow-open') {

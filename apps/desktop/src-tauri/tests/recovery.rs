@@ -17,6 +17,7 @@ use document_studio_lib::publication::{hash_file, partial_ownership_result_code}
 use document_studio_lib::recovery::{
     cancel_without_worker, reconcile_startup, resolve_interrupted,
 };
+use document_studio_lib::text_to_pdf::{TEXT_TO_PDF_OPERATION_ID, TEXT_TO_PDF_VERSION};
 use document_studio_lib::windows_security::file_identity;
 use document_studio_lib::workspace::WorkspaceManager;
 use tempfile::tempdir;
@@ -513,6 +514,192 @@ fn balanced_interrupted_publication_recovers_with_durable_published_outcome() {
     );
     assert_eq!(recovered.reason, None);
     assert_eq!(fs::read(final_path).unwrap(), b"verified crash fixture");
+}
+
+#[test]
+fn txt_recovery_adopts_matching_final_after_post_move_metadata_failure() {
+    let (_app_data, state, service) = setup();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let input = support::write_fixture(source.path(), "input.txt", b"committed txt pdf");
+    let job = create_job(&service, &input, destination.path());
+    state
+        .database()
+        .connection()
+        .execute(
+            "UPDATE jobs SET operation_id = ?1, operation_version = ?2 WHERE id = ?3",
+            (TEXT_TO_PDF_OPERATION_ID, TEXT_TO_PDF_VERSION, &job.id),
+        )
+        .unwrap();
+    let workspace = state.workspaces.create_job(&job.id).unwrap();
+    let staging = workspace.staging.join("normalized.pdf");
+    fs::write(&staging, b"committed txt pdf").unwrap();
+    let (size, hash) = hash_file(&staging).unwrap();
+    advance_to_running(&state, &job.id);
+    advance(
+        &state,
+        &job.id,
+        JobState::Running,
+        JobState::Verifying,
+        OperationStage::Verify,
+    )
+    .unwrap();
+    state
+        .database()
+        .set_output_staging(
+            &job.id,
+            &staging.to_string_lossy(),
+            size,
+            &hash,
+            "2026-08-30T07:00:00Z",
+        )
+        .unwrap();
+    let canonical_destination = job_destination(&job);
+    let final_path = canonical_destination.join("recovery-copy.bin");
+    let partial_path = canonical_destination.join(format!(
+        ".document-studio-{}-66666666-6666-4666-8666-666666666666.partial",
+        job.id
+    ));
+    state
+        .database()
+        .reserve_publication_attempt(
+            &job.id,
+            "recovery-copy.bin",
+            &final_path.to_string_lossy(),
+            &partial_path.to_string_lossy(),
+            size,
+            &hash,
+        )
+        .unwrap();
+    state
+        .database()
+        .begin_publication(
+            &job.id,
+            "recovery-copy.bin",
+            &final_path.to_string_lossy(),
+            size,
+            &hash,
+        )
+        .unwrap();
+    fs::rename(&staging, &final_path).unwrap();
+    let generation = "99999999-9999-4999-8999-999999999999";
+    let udf = workspace.temporary.join("renderer-udfs").join(generation);
+    fs::create_dir_all(&udf).unwrap();
+    fs::write(
+        udf.join(".document-studio-txt-renderer-v1"),
+        format!("job={}\ngeneration={generation}\n", job.id),
+    )
+    .unwrap();
+    let locked_path = udf.join("owned.lock");
+    fs::write(&locked_path, b"owned").unwrap();
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&locked_path)
+        .unwrap();
+
+    let first = reconcile_startup(&state).unwrap();
+    assert_eq!(first.cleanup_failures, 1);
+    assert_eq!(first.interrupted, 1);
+    let interrupted = state.database().get_job(&job.id).unwrap().unwrap();
+    assert_eq!(interrupted.state, JobState::Interrupted);
+    assert_eq!(interrupted.outputs[0].status.as_str(), "published");
+    assert_eq!(fs::read(&final_path).unwrap(), b"committed txt pdf");
+
+    drop(locked);
+    let recovered = resolve_interrupted(&state, &job.id).unwrap();
+    assert_eq!(recovered.state, JobState::Completed);
+    assert_eq!(recovered.outputs[0].status.as_str(), "published");
+    assert!(recovered.outputs[0].partial_path.is_none());
+    assert_eq!(fs::read(final_path).unwrap(), b"committed txt pdf");
+}
+
+#[test]
+fn txt_recovery_preserves_mismatched_commit_ambiguity_and_durable_intent() {
+    let (_app_data, state, service) = setup();
+    let source = tempdir().unwrap();
+    let destination = tempdir().unwrap();
+    let input = support::write_fixture(source.path(), "input.txt", b"expected txt pdf");
+    let job = create_job(&service, &input, destination.path());
+    state
+        .database()
+        .connection()
+        .execute(
+            "UPDATE jobs SET operation_id = ?1, operation_version = ?2 WHERE id = ?3",
+            (TEXT_TO_PDF_OPERATION_ID, TEXT_TO_PDF_VERSION, &job.id),
+        )
+        .unwrap();
+    let workspace = state.workspaces.create_job(&job.id).unwrap();
+    let staging = workspace.staging.join("normalized.pdf");
+    fs::write(&staging, b"expected txt pdf").unwrap();
+    let (size, hash) = hash_file(&staging).unwrap();
+    advance_to_running(&state, &job.id);
+    advance(
+        &state,
+        &job.id,
+        JobState::Running,
+        JobState::Verifying,
+        OperationStage::Verify,
+    )
+    .unwrap();
+    state
+        .database()
+        .set_output_staging(
+            &job.id,
+            &staging.to_string_lossy(),
+            size,
+            &hash,
+            "2026-08-30T07:00:00Z",
+        )
+        .unwrap();
+    let canonical_destination = job_destination(&job);
+    let final_path = canonical_destination.join("recovery-copy.bin");
+    let partial_path = canonical_destination.join(format!(
+        ".document-studio-{}-77777777-7777-4777-8777-777777777777.partial",
+        job.id
+    ));
+    state
+        .database()
+        .reserve_publication_attempt(
+            &job.id,
+            "recovery-copy.bin",
+            &final_path.to_string_lossy(),
+            &partial_path.to_string_lossy(),
+            size,
+            &hash,
+        )
+        .unwrap();
+    state
+        .database()
+        .begin_publication(
+            &job.id,
+            "recovery-copy.bin",
+            &final_path.to_string_lossy(),
+            size,
+            &hash,
+        )
+        .unwrap();
+    fs::write(&final_path, b"unknown competing bytes").unwrap();
+
+    let report = reconcile_startup(&state).unwrap();
+    assert_eq!(report.interrupted, 1);
+    let recovered = state.database().get_job(&job.id).unwrap().unwrap();
+    assert_eq!(recovered.state, JobState::Interrupted);
+    assert_eq!(recovered.outputs[0].status.as_str(), "publishing");
+    assert_eq!(
+        recovered.outputs[0].final_path.as_deref(),
+        Some(final_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        recovered.outputs[0].partial_path.as_deref(),
+        Some(partial_path.to_string_lossy().as_ref())
+    );
+    assert!(recovered.outputs[0].staging_path.is_none());
+    assert!(recovered
+        .errors
+        .iter()
+        .any(|error| { error.code == "TXT_PUBLICATION_RECONCILIATION_REQUIRED" }));
+    assert_eq!(fs::read(final_path).unwrap(), b"unknown competing bytes");
 }
 
 #[test]
