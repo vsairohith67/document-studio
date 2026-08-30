@@ -36,6 +36,7 @@ use crate::process_sandbox::{authorize_qpdf_paths, ensure_production_profile};
 use crate::publication::{
     hash_file, is_exact_owned_partial_path, partial_ownership_result_code,
     publish_verified_staging_with_observer, PublicationContext, PublicationError,
+    PublicationResult,
 };
 use crate::qpdf::{
     build_text_pdf_normalization_arguments, interpret_encryption_check_exit,
@@ -743,6 +744,25 @@ impl TextToPdfService {
                 publication_error(error)
             }
         })?;
+        self.finalize_committed_publication(
+            job_id,
+            &result,
+            verified_size,
+            verified_hash,
+            token,
+            operation_deadline,
+        )
+    }
+
+    fn finalize_committed_publication(
+        &self,
+        job_id: &str,
+        result: &PublicationResult,
+        verified_size: u64,
+        verified_hash: &str,
+        token: &CancellationToken,
+        operation_deadline: Instant,
+    ) -> Result<(), OperationError> {
         publication_commit_test_expire_deadline(job_id);
         check_deadline_until_publication_commit(
             operation_deadline,
@@ -2034,7 +2054,6 @@ mod tests {
             .update_input_hash(&created.id, 0, &source_hash)
             .unwrap();
         advance_text_job(&state, &created.id, JobState::Verifying);
-        let verifying = state.database().get_job(&created.id).unwrap().unwrap();
         let staging = lane.path().join("verified.pdf");
         fs::write(&staging, b"verified-private-pdf-bytes").unwrap();
         let (verified_size, verified_hash) = hash_file(&staging).unwrap();
@@ -2048,23 +2067,55 @@ mod tests {
                 &timestamp(),
             )
             .unwrap();
+        let final_path = destination.join("deadline.pdf");
+        assert!(!final_path.exists());
+        fs::copy(&staging, &final_path).unwrap();
+        let owned_partial_path = destination.join(format!(
+            ".document-studio-{}-deadline-test.partial",
+            created.id
+        ));
+        state
+            .database()
+            .reserve_publication_attempt(
+                &created.id,
+                "deadline.pdf",
+                &final_path.to_string_lossy(),
+                &owned_partial_path.to_string_lossy(),
+                verified_size,
+                &verified_hash,
+            )
+            .unwrap();
+        assert!(token.try_begin_publication_commit());
+        state
+            .database()
+            .begin_publication(
+                &created.id,
+                "deadline.pdf",
+                &final_path.to_string_lossy(),
+                verified_size,
+                &verified_hash,
+            )
+            .unwrap();
+        let publication = PublicationResult {
+            final_path: final_path.clone(),
+            owned_partial_path,
+            resolved_name: "deadline.pdf".to_owned(),
+            size_bytes: verified_size,
+            sha256: verified_hash.clone(),
+        };
         let deadline = Instant::now() + Duration::from_secs(600);
         *PUBLICATION_COMMIT_TEST_EXPIRY
             .get_or_init(|| Mutex::new(None))
             .lock()
             .unwrap() = Some(created.id.clone());
         service
-            .publish(
+            .finalize_committed_publication(
                 &created.id,
-                &verifying,
-                &staging,
-                &destination,
-                &source,
+                &publication,
                 verified_size,
                 &verified_hash,
                 &token,
                 deadline,
-                &mut |_| {},
             )
             .unwrap();
         *PUBLICATION_COMMIT_TEST_EXPIRY
@@ -2080,9 +2131,12 @@ mod tests {
         let published = state.database().get_job(&created.id).unwrap().unwrap();
         let output = &published.outputs[0];
         assert_eq!(output.status, OutputStatus::Published);
-        let final_path = Path::new(output.final_path.as_deref().unwrap());
         assert_eq!(
-            hash_file(final_path).unwrap(),
+            Path::new(output.final_path.as_deref().unwrap()),
+            final_path.as_path()
+        );
+        assert_eq!(
+            hash_file(&final_path).unwrap(),
             (verified_size, verified_hash)
         );
         state
