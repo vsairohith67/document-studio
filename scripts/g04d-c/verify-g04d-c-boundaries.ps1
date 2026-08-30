@@ -20,6 +20,27 @@ $commonProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'G04DC.Common.p
 $runtimeManifestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCRuntimeManifest.ps1') -Raw
 $decisionProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCCandidateDecision.ps1') -Raw
 $tests = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCBoundaries.ps1') -Raw
+foreach ($registryStateBoundary in @(
+    'Get-G04DCRegistryValueState', 'Get-G04DCRegistryDefaultValueState',
+    'keyExists', 'defaultValuePresent', 'defaultValueType', 'defaultValue',
+    'valuePresent', 'valueType', 'DoNotExpandEnvironmentNames',
+    'REGISTRY_STATE_CAPTURE_FAILED', '1048576'
+)) {
+    if (!$commonProof.Contains($registryStateBoundary)) { throw "G04D-C typed registry-state boundary is missing: $registryStateBoundary" }
+}
+if ($commonProof.Contains('Get-ItemPropertyValue')) {
+    throw 'G04D-C monitored registry values may not use the missing-value-ambiguous Get-ItemPropertyValue collector pattern.'
+}
+foreach ($registryRegression in @(
+    'registry key missing state', 'registry key exists without default state', 'empty-string registry default present',
+    'normal REG_SZ registry default', 'typed non-string registry default', 'registry value disappears during read',
+    'registry access denied simulation', 'unexpected registry provider failure', '.odt exact missing-default runner condition',
+    '.ods and .odp missing-default handling', 'registry state serialization distinction',
+    'identical absent registry defaults compare equal', 'registry no-default to value transition detected',
+    'registry value to no-default transition detected', 'registry collector performs no mutation'
+)) {
+    if (!$tests.Contains($registryRegression)) { throw "G04D-C registry-state regression is missing: $registryRegression" }
+}
 $registryRowsDefinition = '$protectedRegistryRows = @($analysis.protectedOwnership.allRegistryRows)'
 $firstRegistryRowsUse = '$before = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames'
 if (!$adminProof.Contains($registryRowsDefinition) -or !$adminProof.Contains($firstRegistryRowsUse) -or

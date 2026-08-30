@@ -207,10 +207,30 @@ Assert-Throws 'unbounded administrative custom action' 'UNBOUNDED_MSI_CUSTOM_ACT
     Assert-G04DCAdminMutationClosure -Closure ([pscustomobject]@{ unboundedAdminCustomActions = @([pscustomobject]@{ action = 'arbitrary' }) })
 }
 
-function New-State([string]$FontValue = 'baseline', [string]$Service = '', [string]$Association = 'Word.OpenDocumentText.12', [bool]$Profile = $false) {
+function New-State(
+    [string]$FontValue = 'baseline',
+    [string]$Service = '',
+    [string]$Association = 'Word.OpenDocumentText.12',
+    [AllowNull()] $AssociationState,
+    [bool]$Profile = $false
+) {
+    if ($null -eq $AssociationState) {
+        $AssociationState = [pscustomobject][ordered]@{
+            schemaVersion = 1
+            keyExists = $true
+            defaultValuePresent = $true
+            defaultValueType = 'String'
+            defaultValue = $Association
+        }
+    }
     return [pscustomobject][ordered]@{
         fontCatalogCount = 1; fontCatalogSha256 = $FontValue; msiFontTargets = @(); externalRuntimeTargets = @()
-        associations = @([pscustomobject]@{ extension = '.odt'; classDefault = $Association; userChoiceProgId = $null; userChoicePresent = $false })
+        associations = @([pscustomobject]@{
+            extension = '.odt'
+            classDefaultState = $AssociationState
+            userChoiceProgIdState = [pscustomobject][ordered]@{ schemaVersion = 1; keyExists = $false; valueName = 'ProgId'; valuePresent = $false }
+            userChoicePresent = $false
+        })
         libreOfficeServices = if ($Service) { @([pscustomobject]@{ name = $Service; startMode = 'Manual'; pathName = 'owned' }) } else { @() }
         appPaths = @(); appPathCatalogCount = 0; appPathCatalogSha256 = 'app-path-catalog'
         libreOfficeProgIds = @(); classKeyCatalogCount = 0; classKeyCatalogSha256 = 'class-key-catalog'
@@ -230,6 +250,165 @@ function New-State([string]$FontValue = 'baseline', [string]$Service = '', [stri
         libreOfficeProcesses = @()
     }
 }
+
+function Get-TestRegistryRawSnapshot([string]$NativeSubKey) {
+    $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($NativeSubKey, $false)
+    if (!$root) { return 'missing' }
+    $queue = [System.Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue([pscustomobject]@{ key = $root; path = '' })
+    $rows = [System.Collections.Generic.List[object]]::new()
+    while ($queue.Count -ne 0) {
+        $entry = $queue.Dequeue()
+        try {
+            $rows.Add([pscustomobject][ordered]@{ path = $entry.path; keyPresent = $true })
+            foreach ($name in @($entry.key.GetValueNames() | Sort-Object)) {
+                $kind = [string]$entry.key.GetValueKind($name)
+                $value = $entry.key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                if ($value -is [byte[]]) { $value = ([BitConverter]::ToString($value)).Replace('-', '').ToLowerInvariant() }
+                $rows.Add([pscustomobject][ordered]@{ path = $entry.path; name = $name; kind = $kind; value = $value })
+            }
+            foreach ($subKeyName in @($entry.key.GetSubKeyNames() | Sort-Object)) {
+                $child = $entry.key.OpenSubKey($subKeyName, $false)
+                if (!$child) { throw 'Test-owned registry key disappeared during raw non-mutation snapshot.' }
+                $childPath = if ([string]::IsNullOrEmpty([string]$entry.path)) { $subKeyName } else { "$($entry.path)\$subKeyName" }
+                $queue.Enqueue([pscustomobject]@{ key = $child; path = $childPath })
+            }
+        }
+        finally { $entry.key.Dispose() }
+    }
+    return Get-G04DCCanonicalHash -Rows @($rows.ToArray())
+}
+
+$registryTestId = [guid]::NewGuid().ToString('N')
+$registryTestNativeRoot = "Software\DocumentStudio-G04DC-Registry-State-$registryTestId"
+$registryTestProviderRoot = "Registry::HKEY_CURRENT_USER\$registryTestNativeRoot"
+$registryRootHandle = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryTestNativeRoot)
+if (!$registryRootHandle) { throw 'Could not create the GUID-owned registry test root.' }
+$registryRootHandle.Dispose()
+try {
+    foreach ($keyName in @('no-default', 'empty-default', 'normal-default', 'dword-default', '.odt', '.ods', '.odp')) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("$registryTestNativeRoot\$keyName")
+        if (!$key) { throw "Could not create test-owned registry key $keyName." }
+        try {
+            switch ($keyName) {
+                'empty-default' { $key.SetValue('', '', [Microsoft.Win32.RegistryValueKind]::String) }
+                'normal-default' { $key.SetValue('', 'DocumentStudio.G04DC.Test', [Microsoft.Win32.RegistryValueKind]::String) }
+                'dword-default' { $key.SetValue('', 42, [Microsoft.Win32.RegistryValueKind]::DWord) }
+            }
+        }
+        finally { $key.Dispose() }
+    }
+
+    $missingDefaultState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\missing"
+    if ($missingDefaultState.keyExists -or $missingDefaultState.defaultValuePresent) { throw 'Missing-key registry state was not classified as state A.' }
+    $passed.Add('registry key missing state')
+
+    $noDefaultState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\no-default"
+    if (!$noDefaultState.keyExists -or $noDefaultState.defaultValuePresent -or $noDefaultState.PSObject.Properties['defaultValue']) { throw 'Existing key without a default was not classified as state B.' }
+    $passed.Add('registry key exists without default state')
+
+    $emptyDefaultState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\empty-default"
+    if (!$emptyDefaultState.keyExists -or !$emptyDefaultState.defaultValuePresent -or $emptyDefaultState.defaultValueType -cne 'String' -or $emptyDefaultState.defaultValue -cne '') { throw 'Empty REG_SZ default was not preserved as present.' }
+    $passed.Add('empty-string registry default present')
+
+    $normalDefaultState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\normal-default"
+    if (!$normalDefaultState.defaultValuePresent -or $normalDefaultState.defaultValueType -cne 'String' -or $normalDefaultState.defaultValue -cne 'DocumentStudio.G04DC.Test') { throw 'Normal REG_SZ default was not preserved.' }
+    $passed.Add('normal REG_SZ registry default')
+
+    $dwordDefaultState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\dword-default"
+    if (!$dwordDefaultState.defaultValuePresent -or $dwordDefaultState.defaultValueType -cne 'DWord' -or [int]$dwordDefaultState.defaultValue -ne 42) { throw 'Legitimate non-string registry kind was not preserved.' }
+    $passed.Add('typed non-string registry default')
+
+    $raceHandle = [pscustomobject]@{ enumerationCount = 0 }
+    $raceAdapter = @{
+        OpenKey = { param($Path) [pscustomobject]@{ keyExists = $true; handle = $raceHandle } }
+        GetValueNames = {
+            param($Handle)
+            $Handle.enumerationCount++
+            if ($Handle.enumerationCount -eq 1) { @('') } else { @() }
+        }
+        GetValueKind = { param($Handle, $Name) throw [System.IO.IOException]::new('simulated disappearance') }
+        GetValue = { param($Handle, $Name) [pscustomobject]@{ present = $false; value = $null } }
+        CloseKey = { param($Handle) }
+    }
+    $raceState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\race" -AccessAdapter $raceAdapter
+    if (!$raceState.keyExists -or $raceState.defaultValuePresent) { throw 'Value disappearance was not reclassified as an existing key without a default.' }
+    $passed.Add('registry value disappears during read')
+
+    $accessDeniedAdapter = @{
+        OpenKey = { param($Path) throw [System.UnauthorizedAccessException]::new('simulated access denied') }
+        GetValueNames = { param($Handle) @() }
+        GetValueKind = { param($Handle, $Name) 'String' }
+        GetValue = { param($Handle, $Name) [pscustomobject]@{ present = $false; value = $null } }
+        CloseKey = { param($Handle) }
+    }
+    Assert-Throws 'registry access denied simulation' 'REGISTRY_STATE_CAPTURE_FAILED' {
+        Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\access-denied" -AccessAdapter $accessDeniedAdapter
+    }
+
+    $providerFailureAdapter = @{
+        OpenKey = { param($Path) throw [System.InvalidOperationException]::new('simulated provider failure') }
+        GetValueNames = { param($Handle) @() }
+        GetValueKind = { param($Handle, $Name) 'String' }
+        GetValue = { param($Handle, $Name) [pscustomobject]@{ present = $false; value = $null } }
+        CloseKey = { param($Handle) }
+    }
+    Assert-Throws 'unexpected registry provider failure' 'REGISTRY_STATE_CAPTURE_FAILED' {
+        Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\provider-failure" -AccessAdapter $providerFailureAdapter
+    }
+
+    $odtAbsentState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\.odt"
+    if (!$odtAbsentState.keyExists -or $odtAbsentState.defaultValuePresent) { throw '.odt runner-equivalent missing-default state was not preserved.' }
+    $passed.Add('.odt exact missing-default runner condition')
+
+    $odsAbsentState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\.ods"
+    $odpAbsentState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\.odp"
+    if (!$odsAbsentState.keyExists -or $odsAbsentState.defaultValuePresent -or !$odpAbsentState.keyExists -or $odpAbsentState.defaultValuePresent) { throw '.ods/.odp missing-default states were not preserved.' }
+    $passed.Add('.ods and .odp missing-default handling')
+
+    $missingJson = $missingDefaultState | ConvertTo-Json -Compress
+    $absentJson = $noDefaultState | ConvertTo-Json -Compress
+    $emptyJson = $emptyDefaultState | ConvertTo-Json -Compress
+    if ($missingJson -ceq $absentJson -or $absentJson -ceq $emptyJson -or $missingJson -ceq $emptyJson -or
+        $absentJson.Contains('"defaultValue":') -or !$emptyJson.Contains('"defaultValue":""')) {
+        throw 'Serialized registry evidence does not distinguish missing key, absent default, and present empty default.'
+    }
+    $passed.Add('registry state serialization distinction')
+
+    $identicalAbsentComparison = Compare-G04DCMachineState -Before (New-State -AssociationState $odtAbsentState) -After (New-State -AssociationState (Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\.odt"))
+    if ($identicalAbsentComparison.protectedMutation) { throw 'Identical absent-default states compared unequal.' }
+    $passed.Add('identical absent registry defaults compare equal')
+
+    $odtKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$registryTestNativeRoot\.odt", $true)
+    try { $odtKey.SetValue('', 'LibreOffice.WriterDocument.1', [Microsoft.Win32.RegistryValueKind]::String) }
+    finally { $odtKey.Dispose() }
+    $odtValueState = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\.odt"
+    $noDefaultToValue = Compare-G04DCMachineState -Before (New-State -AssociationState $odtAbsentState) -After (New-State -AssociationState $odtValueState)
+    if (!$noDefaultToValue.protectedMutation -or @($noDefaultToValue.changes | Where-Object { $_.boundary -ceq 'associations' }).Count -ne 1) { throw 'No-default to value transition was not detected.' }
+    $passed.Add('registry no-default to value transition detected')
+
+    $odtKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$registryTestNativeRoot\.odt", $true)
+    try { $odtKey.DeleteValue('', $false) }
+    finally { $odtKey.Dispose() }
+    $odtAbsentAgain = Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\.odt"
+    $valueToNoDefault = Compare-G04DCMachineState -Before (New-State -AssociationState $odtValueState) -After (New-State -AssociationState $odtAbsentAgain)
+    if (!$valueToNoDefault.protectedMutation -or @($valueToNoDefault.changes | Where-Object { $_.boundary -ceq 'associations' }).Count -ne 1) { throw 'Value to no-default transition was not detected.' }
+    $passed.Add('registry value to no-default transition detected')
+
+    $rawRegistryBefore = Get-TestRegistryRawSnapshot -NativeSubKey $registryTestNativeRoot
+    foreach ($path in @('no-default', 'empty-default', 'normal-default', 'dword-default', '.odt', '.ods', '.odp')) {
+        Get-G04DCRegistryDefaultValueState -Path "$registryTestProviderRoot\$path" | Out-Null
+    }
+    $rawRegistryAfter = Get-TestRegistryRawSnapshot -NativeSubKey $registryTestNativeRoot
+    if ($rawRegistryBefore -cne $rawRegistryAfter) { throw 'Read-only registry helper mutated the GUID-owned test tree.' }
+    $passed.Add('registry collector performs no mutation')
+}
+finally {
+    if (Test-Path -LiteralPath $registryTestProviderRoot) {
+        Remove-Item -LiteralPath $registryTestProviderRoot -Recurse -Force -ErrorAction Stop
+    }
+}
+
 $baseline = New-State
 $comparison = Compare-G04DCMachineState -Before $baseline -After (New-State -Service 'pre-existing-service')
 Assert-Throws 'pre-existing service change' 'PROTECTED_HOST_MUTATION' { Assert-G04DCNonMutation -Comparison $comparison }
@@ -346,5 +525,5 @@ try {
 }
 finally { Remove-Item -LiteralPath $artifactRoot -Recurse -Force }
 
-if ($passed.Count -ne 89) { throw "Expected 89 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 104) { throw "Expected 104 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

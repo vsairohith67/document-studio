@@ -50,6 +50,14 @@ Preliminary local source-boundary observation on 2026-08-28: the exact owner-spe
 
 The workflow result is an architecture-gate input, not G04D-B2 acceptance or production support.
 
+## G04D-C3 registry collector repair
+
+The first exact-main administrative-image run (`33175958332`) stopped before constructing or invoking `msiexec /a`. Its pre-state collector used `Get-ItemPropertyValue -Name '(default)'` for `HKEY_CLASSES_ROOT\.odt`; the key existed on the runner but had no default value, so fail-closed error handling correctly stopped the proof while the collector incorrectly lacked a representable state for that valid registry shape. This was a proof-collector defect and produced no LibreOffice extraction, containment, network, conversion, or runtime-support conclusion.
+
+G04D-C3 replaces every targeted `Get-ItemPropertyValue` collector site with one bounded read-only registry-value state helper. Default-value evidence now has three explicit shapes: missing key (`keyExists=false`, `defaultValuePresent=false`), existing key without a default (`keyExists=true`, `defaultValuePresent=false`), and a present default (`keyExists=true`, `defaultValuePresent=true`, plus `defaultValueType` and `defaultValue`). Absent states omit type and value rather than serializing an ambiguous null; a present empty `REG_SZ` remains an empty string with `defaultValuePresent=true`. Named monitored values use the parallel `keyExists` / `valuePresent` / `valueType` / `value` schema.
+
+The helper opens only bounded `Registry::HKEY_CLASSES_ROOT`, `HKEY_CURRENT_USER`, `HKEY_LOCAL_MACHINE`, or `HKEY_USERS` paths for read access, requests unexpanded values, preserves legitimate registry kinds, bounds serialized value bytes, rechecks a value that disappears during classification, and fails closed on access denied or any provider/API failure that prevents a trustworthy state. The PowerShell 5.1 matrix uses only a GUID-owned HKCU test subtree for dynamic registry cases; `.odt`, `.ods`, and `.odp` are never changed under the real association roots. The existing MSI provenance, minimal-MSI rejection, MirrorBrain/HTTPS/SSRF/TLS, AppContainer, Job Object, network, effective file-access, output-verification, and cleanup gates are unchanged.
+
 ## Explicit non-actions
 
 - No ordinary full MSI install occurs on the laptop.
