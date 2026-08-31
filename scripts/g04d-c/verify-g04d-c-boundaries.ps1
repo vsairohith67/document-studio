@@ -70,7 +70,9 @@ foreach ($classRegistryProcessBoundary in @(
     'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
     'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
     'ActiveHandleCount', 'nativeCleanupFailureStage', 'secondaryNativeCleanupFailure',
-    'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED', 'LifecycleTestHooks'
+    'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED', 'LifecycleTestHooks',
+    'DisposeStdoutReader', 'DisposeStdoutStream', 'DisposeStderrReader', 'DisposeStderrStream',
+    'DisposeStdoutTask', 'DisposeStderrTask'
 )) {
     if (!$commonProof.Contains($classRegistryProcessBoundary)) { throw "G04D-C class-registry process boundary is missing: $classRegistryProcessBoundary" }
 }
@@ -89,9 +91,10 @@ foreach ($classRegistryRegression in @(
     'shortcut catalog transient sharing retry preserves full entry',
     'shortcut catalog persistent sharing failure remains fail closed',
     'P1-A cleanup error precedence preserves secondary evidence',
+    'P1-A redirected readers streams and tasks are disposed',
     'P1-A production cleanup uses no global process termination',
     'P1-B canonical hash independent of Console OutputEncoding',
-    'P1-B accepted canonical fixture remains byte-identical', 'Expected 314 fail-closed cases'
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 315 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
@@ -182,7 +185,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 314 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 315 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }

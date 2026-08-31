@@ -1473,6 +1473,16 @@ function New-G04DCTestLifecycleHooks {
         terminateCount = 0
         processDisposeCount = 0
         jobDisposeCount = 0
+        stdoutReaderDisposeCount = 0
+        stdoutStreamDisposeCount = 0
+        stderrReaderDisposeCount = 0
+        stderrStreamDisposeCount = 0
+        stdoutTaskDisposeCount = 0
+        stderrTaskDisposeCount = 0
+        stdoutStreamClosed = $false
+        stderrStreamClosed = $false
+        stdoutTaskCompleted = $false
+        stderrTaskCompleted = $false
         processId = 0
     }
     $terminate = {
@@ -1495,12 +1505,52 @@ function New-G04DCTestLifecycleHooks {
         $Job.Dispose()
         if ($FailJobDispose) { throw '[TEST_JOB_DISPOSE_FAILURE] Injected after Job.Dispose.' }
     }.GetNewClosure()
+    $disposeStdoutReader = {
+        param($Reader)
+        $state.stdoutReaderDisposeCount++
+        $Reader.Dispose()
+    }.GetNewClosure()
+    $disposeStdoutStream = {
+        param($Stream)
+        $state.stdoutStreamDisposeCount++
+        $Stream.Dispose()
+        $state.stdoutStreamClosed = !$Stream.CanRead
+    }.GetNewClosure()
+    $disposeStderrReader = {
+        param($Reader)
+        $state.stderrReaderDisposeCount++
+        $Reader.Dispose()
+    }.GetNewClosure()
+    $disposeStderrStream = {
+        param($Stream)
+        $state.stderrStreamDisposeCount++
+        $Stream.Dispose()
+        $state.stderrStreamClosed = !$Stream.CanRead
+    }.GetNewClosure()
+    $disposeStdoutTask = {
+        param($Task)
+        $state.stdoutTaskDisposeCount++
+        $state.stdoutTaskCompleted = [bool]$Task.IsCompleted
+        $Task.Dispose()
+    }.GetNewClosure()
+    $disposeStderrTask = {
+        param($Task)
+        $state.stderrTaskDisposeCount++
+        $state.stderrTaskCompleted = [bool]$Task.IsCompleted
+        $Task.Dispose()
+    }.GetNewClosure()
     return [pscustomobject][ordered]@{
         state = $state
         hooks = @{
             TerminateAndVerify = $terminate
             DisposeProcess = $disposeProcess
             DisposeJob = $disposeJob
+            DisposeStdoutReader = $disposeStdoutReader
+            DisposeStdoutStream = $disposeStdoutStream
+            DisposeStderrReader = $disposeStderrReader
+            DisposeStderrStream = $disposeStderrStream
+            DisposeStdoutTask = $disposeStdoutTask
+            DisposeStderrTask = $disposeStderrTask
         }
     }
 }
@@ -1513,6 +1563,15 @@ function Assert-G04DCTestLifecycleClosed {
     )
     if ($Lifecycle.state.processDisposeCount -ne 1 -or $Lifecycle.state.jobDisposeCount -ne 1) {
         throw "$CaseName did not attempt both Process and Job Object disposal exactly once."
+    }
+    if ($Lifecycle.state.stdoutReaderDisposeCount -ne 1 -or $Lifecycle.state.stdoutStreamDisposeCount -ne 1 -or
+        $Lifecycle.state.stderrReaderDisposeCount -ne 1 -or $Lifecycle.state.stderrStreamDisposeCount -ne 1 -or
+        $Lifecycle.state.stdoutTaskDisposeCount -ne 1 -or $Lifecycle.state.stderrTaskDisposeCount -ne 1) {
+        throw "$CaseName did not dispose both redirected readers, pipe streams and reader tasks exactly once."
+    }
+    if (!$Lifecycle.state.stdoutStreamClosed -or !$Lifecycle.state.stderrStreamClosed -or
+        !$Lifecycle.state.stdoutTaskCompleted -or !$Lifecycle.state.stderrTaskCompleted) {
+        throw "$CaseName did not prove closed redirected pipes and completed reader tasks."
     }
     if ([DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount -ne $BaselineJobHandles) {
         throw "$CaseName leaked an owned Job Object handle."
@@ -1652,6 +1711,7 @@ Invoke-G04DCTestNativeDigest -Code $syntheticOutputCode -LifecycleTestHooks $p1a
 Assert-G04DCTestLifecycleClosed -Lifecycle $p1aNormalLifecycle -BaselineJobHandles $p1aBaselineHandles -CaseName 'normal-helper-success'
 if ($p1aNormalLifecycle.state.terminateCount -ne 0) { throw 'Normal helper success unexpectedly used forced termination.' }
 $passed.Add('P1-A normal helper success disposes Process and Job Object')
+$passed.Add('P1-A redirected readers streams and tasks are disposed')
 
 $p1aTimeoutLifecycle = Invoke-G04DCTestRunningLifecycleFailure -Mode timeout
 if ($p1aTimeoutLifecycle.state.terminateCount -ne 1) { throw 'Timeout did not use bounded owned-Job termination exactly once.' }
@@ -2322,5 +2382,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 314) { throw "Expected 314 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 315) { throw "Expected 315 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

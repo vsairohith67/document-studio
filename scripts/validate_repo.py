@@ -1074,6 +1074,8 @@ for boundary in [
     'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
     'ActiveHandleCount', 'nativeCleanupFailureStage', 'secondaryNativeCleanupFailure',
     'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED', 'LifecycleTestHooks',
+    'DisposeStdoutReader', 'DisposeStdoutStream', 'DisposeStderrReader', 'DisposeStderrStream',
+    'DisposeStdoutTask', 'DisposeStderrTask',
 ]:
     if boundary not in g04dc_common:
         raise SystemExit(f'G04D-C class-registry process boundary is missing: {boundary}')
@@ -1101,9 +1103,10 @@ for regression in [
     'shortcut catalog transient sharing retry preserves full entry',
     'shortcut catalog persistent sharing failure remains fail closed',
     'P1-A cleanup error precedence preserves secondary evidence',
+    'P1-A redirected readers streams and tasks are disposed',
     'P1-A production cleanup uses no global process termination',
     'P1-B canonical hash independent of Console OutputEncoding',
-    'P1-B accepted canonical fixture remains byte-identical', 'Expected 314 fail-closed cases',
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 315 fail-closed cases',
 ]:
     if regression not in g04dc_tests:
         raise SystemExit(f'G04D-C class-registry regression is missing: {regression}')

@@ -2825,7 +2825,11 @@ function Get-G04DCRegistryTreeDigest {
         throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Native lifecycle injection is restricted to the synthetic test path.'
     }
     if ($LifecycleTestHooks) {
-        $unexpectedHooks = @($LifecycleTestHooks.Keys | Where-Object { [string]$_ -cnotin @('TerminateAndVerify', 'DisposeProcess', 'DisposeJob') })
+        $unexpectedHooks = @($LifecycleTestHooks.Keys | Where-Object { [string]$_ -cnotin @(
+            'TerminateAndVerify', 'DisposeProcess', 'DisposeJob',
+            'DisposeStdoutReader', 'DisposeStdoutStream', 'DisposeStderrReader', 'DisposeStderrStream',
+            'DisposeStdoutTask', 'DisposeStderrTask'
+        ) })
         if ($unexpectedHooks.Count -ne 0) {
             throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Native lifecycle injection contains an unknown hook.'
         }
@@ -2853,8 +2857,14 @@ function Get-G04DCRegistryTreeDigest {
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $job = $null
+    $stdoutReader = $null
+    $stdoutStream = $null
+    $stderrReader = $null
+    $stderrStream = $null
     $collector = $null
     $stderrCapture = $null
+    $stdoutTask = $null
+    $stderrTask = $null
     $started = $false
     $terminalExitObserved = $false
     $failure = $null
@@ -2911,8 +2921,12 @@ function Get-G04DCRegistryTreeDigest {
         if (!$process.Start()) { throw '[MACHINE_STATE_CAPTURE_FAILED] reg.exe did not start.' }
         $started = $true
         $job.Assign($process)
+        $stdoutReader = $process.StandardOutput
+        $stdoutStream = $stdoutReader.BaseStream
+        $stderrReader = $process.StandardError
+        $stderrStream = $stderrReader.BaseStream
         $collector = [DocumentStudio.G04DC.ClassRegistryDigestCollector]::new(
-            $process.StandardOutput.BaseStream,
+            $stdoutStream,
             $nativeOutputEncoding,
             $MaximumRawBytes,
             $MaximumRows,
@@ -2921,7 +2935,7 @@ function Get-G04DCRegistryTreeDigest {
             $MaximumCanonicalBytes,
             $ReadBufferBytes
         )
-        $stderrCapture = [DocumentStudio.G04DC.BoundedTextCapture]::new($process.StandardError.BaseStream, $nativeOutputEncoding, $MaximumStderrBytes, $ReadBufferBytes)
+        $stderrCapture = [DocumentStudio.G04DC.BoundedTextCapture]::new($stderrStream, $nativeOutputEncoding, $MaximumStderrBytes, $ReadBufferBytes)
         $stdoutTask = $collector.BeginRead()
         $stderrTask = $stderrCapture.BeginRead()
         if ($CaptureContext) {
@@ -3016,8 +3030,8 @@ function Get-G04DCRegistryTreeDigest {
                 else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'process-dispose' }
             }
             finally {
-                if ($job) {
-                    try {
+                try {
+                    if ($job) {
                         if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeJob')) {
                             & $LifecycleTestHooks['DisposeJob'] $job
                         }
@@ -3026,9 +3040,102 @@ function Get-G04DCRegistryTreeDigest {
                         }
                         if (!$job.IsDisposed) { throw 'Owned Job Object handle remained open.' }
                     }
+                }
+                catch {
+                    if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                    else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'job-dispose' }
+                }
+                finally {
+                    try {
+                        if ($stdoutReader) {
+                            if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeStdoutReader')) {
+                                & $LifecycleTestHooks['DisposeStdoutReader'] $stdoutReader
+                            }
+                            else { $stdoutReader.Dispose() }
+                        }
+                    }
                     catch {
                         if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
-                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'job-dispose' }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'stdout-reader-dispose' }
+                    }
+                    try {
+                        if ($stdoutStream) {
+                            if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeStdoutStream')) {
+                                & $LifecycleTestHooks['DisposeStdoutStream'] $stdoutStream
+                            }
+                            else { $stdoutStream.Dispose() }
+                            if ($stdoutStream.CanRead) { throw 'Owned stdout pipe remained readable.' }
+                        }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'stdout-stream-dispose' }
+                    }
+                    try {
+                        if ($stderrReader) {
+                            if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeStderrReader')) {
+                                & $LifecycleTestHooks['DisposeStderrReader'] $stderrReader
+                            }
+                            else { $stderrReader.Dispose() }
+                        }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'stderr-reader-dispose' }
+                    }
+                    try {
+                        if ($stderrStream) {
+                            if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeStderrStream')) {
+                                & $LifecycleTestHooks['DisposeStderrStream'] $stderrStream
+                            }
+                            else { $stderrStream.Dispose() }
+                            if ($stderrStream.CanRead) { throw 'Owned stderr pipe remained readable.' }
+                        }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'stderr-stream-dispose' }
+                    }
+                    try {
+                        $taskDrain = $null
+                        try {
+                            $taskDrain = [Diagnostics.Stopwatch]::StartNew()
+                            while (($stdoutTask -and !$stdoutTask.IsCompleted) -or ($stderrTask -and !$stderrTask.IsCompleted)) {
+                                if ($taskDrain.ElapsedMilliseconds -ge 5000) { throw 'Owned native reader tasks did not complete after pipe disposal.' }
+                                Start-Sleep -Milliseconds 10
+                            }
+                            if ($stdoutTask -and $stdoutTask.IsFaulted) { [void]$stdoutTask.Exception }
+                            if ($stderrTask -and $stderrTask.IsFaulted) { [void]$stderrTask.Exception }
+                        }
+                        finally { if ($taskDrain) { $taskDrain.Stop() } }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'reader-task-completion' }
+                    }
+                    try {
+                        if ($stdoutTask) {
+                            if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeStdoutTask')) {
+                                & $LifecycleTestHooks['DisposeStdoutTask'] $stdoutTask
+                            }
+                            else { $stdoutTask.Dispose() }
+                        }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'stdout-task-dispose' }
+                    }
+                    try {
+                        if ($stderrTask) {
+                            if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeStderrTask')) {
+                                & $LifecycleTestHooks['DisposeStderrTask'] $stderrTask
+                            }
+                            else { $stderrTask.Dispose() }
+                        }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'stderr-task-dispose' }
                     }
                 }
             }
