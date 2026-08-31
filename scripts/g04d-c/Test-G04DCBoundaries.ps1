@@ -473,7 +473,7 @@ function New-State(
         libreOfficeServices = if ($Service) { @([pscustomobject]@{ name = $Service; startMode = 'Manual'; pathName = 'owned' }) } else { @() }
         appPaths = @(); appPathCatalogCount = 0; appPathCatalogSha256 = 'app-path-catalog'
         libreOfficeProgIds = @(); classKeyCatalogCount = 0; classKeyCatalogSha256 = 'class-key-catalog'
-        classRegistryCatalogCount = 0; classRegistryCatalogSha256 = 'class-registry-catalog'
+        classRegistryCatalogSchemaVersion = 2; classRegistryKeyCount = 0; classRegistryValueCount = 0; classRegistryCatalogCount = 0; classRegistryCatalogSha256 = 'class-registry-catalog'
         msiProtectedRegistryTargets = @(); scheduledTasks = @(); scheduledTaskCatalogCount = 0; scheduledTaskCatalogSha256 = 'task-catalog'
         startup = @(); startupCatalogCount = 0; startupCatalogSha256 = 'startup-catalog'
         shortcutCatalogCount = 0; shortcutCatalogSha256 = 'shortcut-catalog'
@@ -667,6 +667,15 @@ Assert-Throws 'unrelated installed product change' 'PROTECTED_HOST_MUTATION' { A
 $caseState = New-State; $caseState.classRegistryCatalogSha256 = 'changed-class-registry'
 $comparison = Compare-G04DCMachineState -Before $baseline -After $caseState
 Assert-Throws 'full classes registry change' 'PROTECTED_HOST_MUTATION' { Assert-G04DCNonMutation -Comparison $comparison }
+$caseState = New-State; $caseState.classRegistryCatalogSchemaVersion = 3
+$comparison = Compare-G04DCMachineState -Before $baseline -After $caseState
+Assert-Throws 'class registry digest schema change' 'PROTECTED_HOST_MUTATION' { Assert-G04DCNonMutation -Comparison $comparison }
+$caseState = New-State; $caseState.classRegistryKeyCount = 1
+$comparison = Compare-G04DCMachineState -Before $baseline -After $caseState
+Assert-Throws 'class registry key-count change' 'PROTECTED_HOST_MUTATION' { Assert-G04DCNonMutation -Comparison $comparison }
+$caseState = New-State; $caseState.classRegistryValueCount = 1
+$comparison = Compare-G04DCMachineState -Before $baseline -After $caseState
+Assert-Throws 'class registry value-count change' 'PROTECTED_HOST_MUTATION' { Assert-G04DCNonMutation -Comparison $comparison }
 $caseState = New-State; $caseState.shortcutCatalogSha256 = 'changed-shortcut-catalog'
 $comparison = Compare-G04DCMachineState -Before $baseline -After $caseState
 Assert-Throws 'desktop or start-menu shortcut change' 'PROTECTED_HOST_MUTATION' { Assert-G04DCNonMutation -Comparison $comparison }
@@ -1390,6 +1399,36 @@ function Get-G04DCTestOptimizedRegistryDigest {
     return & $g04dcModule { param([string]$Path) Get-G04DCRegistryTreeDigest -NativePath $Path -AllowTestNativePath } $NativePath
 }
 
+function Get-G04DCTestDirectClassRegistryDigest {
+    param(
+        [Parameter(Mandatory = $true)] [string]$TestSubKey,
+        [int]$MaximumKeys = 1000000,
+        [int]$MaximumValues = 1000000,
+        [int]$MaximumDepth = 256,
+        [int]$MaximumValueBytes = 16777216,
+        [long]$MaximumCanonicalBytes = 134217728,
+        [long]$BudgetMilliseconds = 30000,
+        [AllowNull()] [Action[long,long]]$Progress = $null
+    )
+    $collector = [DocumentStudio.G04DC.DirectClassRegistryDigestCollector]::new(
+        $MaximumKeys,
+        $MaximumValues,
+        $MaximumDepth,
+        $MaximumValueBytes,
+        $MaximumCanonicalBytes
+    )
+    $collector.CollectTestClassesRoot64($TestSubKey, $BudgetMilliseconds, $Progress)
+    return [pscustomobject][ordered]@{
+        schemaVersion = [int]$collector.SchemaVersion
+        keyCount = [int]$collector.KeyCount
+        valueCount = [int]$collector.ValueCount
+        rowCount = [int]$collector.RowCount
+        rawByteCount = [long]$collector.RawByteCount
+        canonicalByteCount = [long]$collector.CanonicalByteCount
+        sha256 = [string]$collector.Sha256
+    }
+}
+
 function Assert-G04DCTestRegistryDigestEquivalence {
     param([Parameter(Mandatory = $true)] [string]$NativePath)
     $legacy = Get-G04DCTestLegacyRegistryDigest -NativePath $NativePath
@@ -1397,11 +1436,16 @@ function Assert-G04DCTestRegistryDigestEquivalence {
     if ($legacy.rowCount -ne $optimized.rowCount -or $legacy.sha256 -cne $optimized.sha256) {
         throw 'Optimized registry query differs from the legacy query on the GUID-owned fixture.'
     }
-    return [string]$optimized.sha256
+    $direct = Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey
+    if ($direct.schemaVersion -ne 2 -or $direct.rowCount -ne ($direct.keyCount + $direct.valueCount) -or $direct.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw 'Direct merged-view collector returned invalid versioned evidence.'
+    }
+    return [string]$direct.sha256
 }
 
 $c7RegistryTestId = [guid]::NewGuid().ToString('N')
-$c7RegistryNativeRoot = "Software\DocumentStudio-G04DC-C7-Registry-$c7RegistryTestId"
+$script:c7DirectTestSubKey = "DocumentStudioG04DCTest_$c7RegistryTestId"
+$c7RegistryNativeRoot = "Software\Classes\$script:c7DirectTestSubKey"
 $c7RegistryPath = "HKEY_CURRENT_USER\$c7RegistryNativeRoot"
 $c7RegistryBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Registry64)
 $c7RegistryRoot = $c7RegistryBase.CreateSubKey($c7RegistryNativeRoot)
@@ -1409,6 +1453,85 @@ if (!$c7RegistryRoot) { throw 'Could not create the C7 GUID-owned registry fixtu
 $c7RegistryRoot.Dispose()
 try {
     $baselineDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    $baselineDirectEvidence = Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey
+    if ($baselineDirectEvidence.schemaVersion -ne 2 -or $baselineDirectEvidence.keyCount -ne 1 -or $baselineDirectEvidence.valueCount -ne 0) {
+        throw 'Direct HKCR fixture did not preserve the merged Registry64 root and exact counts.'
+    }
+    $passed.Add('direct HKCR Registry64 merged-view fixture')
+    $passed.Add('direct HKCR versioned key-value counts')
+
+    $raceKey = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\RaceKey\Child")
+    $raceKey.Dispose()
+    $raceKeyState = [pscustomobject]@{ triggered = $false }
+    $raceKeyProgress = [Action[long,long]]{
+        param([long]$RowCount, [long]$RawByteCount)
+        if (!$raceKeyState.triggered -and $RowCount -eq 1) {
+            $raceKeyState.triggered = $true
+            $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\RaceKey", $false)
+        }
+    }
+    Assert-Throws 'direct HKCR disappearing key fails closed' 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' {
+        Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -Progress $raceKeyProgress | Out-Null
+    }
+    if (!$raceKeyState.triggered) { throw 'Direct HKCR disappearing-key fixture did not execute.' }
+
+    $raceValueRoot = $c7RegistryBase.OpenSubKey($c7RegistryNativeRoot, $true)
+    try {
+        $raceValueRoot.SetValue('RaceValue', 'present', [Microsoft.Win32.RegistryValueKind]::String)
+        $raceValueState = [pscustomobject]@{ triggered = $false }
+        $raceValueProgress = [Action[long,long]]{
+            param([long]$RowCount, [long]$RawByteCount)
+            if (!$raceValueState.triggered -and $RowCount -eq 1) {
+                $raceValueState.triggered = $true
+                $raceValueRoot.DeleteValue('RaceValue', $false)
+            }
+        }
+        Assert-Throws 'direct HKCR disappearing value fails closed' 'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED' {
+            Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -Progress $raceValueProgress | Out-Null
+        }
+        if (!$raceValueState.triggered) { throw 'Direct HKCR disappearing-value fixture did not execute.' }
+    }
+    finally { $raceValueRoot.Dispose() }
+
+    $deniedKey = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Denied")
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $denyRule = [Security.AccessControl.RegistryAccessRule]::new(
+        $currentSid,
+        [Security.AccessControl.RegistryRights]::QueryValues,
+        [Security.AccessControl.AccessControlType]::Deny
+    )
+    try {
+        $deniedKey.SetValue('Protected', 'value', [Microsoft.Win32.RegistryValueKind]::String)
+        $deniedAcl = $deniedKey.GetAccessControl()
+        [void]$deniedAcl.AddAccessRule($denyRule)
+        $deniedKey.SetAccessControl($deniedAcl)
+        Assert-Throws 'direct HKCR access denial fails closed' 'REGISTRY_TRAVERSAL_ACCESS_DENIED' {
+            Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey | Out-Null
+        }
+    }
+    finally {
+        $restoreAcl = $deniedKey.GetAccessControl()
+        [void]$restoreAcl.RemoveAccessRuleSpecific($denyRule)
+        $deniedKey.SetAccessControl($restoreAcl)
+        $deniedKey.Dispose()
+        $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\Denied", $false)
+    }
+
+    $ceilingKey = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\CeilingChild")
+    $ceilingKey.Dispose()
+    try {
+        Assert-Throws 'direct HKCR key-count ceiling' 'REGISTRY_TRAVERSAL_KEY_CEILING' {
+            Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumKeys 1 | Out-Null
+        }
+    }
+    finally { $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\CeilingChild", $false) }
+    Assert-Throws 'direct HKCR canonical-byte ceiling' 'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING' {
+        Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumCanonicalBytes 4 | Out-Null
+    }
+    Assert-Throws 'direct HKCR traversal timeout' 'REGISTRY_TRAVERSAL_TIMEOUT' {
+        Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -BudgetMilliseconds 0 | Out-Null
+    }
+
     $key = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Created")
     $key.Dispose()
     $createdDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
@@ -1430,6 +1553,9 @@ try {
     $renamedDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
     if ($renamedDigest -ceq $nestedDigest) { throw 'Registry key rename shape did not change the full digest.' }
     $passed.Add('registry key rename mutation equivalence')
+    Assert-Throws 'direct HKCR depth ceiling' 'REGISTRY_TRAVERSAL_DEPTH_CEILING' {
+        Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumDepth 1 | Out-Null
+    }
 
     $values = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Values")
     try {
@@ -1462,6 +1588,9 @@ try {
         $qwordDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
         if ($qwordDigest -ceq $dwordDigest) { throw 'QWORD change was not detected.' }
         $passed.Add('registry QWORD mutation equivalence')
+        Assert-Throws 'direct HKCR value-count ceiling' 'REGISTRY_TRAVERSAL_VALUE_CEILING' {
+            Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumValues 1 | Out-Null
+        }
         $values.SetValue('Changing', 'text', [Microsoft.Win32.RegistryValueKind]::String)
         $kindBefore = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
         $values.SetValue('Changing', [byte[]]@(1, 2, 3), [Microsoft.Win32.RegistryValueKind]::Binary)
@@ -1486,6 +1615,9 @@ try {
         $longDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
         if ($longDigest -ceq $unicodeDigest) { throw 'Long bounded registry value change was not detected.' }
         $passed.Add('registry long bounded value equivalence')
+        Assert-Throws 'direct HKCR per-value byte ceiling' 'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING' {
+            Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumValueBytes 1024 | Out-Null
+        }
     }
     finally { $values.Dispose() }
 
@@ -1499,10 +1631,12 @@ try {
     if ($rawBeforeC7Read -cne $rawAfterC7Read) { throw 'Optimized class registry collector mutated the GUID-owned fixture.' }
     $passed.Add('optimized class registry collector performs no mutation')
     $passed.Add('class registry disappearing key-value transition detected')
+    $passed.Add('direct HKCR handles disposed for owned cleanup')
 }
 finally {
     $c7RegistryBase.DeleteSubKeyTree($c7RegistryNativeRoot, $false)
     $c7RegistryBase.Dispose()
+    $script:c7DirectTestSubKey = $null
 }
 
 $shortcutRetryRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-shortcut-retry-' + [guid]::NewGuid().ToString('N'))
@@ -1546,8 +1680,8 @@ finally {
 }
 
 $classRegistryHelperSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ClassRegistryDigest.cs') -Raw
-if ($commonSource -match '(?i)UseShellExecute\s*=\s*\$true|cmd\.exe' -or $classRegistryHelperSource -match '(?i)Microsoft\.Win32|CreateSubKey|SetValue|DeleteValue|DeleteSubKey') {
-    throw 'C7 streaming registry collector introduced a shell or registry mutation API.'
+if ($commonSource -match '(?i)UseShellExecute\s*=\s*\$true|cmd\.exe' -or $classRegistryHelperSource -match '(?i)CreateSubKey|SetValue|DeleteValue|DeleteSubKey|OpenRemoteBaseKey') {
+    throw 'C7 class-registry collector introduced a shell, mutation API, or remote registry access.'
 }
 $passed.Add('class registry collector uses no shell')
 if ($commonSource -match '(?i)Win32_Product' -or $classRegistryHelperSource -match '(?i)Win32_Product') { throw 'C7 registry digest introduced Win32_Product.' }
@@ -1734,5 +1868,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 265) { throw "Expected 265 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 280) { throw "Expected 280 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

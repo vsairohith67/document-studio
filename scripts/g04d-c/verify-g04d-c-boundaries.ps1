@@ -51,8 +51,18 @@ foreach ($classRegistryBoundary in @(
 )) {
     if (!$classRegistryDigestProof.Contains($classRegistryBoundary)) { throw "G04D-C class-registry streaming boundary is missing: $classRegistryBoundary" }
 }
-if ($classRegistryDigestProof -match '(?i)Microsoft\.Win32|CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create') {
-    throw 'G04D-C class-registry streaming helper may not mutate registry or create raw-output artifacts.'
+foreach ($directRegistryBoundary in @(
+    'DirectClassRegistryDigestCollector', 'RegistryHive.ClassesRoot', 'RegistryView.Registry64',
+    'RegQueryValueExW', 'CollectClassesRoot64', 'REGISTRY_TRAVERSAL_ACCESS_DENIED',
+    'REGISTRY_TRAVERSAL_UNSTABLE', 'REGISTRY_TRAVERSAL_KEY_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_CEILING', 'REGISTRY_TRAVERSAL_DEPTH_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING', 'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING',
+    'public int SchemaVersion { get { return 2; } }'
+)) {
+    if (!$classRegistryDigestProof.Contains($directRegistryBoundary)) { throw "G04D-C direct HKCR boundary is missing: $directRegistryBoundary" }
+}
+if ($classRegistryDigestProof -match '(?i)CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create|RegistryKey\.OpenRemoteBaseKey') {
+    throw 'G04D-C class-registry helper may not mutate registry, use remote registry, or create raw-output artifacts.'
 }
 foreach ($classRegistryProcessBoundary in @(
     'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
@@ -68,8 +78,12 @@ foreach ($classRegistryRegression in @(
     'registry key creation mutation equivalence', 'registry default absent-empty distinction',
     'registry value-kind mutation equivalence', 'registry Unicode mutation equivalence',
     'optimized class registry collector performs no mutation', 'C7 class registry target is 180000 ms',
+    'direct HKCR Registry64 merged-view fixture', 'direct HKCR access denial fails closed',
+    'direct HKCR disappearing key fails closed', 'direct HKCR disappearing value fails closed',
+    'class registry digest schema change', 'class registry key-count change', 'class registry value-count change',
+    'direct HKCR traversal timeout', 'direct HKCR handles disposed for owned cleanup',
     'shortcut catalog transient sharing retry preserves full entry',
-    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 265 fail-closed cases'
+    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 280 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
@@ -77,7 +91,7 @@ if (!$precheckProof.Contains('classRegistryDigestTargetMilliseconds = 180000L') 
     throw 'G04D-C PRECHECK class-registry target is not fixed at 180000 ms.'
 }
 foreach ($directoryRetryBoundary in @(
-    '$maximumAttempts = 4', 'Start-Sleep -Milliseconds 250', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
+    '$maximumAttempts = 20', 'Start-Sleep -Milliseconds 500', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
     '$afterItem.LastWriteTimeUtc', "'IOException', 'ItemNotFoundException'"
 )) {
     if (!$commonProof.Contains($directoryRetryBoundary)) { throw "G04D-C bounded directory retry boundary is missing: $directoryRetryBoundary" }
@@ -160,7 +174,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 265 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 280 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
@@ -182,7 +196,7 @@ foreach ($runtimeBoundary in @('--version', '--convert-to', 'Invoke-G04DCZeroCap
         throw "G04D-C sandbox-only runtime boundary is missing: $runtimeBoundary"
     }
 }
-foreach ($machineSeal in @('serviceCatalogSha256', 'serviceRegistryCatalogSha256', 'scheduledTaskCatalogSha256', 'firewallCatalogSha256', 'installedProductCatalogSha256', 'otherInstalledProductCatalogSha256', 'installerCacheCatalogSha256', 'classRegistryCatalogSha256', 'shortcutCatalogSha256', 'environmentCatalogSha256', 'pendingReboot')) {
+foreach ($machineSeal in @('serviceCatalogSha256', 'serviceRegistryCatalogSha256', 'scheduledTaskCatalogSha256', 'firewallCatalogSha256', 'installedProductCatalogSha256', 'otherInstalledProductCatalogSha256', 'installerCacheCatalogSha256', 'classRegistryCatalogSchemaVersion', 'classRegistryKeyCount', 'classRegistryValueCount', 'classRegistryCatalogSha256', 'shortcutCatalogSha256', 'environmentCatalogSha256', 'pendingReboot')) {
     if (!$commonProof.Contains($machineSeal)) { throw "G04D-C full machine-state digest is missing: $machineSeal" }
 }
 foreach ($startupSeal in @('RunOnce', 'WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'SpecialFolder]::Startup', 'ProgramData')) {

@@ -1057,8 +1057,18 @@ for boundary in [
 ]:
     if boundary not in g04dc_registry_digest:
         raise SystemExit(f'G04D-C class-registry streaming boundary is missing: {boundary}')
-if re.search(r'(?i)Microsoft\.Win32|CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create', g04dc_registry_digest):
-    raise SystemExit('G04D-C class-registry streaming helper may not mutate registry or create raw-output artifacts')
+for boundary in [
+    'DirectClassRegistryDigestCollector', 'RegistryHive.ClassesRoot', 'RegistryView.Registry64',
+    'RegQueryValueExW', 'CollectClassesRoot64', 'REGISTRY_TRAVERSAL_ACCESS_DENIED',
+    'REGISTRY_TRAVERSAL_UNSTABLE', 'REGISTRY_TRAVERSAL_KEY_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_CEILING', 'REGISTRY_TRAVERSAL_DEPTH_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING', 'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING',
+    'public int SchemaVersion { get { return 2; } }',
+]:
+    if boundary not in g04dc_registry_digest:
+        raise SystemExit(f'G04D-C direct HKCR boundary is missing: {boundary}')
+if re.search(r'(?i)CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create|RegistryKey\.OpenRemoteBaseKey', g04dc_registry_digest):
+    raise SystemExit('G04D-C class-registry helper may not mutate registry, use remote registry, or create raw-output artifacts')
 for boundary in [
     'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
     'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
@@ -1069,7 +1079,7 @@ for boundary in ['classRegistryDigestTargetMilliseconds = 180000L', 'CLASS_REGIS
     if boundary not in g04dc_precheck:
         raise SystemExit(f'G04D-C PRECHECK class-registry target is missing: {boundary}')
 for boundary in [
-    '$maximumAttempts = 4', 'Start-Sleep -Milliseconds 250', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
+    '$maximumAttempts = 20', 'Start-Sleep -Milliseconds 500', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
     '$afterItem.LastWriteTimeUtc', "'IOException', 'ItemNotFoundException'",
 ]:
     if boundary not in g04dc_common:
@@ -1082,8 +1092,12 @@ for regression in [
     'registry key creation mutation equivalence', 'registry default absent-empty distinction',
     'registry value-kind mutation equivalence', 'registry Unicode mutation equivalence',
     'optimized class registry collector performs no mutation', 'C7 class registry target is 180000 ms',
+    'direct HKCR Registry64 merged-view fixture', 'direct HKCR access denial fails closed',
+    'direct HKCR disappearing key fails closed', 'direct HKCR disappearing value fails closed',
+    'class registry digest schema change', 'class registry key-count change', 'class registry value-count change',
+    'direct HKCR traversal timeout', 'direct HKCR handles disposed for owned cleanup',
     'shortcut catalog transient sharing retry preserves full entry',
-    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 265 fail-closed cases',
+    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 280 fail-closed cases',
 ]:
     if regression not in g04dc_tests:
         raise SystemExit(f'G04D-C class-registry regression is missing: {regression}')
@@ -1110,6 +1124,7 @@ for boundary in ['--version', '--convert-to', 'Invoke-G04DCZeroCapabilityProbe']
 for boundary in [
     'allRegistryRows', 'serviceCatalogSha256', 'scheduledTaskCatalogSha256',
     'firewallCatalogSha256', 'installedProductCatalogSha256', 'otherInstalledProductCatalogSha256', 'installerCacheCatalogSha256', 'serviceRegistryCatalogSha256',
+    'classRegistryCatalogSchemaVersion', 'classRegistryKeyCount', 'classRegistryValueCount',
     'classRegistryCatalogSha256', 'shortcutCatalogSha256', 'environmentCatalogSha256', 'pendingReboot',
 ]:
     if boundary not in g04dc_common + g04dc_admin + g04dc_minimal:
