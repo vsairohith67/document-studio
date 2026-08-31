@@ -942,7 +942,7 @@ try {
     $passed.Add('machine-state streaming hash disposes handle on failure')
 }
 finally {
-    foreach ($telemetryContext in @($context, $failureContext, $phaseBudgetContext, $overallBudgetContext, $serializationSuccessContext, $serializationContext, $helperSuccessContext, $helperContext, $successGateContext, $hashContext)) {
+    foreach ($telemetryContext in @($context, $failureContext, $phaseBudgetContext, $overallBudgetContext, $serializationSuccessContext, $serializationContext, $canonicalSuccessContext, $canonicalBudgetContext, $helperSuccessContext, $helperContext, $successGateContext, $hashContext)) {
         if ($telemetryContext -and $telemetryContext.writer) { $telemetryContext.writer.Dispose(); $telemetryContext.writer = $null }
     }
     if (Test-Path -LiteralPath $telemetryRoot) { Remove-Item -LiteralPath $telemetryRoot -Recurse -Force }
@@ -1103,6 +1103,420 @@ $componentFunctionSource = (Get-Command Get-G04DCMsiComponentRegistrationState).
 if ($scaleAdapterState.statistics.providerInvocationCount -ne 0 -or $componentFunctionSource.Contains('Get-G04DCRegistryValueState')) { throw 'Scale collector retained a Registry-provider classification per component.' }
 $passed.Add('MSI component scale avoids provider per component')
 
+$g04dcModule = Get-Module G04DC.Common
+$utf8Strict = [Text.UTF8Encoding]::new($false, $true)
+
+function Invoke-G04DCTestClassRegistryCollector {
+    param(
+        [AllowEmptyString()] [string]$Text,
+        [AllowEmptyString()] [string]$StderrText = '',
+        [long]$MaximumRawBytes = 134217728,
+        [int]$MaximumRows = 1000000,
+        [int]$MaximumRowCharacters = 16777216,
+        [int]$MaximumCanonicalRowBytes = 16777216,
+        [long]$MaximumCanonicalBytes = 134217728,
+        [int]$ReadBufferBytes = 65536,
+        [long]$NormalizeBudgetMilliseconds = 30000,
+        [long]$HashBudgetMilliseconds = 30000
+    )
+    $bytes = $utf8Strict.GetBytes($Text)
+    $stream = [IO.MemoryStream]::new($bytes)
+    try {
+        $collector = [DocumentStudio.G04DC.ClassRegistryDigestCollector]::new(
+            $stream,
+            $utf8Strict,
+            $MaximumRawBytes,
+            $MaximumRows,
+            $MaximumRowCharacters,
+            $MaximumCanonicalRowBytes,
+            $MaximumCanonicalBytes,
+            $ReadBufferBytes
+        )
+        $readTask = $collector.BeginRead()
+        $readTask.GetAwaiter().GetResult()
+        $collector.AppendStderrText($StderrText)
+        $collector.Normalize($NormalizeBudgetMilliseconds)
+        $digest = $collector.Hash($HashBudgetMilliseconds)
+        return [pscustomobject][ordered]@{
+            rowCount = [long]$collector.RowCount
+            rawByteCount = [long]$collector.RawByteCount
+            canonicalByteCount = [long]$collector.CanonicalByteCount
+            sha256 = [string]$digest
+        }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-G04DCTestLegacyNativeDigest {
+    param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$Text)
+    $rows = @(& $g04dcModule { param([string]$NativeText) ConvertFrom-G04DCNativeTextRows -Text $NativeText } $Text)
+    return [pscustomobject][ordered]@{ rowCount = $rows.Count; sha256 = Get-G04DCCanonicalHash -Rows $rows }
+}
+
+$normalizationText = "alpha  `r`n`r`nbeta`t`r`n"
+$legacyNormalization = Get-G04DCTestLegacyNativeDigest -Text $normalizationText
+$optimizedNormalization = Invoke-G04DCTestClassRegistryCollector -Text $normalizationText -ReadBufferBytes 3
+if ($optimizedNormalization.rowCount -ne $legacyNormalization.rowCount -or $optimizedNormalization.sha256 -cne $legacyNormalization.sha256) {
+    throw 'Streaming registry normalization changed the legacy native-row digest.'
+}
+$passed.Add('current native-row normalization equivalence')
+if ($optimizedNormalization.rowCount -ne 3) { throw 'Streaming registry normalization lost the internal blank row or retained the terminal empty row.' }
+$passed.Add('terminal empty-row handling')
+$trimmedDigest = Invoke-G04DCTestClassRegistryCollector -Text "alpha`r`n"
+if ($trimmedDigest.sha256 -cne (Invoke-G04DCTestClassRegistryCollector -Text "alpha  `t`r`n").sha256) { throw 'Streaming registry normalization changed TrimEnd semantics.' }
+$passed.Add('trailing-space TrimEnd equivalence')
+
+$canonicalCases = @(
+    @(),
+    @('single'),
+    @('', 'spaces  ', "tab`t", 'quote"', 'backslash\'),
+    @(('unicode-' + (-join @([char]0x0928, [char]0x092E))), ([string][char]0x2028), ([string][char]0x0085)),
+    @('a', 'A', 'b', 'B')
+)
+foreach ($canonicalRows in $canonicalCases) {
+    $canonicalText = if ($canonicalRows.Count -eq 0) { '' } else { ($canonicalRows -join "`r`n") + "`r`n" }
+    $legacyDigest = Get-G04DCCanonicalHash -Rows @($canonicalRows | ForEach-Object { ([string]$_).TrimEnd() })
+    $optimizedDigest = Invoke-G04DCTestClassRegistryCollector -Text $canonicalText -ReadBufferBytes 1
+    if ($optimizedDigest.sha256 -cne $legacyDigest) { throw 'Incremental canonical string-row hash differs from the legacy digest.' }
+}
+$passed.Add('incremental hash equality')
+if ((Invoke-G04DCTestClassRegistryCollector -Text '').sha256 -cne (Get-G04DCCanonicalHash -Rows @())) { throw 'Zero-row canonical hash changed.' }
+$passed.Add('zero-row hash')
+
+$scaleRows = @(0..64235 | ForEach-Object { 'HKEY_CLASSES_ROOT\Synthetic\' + $_.ToString('D6') })
+$scaleText = ($scaleRows -join "`r`n") + "`r`n"
+$scaleOptimized = Invoke-G04DCTestClassRegistryCollector -Text $scaleText
+$scaleLegacy = Get-G04DCCanonicalHash -Rows $scaleRows
+if ($scaleOptimized.rowCount -ne 64236 -or $scaleOptimized.sha256 -cne $scaleLegacy) { throw 'Streaming registry collector failed the 64,236-row canonical scale.' }
+$passed.Add('64236-row registry digest scale')
+
+$orderA = Invoke-G04DCTestClassRegistryCollector -Text "a`r`nA`r`n"
+$orderB = Invoke-G04DCTestClassRegistryCollector -Text "A`r`na`r`n"
+$legacyOrderA = Get-G04DCCanonicalHash -Rows @('a', 'A')
+$legacyOrderB = Get-G04DCCanonicalHash -Rows @('A', 'a')
+if ($orderA.sha256 -cne $legacyOrderA -or $orderB.sha256 -cne $legacyOrderB -or
+    (($legacyOrderA -cne $legacyOrderB) -ne ($orderA.sha256 -cne $orderB.sha256))) {
+    throw 'Streaming row ordering does not match the legacy case-insensitive Sort-Object model.'
+}
+$passed.Add('row-order sensitivity matches legacy canonical model')
+
+Assert-Throws 'class registry raw-byte ceiling' 'REGISTRY_DIGEST_RAW_BYTE_CEILING' {
+    Invoke-G04DCTestClassRegistryCollector -Text '123456' -MaximumRawBytes 5 | Out-Null
+}
+Assert-Throws 'class registry row ceiling' 'REGISTRY_DIGEST_ROW_CEILING' {
+    Invoke-G04DCTestClassRegistryCollector -Text "a`nb`nc`n" -MaximumRows 2 | Out-Null
+}
+Assert-Throws 'class registry long-row ceiling' 'REGISTRY_DIGEST_ROW_LENGTH_CEILING' {
+    Invoke-G04DCTestClassRegistryCollector -Text '12345' -MaximumRowCharacters 4 | Out-Null
+}
+$maximumConfiguredRow = Invoke-G04DCTestClassRegistryCollector -Text ('x' * 4096) -MaximumRowCharacters 4096 -MaximumCanonicalRowBytes 4098
+if ($maximumConfiguredRow.rowCount -ne 1) { throw 'Exact configured maximum registry row was rejected.' }
+$passed.Add('maximum configured registry row accepted')
+$aggregateBoundary = Invoke-G04DCTestClassRegistryCollector -Text 'a' -MaximumCanonicalBytes 5
+if ($aggregateBoundary.canonicalByteCount -ne 5) { throw 'Exact canonical aggregate-byte boundary changed.' }
+$passed.Add('maximum aggregate-byte boundary')
+Assert-Throws 'class registry aggregate-byte ceiling' 'REGISTRY_DIGEST_CANONICAL_BYTE_CEILING' {
+    Invoke-G04DCTestClassRegistryCollector -Text 'a' -MaximumCanonicalBytes 4 | Out-Null
+}
+
+$unicodeSplit = -join @([char]0x0928, [char]0x092E, [char]0x0938, [char]0x094D, [char]0x0924, [char]0x0947)
+$unicodeSplitDigest = Invoke-G04DCTestClassRegistryCollector -Text ($unicodeSplit + "`r`n") -ReadBufferBytes 1
+if ($unicodeSplitDigest.sha256 -cne (Get-G04DCCanonicalHash -Rows @($unicodeSplit))) { throw 'UTF-8 multibyte decoding changed across one-byte buffers.' }
+$passed.Add('explicit UTF-8 native output encoding')
+$passed.Add('split multibyte character across stream buffers')
+$splitCrlf = Invoke-G04DCTestClassRegistryCollector -Text "alpha`r`nbeta`r`n" -ReadBufferBytes 1
+if ($splitCrlf.rowCount -ne 2 -or $splitCrlf.sha256 -cne (Get-G04DCCanonicalHash -Rows @('alpha', 'beta'))) { throw 'CRLF split across buffers changed row framing.' }
+$passed.Add('CRLF across stream buffers')
+$finalWithoutNewline = Invoke-G04DCTestClassRegistryCollector -Text 'final-row' -ReadBufferBytes 1
+if ($finalWithoutNewline.rowCount -ne 1 -or $finalWithoutNewline.sha256 -cne (Get-G04DCCanonicalHash -Rows @('final-row'))) { throw 'Final native row without a newline was lost.' }
+$passed.Add('final row without newline')
+Assert-Throws 'malformed native UTF-8 output' 'REGISTRY_DIGEST_DECODING_INVALID' {
+    $invalidStream = [IO.MemoryStream]::new([byte[]]@(0xC3))
+    try {
+        $invalidCollector = [DocumentStudio.G04DC.ClassRegistryDigestCollector]::new($invalidStream, $utf8Strict, 16, 16, 16, 16, 64, 1)
+        $invalidCollector.BeginRead().GetAwaiter().GetResult()
+    }
+    finally { $invalidStream.Dispose() }
+}
+$passed.Add('truncated multibyte native output rejected')
+
+Assert-Throws 'bounded registry stderr capture' 'REGISTRY_DIGEST_STDERR_CEILING' {
+    $stderrStream = [IO.MemoryStream]::new($utf8Strict.GetBytes('123456'))
+    try {
+        $stderrReader = [DocumentStudio.G04DC.BoundedTextCapture]::new($stderrStream, $utf8Strict, 5, 1)
+        $stderrReader.BeginRead().GetAwaiter().GetResult()
+    }
+    finally { $stderrStream.Dispose() }
+}
+
+$normalizationTimeoutText = ((0..49999 | ForEach-Object { 'normalization-timeout-row-' + $_ }) -join "`n")
+Assert-Throws 'class registry normalization timeout' 'REGISTRY_DIGEST_TIMEOUT' {
+    Invoke-G04DCTestClassRegistryCollector -Text $normalizationTimeoutText -NormalizeBudgetMilliseconds 0 | Out-Null
+}
+Assert-Throws 'class registry hashing timeout' 'REGISTRY_DIGEST_TIMEOUT' {
+    Invoke-G04DCTestClassRegistryCollector -Text $normalizationTimeoutText -HashBudgetMilliseconds 0 | Out-Null
+}
+
+function New-G04DCTestNativeArguments {
+    param([Parameter(Mandatory = $true)] [string]$Code)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Code))
+    return "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+}
+
+function Invoke-G04DCTestNativeDigest {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Code,
+        [AllowNull()] $CaptureContext,
+        [long]$MaximumStderrBytes = 1048576
+    )
+    $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = @{
+        NativePath = 'HKEY_CURRENT_USER\Software\DocumentStudio-G04DC-C7-Synthetic'
+        NativeExecutablePath = $powershellPath
+        NativeArguments = New-G04DCTestNativeArguments -Code $Code
+        AllowTestNativePath = $true
+        MaximumStderrBytes = $MaximumStderrBytes
+    }
+    if ($CaptureContext) { $arguments.CaptureContext = $CaptureContext; $arguments.CapturePhase = 'class-registry-digest' }
+    return & $g04dcModule { param($Arguments) Get-G04DCRegistryTreeDigest @Arguments } $arguments
+}
+
+$syntheticOutputCode = '$bytes=[Text.UTF8Encoding]::new($false).GetBytes("alpha  `r`n`r`nbeta`t`r`n");$stream=[Console]::OpenStandardOutput();$stream.Write($bytes,0,$bytes.Length);$stream.Flush()'
+$syntheticProcessDigest = Invoke-G04DCTestNativeDigest -Code $syntheticOutputCode
+if ($syntheticProcessDigest.sha256 -cne $legacyNormalization.sha256 -or $syntheticProcessDigest.rowCount -ne $legacyNormalization.rowCount) {
+    throw 'Direct owned native helper process changed the streaming digest.'
+}
+$passed.Add('direct native process streaming digest')
+Assert-Throws 'class registry native process nonzero exit' 'MACHINE_STATE_CAPTURE_FAILED' {
+    Invoke-G04DCTestNativeDigest -Code 'exit 7' | Out-Null
+}
+$stderrCode = '$bytes=[Text.UTF8Encoding]::new($false).GetBytes("123456789");$stream=[Console]::OpenStandardError();$stream.Write($bytes,0,$bytes.Length);$stream.Flush()'
+Assert-Throws 'class registry native stderr bound' 'MACHINE_STATE_CAPTURE_FAILED' {
+    Invoke-G04DCTestNativeDigest -Code $stderrCode -MaximumStderrBytes 8 | Out-Null
+}
+
+$c7TelemetryRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-c7-telemetry-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $c7TelemetryRoot | Out-Null
+$c7SuccessContext = $c7TimeoutContext = $null
+try {
+    $c7SuccessProgress = Join-Path $c7TelemetryRoot 'success-progress.ndjson'
+    $c7SuccessPerformance = Join-Path $c7TelemetryRoot 'success-performance.json'
+    $c7SuccessContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'c7-substages' -ProgressPath $c7SuccessProgress -PerformancePath $c7SuccessPerformance -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+    Start-G04DCMachineStatePhase -Context $c7SuccessContext -Phase 'class-registry-digest'
+    $phaseStartBeforeSubstages = [long]$c7SuccessContext.activePhaseStartMilliseconds
+    $c7SyntheticDigest = Invoke-G04DCTestNativeDigest -Code $syntheticOutputCode -CaptureContext $c7SuccessContext
+    if ([long]$c7SuccessContext.activePhaseStartMilliseconds -ne $phaseStartBeforeSubstages) { throw 'Registry digest substages reset the active phase timer.' }
+    Complete-G04DCMachineStatePhase -Context $c7SuccessContext -Phase 'class-registry-digest' -ItemCount $c7SyntheticDigest.rowCount
+    Complete-G04DCMachineStateCapture -Context $c7SuccessContext -Passed $true -FailureMessage $null
+    $c7ProgressRows = @(Get-Content -LiteralPath $c7SuccessProgress | ForEach-Object { $_ | ConvertFrom-Json })
+    $c7Performance = Get-Content -LiteralPath $c7SuccessPerformance -Raw | ConvertFrom-Json
+    $c7Substages = @($c7Performance.phases[0].substages)
+    $expectedSubstages = 'native-query-startup|native-query-read|row-normalization|canonical-hash|helper-cleanup'
+    if (($c7Substages.substage -join '|') -cne $expectedSubstages -or @($c7Substages | Where-Object { $_.status -cne 'success' }).Count -ne 0) {
+        throw 'Class registry digest substage ordering or status is invalid.'
+    }
+    $passed.Add('class registry substage ordering')
+    if (@($c7Substages | Where-Object { [long]$_.elapsedMilliseconds -lt 0 -or [long]$_.rowCount -lt 0 }).Count -ne 0 -or
+        @($c7ProgressRows | Where-Object { $_.event -ceq 'substage-end' }).Count -ne 5) {
+        throw 'Class registry digest substage timing/count evidence is incomplete.'
+    }
+    $passed.Add('class registry substage elapsed and count evidence')
+    $passed.Add('class registry substages retain one phase timer')
+    $c7ProgressJson = $c7ProgressRows | ConvertTo-Json -Compress -Depth 8
+    if ($c7ProgressJson.Contains('alpha  ') -or $c7ProgressJson.Contains('beta') -or $c7ProgressJson -match 'HKEY_CURRENT_USER') {
+        throw 'Class registry digest progress exposed raw registry content or paths.'
+    }
+    $passed.Add('no raw registry output in telemetry')
+
+    $timeoutPidPath = Join-Path $c7TelemetryRoot 'timeout-pid.txt'
+    $escapedPidPath = $timeoutPidPath.Replace("'", "''")
+    $timeoutCode = "[IO.File]::WriteAllText('$escapedPidPath',[Diagnostics.Process]::GetCurrentProcess().Id.ToString());Start-Sleep -Seconds 30"
+    $timeoutProgress = Join-Path $c7TelemetryRoot 'timeout-progress.ndjson'
+    $timeoutPerformance = Join-Path $c7TelemetryRoot 'timeout-performance.json'
+    $c7TimeoutContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'c7-timeout' -ProgressPath $timeoutProgress -PerformancePath $timeoutPerformance -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 4000 -PhaseBudgetMilliseconds 2000
+    Start-G04DCMachineStatePhase -Context $c7TimeoutContext -Phase 'class-registry-digest'
+    Assert-Throws 'class registry native-query timeout' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        Invoke-G04DCTestNativeDigest -Code $timeoutCode -CaptureContext $c7TimeoutContext | Out-Null
+    }
+    Complete-G04DCMachineStateCapture -Context $c7TimeoutContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=class-registry-digest'
+    if (!(Test-Path -LiteralPath $timeoutPidPath -PathType Leaf)) { throw 'Timed registry helper did not publish its test-owned PID evidence.' }
+    $timedProcessId = [int](Get-Content -LiteralPath $timeoutPidPath -Raw)
+    if (Get-Process -Id $timedProcessId -ErrorAction SilentlyContinue) { throw 'Timed registry helper remained alive after owned Job Object termination.' }
+    $passed.Add('class registry helper termination')
+    $passed.Add('class registry helper Job Object cleanup')
+    $timeoutRows = @(Get-Content -LiteralPath $timeoutProgress | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($timeoutRows[-1].status -cne 'budget-exceeded' -or @($timeoutRows | Where-Object {
+        $_.PSObject.Properties['substage'] -and [string]$_.substage -ceq 'helper-cleanup' -and [string]$_.status -ceq 'success'
+    }).Count -ne 1) {
+        throw 'Registry timeout did not durably record failure and owned helper cleanup.'
+    }
+    $passed.Add('class registry timeout evidence is durable')
+}
+finally {
+    foreach ($c7Context in @($c7SuccessContext, $c7TimeoutContext)) {
+        if ($c7Context -and $c7Context.writer) { $c7Context.writer.Dispose(); $c7Context.writer = $null }
+    }
+    if (Test-Path -LiteralPath $c7TelemetryRoot) { Remove-Item -LiteralPath $c7TelemetryRoot -Recurse -Force }
+}
+
+function Get-G04DCTestLegacyRegistryDigest {
+    param([Parameter(Mandatory = $true)] [string]$NativePath)
+    $reg = Join-Path $env:SystemRoot 'System32\reg.exe'
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $reg
+    $startInfo.Arguments = "query `"$NativePath`" /s"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = $utf8Strict
+    $startInfo.StandardErrorEncoding = $utf8Strict
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (!$process.Start()) { throw 'Legacy registry fixture query did not start.' }
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw "Legacy registry fixture query exited $($process.ExitCode)." }
+        $combined = $stdout + $(if ([string]::IsNullOrEmpty($stderr)) { '' } else { "`r`n$stderr" })
+        return Get-G04DCTestLegacyNativeDigest -Text $combined
+    }
+    finally { $process.Dispose() }
+}
+
+function Get-G04DCTestOptimizedRegistryDigest {
+    param([Parameter(Mandatory = $true)] [string]$NativePath)
+    return & $g04dcModule { param([string]$Path) Get-G04DCRegistryTreeDigest -NativePath $Path -AllowTestNativePath } $NativePath
+}
+
+function Assert-G04DCTestRegistryDigestEquivalence {
+    param([Parameter(Mandatory = $true)] [string]$NativePath)
+    $legacy = Get-G04DCTestLegacyRegistryDigest -NativePath $NativePath
+    $optimized = Get-G04DCTestOptimizedRegistryDigest -NativePath $NativePath
+    if ($legacy.rowCount -ne $optimized.rowCount -or $legacy.sha256 -cne $optimized.sha256) {
+        throw 'Optimized registry query differs from the legacy query on the GUID-owned fixture.'
+    }
+    return [string]$optimized.sha256
+}
+
+$c7RegistryTestId = [guid]::NewGuid().ToString('N')
+$c7RegistryNativeRoot = "Software\DocumentStudio-G04DC-C7-Registry-$c7RegistryTestId"
+$c7RegistryPath = "HKEY_CURRENT_USER\$c7RegistryNativeRoot"
+$c7RegistryBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Registry64)
+$c7RegistryRoot = $c7RegistryBase.CreateSubKey($c7RegistryNativeRoot)
+if (!$c7RegistryRoot) { throw 'Could not create the C7 GUID-owned registry fixture.' }
+$c7RegistryRoot.Dispose()
+try {
+    $baselineDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    $key = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Created")
+    $key.Dispose()
+    $createdDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    if ($createdDigest -ceq $baselineDigest) { throw 'Registry key creation did not change the full digest.' }
+    $passed.Add('registry key creation mutation equivalence')
+    $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\Created", $false)
+    $deletedDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    if ($deletedDigest -ceq $createdDigest) { throw 'Registry key deletion did not change the full digest.' }
+    $passed.Add('registry key deletion mutation equivalence')
+
+    $nested = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Outer\Inner")
+    $nested.Dispose()
+    $nestedDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    if ($nestedDigest -ceq $deletedDigest) { throw 'Nested registry key creation did not change the full digest.' }
+    $passed.Add('nested registry key mutation equivalence')
+    $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\Outer\Inner", $false)
+    $renamed = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Outer\Renamed")
+    $renamed.Dispose()
+    $renamedDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    if ($renamedDigest -ceq $nestedDigest) { throw 'Registry key rename shape did not change the full digest.' }
+    $passed.Add('registry key rename mutation equivalence')
+
+    $values = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\Values")
+    try {
+        $defaultAbsent = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        $values.SetValue('', '', [Microsoft.Win32.RegistryValueKind]::String)
+        $defaultEmpty = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($defaultAbsent -ceq $defaultEmpty) { throw 'Absent and present-empty defaults share one registry digest.' }
+        $passed.Add('registry default absent-empty distinction')
+        $values.SetValue('', 'normal', [Microsoft.Win32.RegistryValueKind]::String)
+        $normalString = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($normalString -ceq $defaultEmpty) { throw 'Normal default string change was not detected.' }
+        $passed.Add('registry normal string mutation equivalence')
+        $values.SetValue('Expand', '%TEMP%\DocumentStudio', [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        $expandDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($expandDigest -ceq $normalString) { throw 'Stored REG_EXPAND_SZ change was not detected.' }
+        $passed.Add('registry expand-string stored-value equivalence')
+        $values.SetValue('Multi', [string[]]@('alpha', '', 'beta'), [Microsoft.Win32.RegistryValueKind]::MultiString)
+        $multiDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($multiDigest -ceq $expandDigest) { throw 'REG_MULTI_SZ change was not detected.' }
+        $passed.Add('registry multi-string mutation equivalence')
+        $values.SetValue('Binary', [byte[]]@(0, 1, 127, 128, 255), [Microsoft.Win32.RegistryValueKind]::Binary)
+        $binaryDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($binaryDigest -ceq $multiDigest) { throw 'REG_BINARY change was not detected.' }
+        $passed.Add('registry binary mutation equivalence')
+        $values.SetValue('Dword', 42, [Microsoft.Win32.RegistryValueKind]::DWord)
+        $dwordDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($dwordDigest -ceq $binaryDigest) { throw 'DWORD change was not detected.' }
+        $passed.Add('registry DWORD mutation equivalence')
+        $values.SetValue('Qword', [long]4294967297, [Microsoft.Win32.RegistryValueKind]::QWord)
+        $qwordDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($qwordDigest -ceq $dwordDigest) { throw 'QWORD change was not detected.' }
+        $passed.Add('registry QWORD mutation equivalence')
+        $values.SetValue('Changing', 'text', [Microsoft.Win32.RegistryValueKind]::String)
+        $kindBefore = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        $values.SetValue('Changing', [byte[]]@(1, 2, 3), [Microsoft.Win32.RegistryValueKind]::Binary)
+        $kindAfter = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($kindBefore -ceq $kindAfter) { throw 'Registry value kind change was not detected.' }
+        $passed.Add('registry value-kind mutation equivalence')
+        $values.SetValue('Changing', [byte[]]@(1, 2, 4), [Microsoft.Win32.RegistryValueKind]::Binary)
+        $dataAfter = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($kindAfter -ceq $dataAfter) { throw 'Registry value data change was not detected.' }
+        $passed.Add('registry value-data mutation equivalence')
+        $values.DeleteValue('Changing', $false)
+        $valueDeleted = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($dataAfter -ceq $valueDeleted) { throw 'Registry value deletion was not detected.' }
+        $passed.Add('registry value deletion mutation equivalence')
+        $unicodeName = -join @([char]0x0928, [char]0x092E)
+        $unicodeValue = -join @([char]0x0924, [char]0x0947, [char]0x0932, [char]0x0941, [char]0x0917, [char]0x0941)
+        $values.SetValue($unicodeName, $unicodeValue, [Microsoft.Win32.RegistryValueKind]::String)
+        $unicodeDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($unicodeDigest -ceq $valueDeleted) { throw 'Unicode registry value change was not detected.' }
+        $passed.Add('registry Unicode mutation equivalence')
+        $values.SetValue('Long', ('x' * 65536), [Microsoft.Win32.RegistryValueKind]::String)
+        $longDigest = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+        if ($longDigest -ceq $unicodeDigest) { throw 'Long bounded registry value change was not detected.' }
+        $passed.Add('registry long bounded value equivalence')
+    }
+    finally { $values.Dispose() }
+
+    $repeatA = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    $repeatB = Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath
+    if ($repeatA -cne $repeatB) { throw 'Repeated class registry digest is nondeterministic.' }
+    $passed.Add('class registry repeated deterministic digest')
+    $rawBeforeC7Read = Get-TestRegistryRawSnapshot -NativeSubKey $c7RegistryNativeRoot
+    Assert-G04DCTestRegistryDigestEquivalence -NativePath $c7RegistryPath | Out-Null
+    $rawAfterC7Read = Get-TestRegistryRawSnapshot -NativeSubKey $c7RegistryNativeRoot
+    if ($rawBeforeC7Read -cne $rawAfterC7Read) { throw 'Optimized class registry collector mutated the GUID-owned fixture.' }
+    $passed.Add('optimized class registry collector performs no mutation')
+    $passed.Add('class registry disappearing key-value transition detected')
+}
+finally {
+    $c7RegistryBase.DeleteSubKeyTree($c7RegistryNativeRoot, $false)
+    $c7RegistryBase.Dispose()
+}
+
+$classRegistryHelperSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ClassRegistryDigest.cs') -Raw
+if ($commonSource -match '(?i)UseShellExecute\s*=\s*\$true|cmd\.exe' -or $classRegistryHelperSource -match '(?i)Microsoft\.Win32|CreateSubKey|SetValue|DeleteValue|DeleteSubKey') {
+    throw 'C7 streaming registry collector introduced a shell or registry mutation API.'
+}
+$passed.Add('class registry collector uses no shell')
+if ($commonSource -match '(?i)Win32_Product' -or $classRegistryHelperSource -match '(?i)Win32_Product') { throw 'C7 registry digest introduced Win32_Product.' }
+$passed.Add('class registry collector uses no Win32_Product')
+if ($classRegistryHelperSource -match '(?i)WriteAllText|WriteAllBytes|FileMode\.Create|FileMode\.CreateNew') { throw 'C7 class registry helper writes raw output to disk.' }
+$passed.Add('class registry helper creates no raw temporary artifact')
+if (!$commonSource.Contains('PhaseBudgetMilliseconds = 240000') -or !$commonSource.Contains('MaximumRawBytes = 134217728')) { throw 'C7 changed the hard phase ceiling or omitted the raw-byte ceiling.' }
+$passed.Add('hard class registry phase ceiling remains 240000 ms')
+
 $workflowSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\.github\workflows\g04d-c-libreoffice-runtime-proof.yml') -Raw
 $precheckSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMachineStatePrecheck.ps1') -Raw
 $adminSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCAdminImageProof.ps1') -Raw
@@ -1114,6 +1528,8 @@ if (!$commonSource.Contains('KillOnCloseJob') -or !$commonSource.Contains('Termi
     throw 'Native registry helper is not assigned to verified kill-on-close ownership.'
 }
 $passed.Add('registry digest helper cleanup is terminally verified')
+if (!$precheckSource.Contains('classRegistryDigestTargetMilliseconds = 180000L') -or !$precheckSource.Contains('CLASS_REGISTRY_DIGEST_TARGET_EXCEEDED')) { throw 'C7 PRECHECK does not enforce the 180-second class registry target.' }
+$passed.Add('C7 class registry target is 180000 ms')
 if (!$workflowSource.Contains('proofMode:') -or !$workflowSource.Contains('- precheck') -or $workflowSource -match '(?m)^\s+(push|pull_request|schedule|workflow_run|repository_dispatch):') { throw 'PRECHECK workflow trigger/input boundary is invalid.' }
 $passed.Add('PRECHECK workflow dispatch only')
 if ($precheckSource -match '(?i)msiexec|/a|administrative-extraction') { throw 'PRECHECK contains an administrative extraction path.' }
@@ -1278,5 +1694,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 206) { throw "Expected 206 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 263) { throw "Expected 263 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

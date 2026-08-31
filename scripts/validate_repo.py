@@ -95,6 +95,7 @@ required = [
     'docs/implementation-log/G04D-C-libreoffice-runtime-admission.md',
     '.github/workflows/g04d-c-libreoffice-runtime-proof.yml',
     'scripts/g04d-c/G04DC.Common.psm1',
+    'scripts/g04d-c/ClassRegistryDigest.cs',
     'scripts/g04d-c/G04DC.Sandbox.cs',
     'scripts/g04d-c/G04DC.MsiCondition.cs',
     'scripts/g04d-c/Invoke-G04DCAdminImageProof.ps1',
@@ -950,6 +951,7 @@ if any(path.name.startswith('0009_') for path in (ROOT / 'apps/desktop/src-tauri
 
 g04dc_workflow = (ROOT / '.github/workflows/g04d-c-libreoffice-runtime-proof.yml').read_text(encoding='utf-8')
 g04dc_common = (ROOT / 'scripts/g04d-c/G04DC.Common.psm1').read_text(encoding='utf-8')
+g04dc_registry_digest = (ROOT / 'scripts/g04d-c/ClassRegistryDigest.cs').read_text(encoding='utf-8')
 g04dc_sandbox = (ROOT / 'scripts/g04d-c/G04DC.Sandbox.cs').read_text(encoding='utf-8')
 g04dc_sandbox_wrapper = (ROOT / 'scripts/g04d-c/Invoke-G04DCSandboxSmoke.ps1').read_text(encoding='utf-8')
 g04dc_admin = (ROOT / 'scripts/g04d-c/Invoke-G04DCAdminImageProof.ps1').read_text(encoding='utf-8')
@@ -1035,6 +1037,8 @@ for regression in [
         raise SystemExit(f'G04D-C source compatibility regression is missing: {regression}')
 for boundary in [
     'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
+    'Write-G04DCMachineStateSubstageRecord', 'Start-G04DCMachineStateSubstage',
+    'Complete-G04DCMachineStateSubstage',
     'Assert-G04DCMachineStateCaptureBudget', 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED',
     'captureTargetMilliseconds', 'hardCeilingMilliseconds', 'phaseCeilingMilliseconds',
     'Get-G04DCMsiComponentRegistrationState', 'RegistryView]::Registry64',
@@ -1045,6 +1049,37 @@ for boundary in [
 ]:
     if boundary not in g04dc_common:
         raise SystemExit(f'G04D-C bounded machine-state boundary is missing: {boundary}')
+for boundary in [
+    'ClassRegistryDigestCollector', 'BoundedTextCapture', 'BeginRead', 'AppendStderrText',
+    'StringComparer.CurrentCultureIgnoreCase', 'SHA256.Create()', 'REGISTRY_DIGEST_TIMEOUT',
+    'REGISTRY_DIGEST_RAW_BYTE_CEILING', 'REGISTRY_DIGEST_ROW_CEILING',
+    'REGISTRY_DIGEST_CANONICAL_BYTE_CEILING', 'REGISTRY_DIGEST_STDERR_CEILING',
+]:
+    if boundary not in g04dc_registry_digest:
+        raise SystemExit(f'G04D-C class-registry streaming boundary is missing: {boundary}')
+if re.search(r'(?i)Microsoft\.Win32|CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create', g04dc_registry_digest):
+    raise SystemExit('G04D-C class-registry streaming helper may not mutate registry or create raw-output artifacts')
+for boundary in [
+    'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
+    'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
+]:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C class-registry process boundary is missing: {boundary}')
+for boundary in ['classRegistryDigestTargetMilliseconds = 180000L', 'CLASS_REGISTRY_DIGEST_TARGET_EXCEEDED']:
+    if boundary not in g04dc_precheck:
+        raise SystemExit(f'G04D-C PRECHECK class-registry target is missing: {boundary}')
+for regression in [
+    'current native-row normalization equivalence', 'incremental hash equality',
+    '64236-row registry digest scale', 'explicit UTF-8 native output encoding',
+    'split multibyte character across stream buffers', 'truncated multibyte native output rejected',
+    'class registry substage ordering', 'class registry helper termination',
+    'registry key creation mutation equivalence', 'registry default absent-empty distinction',
+    'registry value-kind mutation equivalence', 'registry Unicode mutation equivalence',
+    'optimized class registry collector performs no mutation', 'C7 class registry target is 180000 ms',
+    'Expected 263 fail-closed cases',
+]:
+    if regression not in g04dc_tests:
+        raise SystemExit(f'G04D-C class-registry regression is missing: {regression}')
 for identity in [
     '372948992', 'f15ba07bfcb0186986cf3171063506f5d207c11f8cc051ba0d135209e9e915f9',
     '{3B467719-C25B-478C-8F4C-8E2EDA0E2093}', '{4B17E523-5D91-4E69-BD96-7FD81CFA81BB}',
