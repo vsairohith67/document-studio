@@ -8,10 +8,27 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'G04DC.Common.psm1') -Force
 
 $repo = (Resolve-Path -LiteralPath $RepositoryRoot).Path
-if (Test-Path -LiteralPath $EvidenceDirectory) { throw "Refusing to overwrite evidence directory: $EvidenceDirectory" }
-New-Item -ItemType Directory -Path $EvidenceDirectory | Out-Null
+if (!(Test-Path -LiteralPath $EvidenceDirectory -PathType Container)) { throw '[PRECHECK_BOOTSTRAP_INVALID] PRECHECK evidence directory was not initialized.' }
 $evidence = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
-[IO.File]::WriteAllText((Join-Path $evidence 'MARKER.md'), "# G04D-C machine-state precheck evidence`r`n", [Text.UTF8Encoding]::new($false))
+$markerPath = Join-Path $evidence 'MARKER.md'
+$expectedMarker = "# G04D-C machine-state precheck evidence`r`n"
+if (!(Test-Path -LiteralPath $markerPath -PathType Leaf) -or [IO.File]::ReadAllText($markerPath) -cne $expectedMarker) {
+    throw '[PRECHECK_BOOTSTRAP_INVALID] PRECHECK evidence marker is missing or invalid.'
+}
+$bootstrapPath = Join-Path $evidence 'bootstrap-source-validation.json'
+if (!(Test-Path -LiteralPath $bootstrapPath -PathType Leaf)) { throw '[PRECHECK_BOOTSTRAP_INVALID] Source bootstrap evidence is missing.' }
+$bootstrap = Get-Content -LiteralPath $bootstrapPath -Raw | ConvertFrom-Json
+$checkoutSha = [string](& git -C $repo rev-parse HEAD)
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($checkoutSha)) { throw '[PRECHECK_BOOTSTRAP_INVALID] Checked-out SHA is unavailable.' }
+$checkoutSha = $checkoutSha.Trim()
+if ([int]$bootstrap.schemaVersion -ne 1 -or [string]$bootstrap.checkedOutSha -cne $checkoutSha -or
+    [string]$bootstrap.asciiGateStatus -cne 'PASS' -or [string]$bootstrap.parserGateStatus -cne 'PASS' -or
+    [int]$bootstrap.sourceFileCount -le 0 -or [bool]$bootstrap.precheckScriptStarted) {
+    throw '[PRECHECK_BOOTSTRAP_INVALID] Source compatibility bootstrap did not pass for the checked-out SHA.'
+}
+$bootstrap.precheckScriptStarted = $true
+$bootstrap | Add-Member -NotePropertyName precheckScriptStartedAtUtc -NotePropertyValue ([DateTime]::UtcNow.ToString('o'))
+Write-G04DCJson -Path $bootstrapPath -Value $bootstrap
 $ownedRoot = Join-Path $env:RUNNER_TEMP ('document-studio-g04d-c-precheck-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $ownedRoot | Out-Null
 $ownedMarkerContent = "DOCUMENT-STUDIO-G04D-C-PRECHECK-OWNED`n"
@@ -92,13 +109,13 @@ catch {
     Write-G04DCJson -Path (Join-Path $evidence 'machine-state-precheck-result.json') -Value ([ordered]@{
         schemaVersion = 1
         status = 'MACHINE_STATE_PRECHECK_BLOCKED'
-        displayStatus = "MACHINE_STATE_PRECHECK_BLOCKED — $phase"
+        displayStatus = "MACHINE_STATE_PRECHECK_BLOCKED - $phase"
         phase = $phase
         reasonCode = $reasonCode
         candidateClassificationProduced = $false
         machinePreProduced = Test-Path -LiteralPath (Join-Path $evidence 'machine-pre.json')
     })
     New-G04DCArtifactManifest -EvidenceDirectory $evidence | Out-Null
-    Write-Output "MACHINE_STATE_PRECHECK_BLOCKED — $phase"
+    Write-Output "MACHINE_STATE_PRECHECK_BLOCKED - $phase"
     throw "[MACHINE_STATE_PRECHECK_BLOCKED] phase=$phase reasonCode=$reasonCode"
 }

@@ -4,6 +4,11 @@ import json
 import re
 import yaml
 
+from g04d_c_powershell_source_policy import (
+    format_violations,
+    validate_g04dc_powershell_source_bytes,
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 required = [
     'README.md',
@@ -101,8 +106,10 @@ required = [
     'scripts/g04d-c/New-G04DCRuntimeManifest.ps1',
     'scripts/g04d-c/New-G04DCSyntheticOdt.ps1',
     'scripts/g04d-c/Test-G04DCBoundaries.ps1',
+    'scripts/g04d-c/Test-G04DCPowerShell51Source.ps1',
     'scripts/g04d-c/verify-g04d-c-boundaries.ps1',
     'scripts/g04d-c/verify-pdfjs.mjs',
+    'scripts/g04d_c_powershell_source_policy.py',
     'scripts/g04c2_corpus.py',
     'apps/desktop/scripts/verify-g04c2-corpus.ps1',
     'apps/desktop/scripts/verify-g04c2b-boundaries.ps1',
@@ -132,6 +139,16 @@ required = [
 missing = [p for p in required if not (ROOT / p).exists()]
 if missing:
     raise SystemExit('Missing required files: ' + ', '.join(missing))
+
+g04dc_source_report = validate_g04dc_powershell_source_bytes(
+    ROOT,
+    ROOT / 'scripts/g04d-c',
+)
+if g04dc_source_report['violations']:
+    raise SystemExit(
+        'G04D-C executable source byte violation: '
+        + format_violations(g04dc_source_report)
+    )
 
 for p in [
     'MANIFEST.json',
@@ -941,6 +958,9 @@ g04dc_minimal = (ROOT / 'scripts/g04d-c/Invoke-G04DCMinimalMsiProof.ps1').read_t
 g04dc_manifest = (ROOT / 'scripts/g04d-c/New-G04DCRuntimeManifest.ps1').read_text(encoding='utf-8')
 g04dc_decision = (ROOT / 'scripts/g04d-c/New-G04DCCandidateDecision.ps1').read_text(encoding='utf-8')
 g04dc_tests = (ROOT / 'scripts/g04d-c/Test-G04DCBoundaries.ps1').read_text(encoding='utf-8')
+g04dc_source_gate = (ROOT / 'scripts/g04d-c/Test-G04DCPowerShell51Source.ps1').read_text(encoding='ascii')
+g04dc_boundary_verifier = (ROOT / 'scripts/g04d-c/verify-g04d-c-boundaries.ps1').read_text(encoding='ascii')
+g04dc_source_policy = (ROOT / 'scripts/g04d_c_powershell_source_policy.py').read_text(encoding='utf-8')
 if 'workflow_dispatch:' not in g04dc_workflow or re.search(r'^\s+(push|pull_request|schedule|workflow_run|repository_dispatch):', g04dc_workflow, re.MULTILINE):
     raise SystemExit('G04D-C proof workflow must remain workflow_dispatch only')
 for job in ['machine-state-precheck:', 'admin-image:', 'minimal-msi:', 'decision:']:
@@ -954,6 +974,8 @@ if len(re.findall(r'persist-credentials:\s*false', g04dc_workflow)) != 4:
 for boundary in [
     'proofMode:', '- precheck', '- full', "inputs.proofMode == 'precheck'", "inputs.proofMode == 'full'",
     'timeout-minutes: 20', 'g04d-c-machine-state-precheck-evidence',
+    'Initialize fail-safe PRECHECK bootstrap evidence', 'bootstrap-source-validation.json',
+    'Test-G04DCPowerShell51Source.ps1',
 ]:
     if boundary not in g04dc_workflow:
         raise SystemExit(f'G04D-C PRECHECK workflow boundary is missing: {boundary}')
@@ -969,6 +991,48 @@ for boundary in [
 ]:
     if boundary not in g04dc_precheck:
         raise SystemExit(f'G04D-C PRECHECK proof boundary is missing: {boundary}')
+for boundary in [
+    'bootstrap-source-validation.json', 'precheckScriptStarted',
+    'PRECHECK_BOOTSTRAP_INVALID', 'checkedOutSha', 'asciiGateStatus', 'parserGateStatus',
+]:
+    if boundary not in g04dc_precheck + g04dc_workflow:
+        raise SystemExit(f'G04D-C PRECHECK bootstrap boundary is missing: {boundary}')
+for boundary in [
+    '[System.Management.Automation.Language.Parser]::ParseFile',
+    "PSEdition -cne 'Desktop'", 'sourceFileCount', 'asciiGateStatus', 'parserGateStatus',
+    'incompleteTokenCount', 'malformedStringTokenCount', 'unknownTokenCount',
+    'Windows PowerShell version:', 'ASCII-byte gate result: PASS',
+    'Windows PowerShell 5.1 parser gate result: PASS',
+]:
+    if boundary not in g04dc_source_gate:
+        raise SystemExit(f'G04D-C Windows PowerShell 5.1 source gate is missing: {boundary}')
+for boundary in [
+    'path.read_bytes()', 'KNOWN_BOMS', 'ALLOWED_CONTROL_BYTES',
+    '0x20 <= value <= 0x7E', 'relative_to(repository_root)',
+    'sourceFileCount', 'asciiGateStatus', 'violations',
+]:
+    if boundary not in g04dc_source_policy:
+        raise SystemExit(f'G04D-C raw-byte source policy is missing: {boundary}')
+if 'Test-G04DCPowerShell51Source.ps1' not in ci_text or 'Test-G04DCPowerShell51Source.ps1' not in g04dc_boundary_verifier:
+    raise SystemExit('G04D-C source compatibility gate is not wired into normal Windows CI and the focused verifier')
+for prohibited_source_dependency in ['chcp 65001', '$OutputEncoding', 'Invoke-Expression']:
+    if prohibited_source_dependency in g04dc_source_gate:
+        raise SystemExit(f'G04D-C source gate relies on a prohibited decoding path: {prohibited_source_dependency}')
+for regression in [
+    'ASCII-only .ps1 source passes', 'ASCII-only .psm1 source passes',
+    'UTF-8-no-BOM em dash source rejected', 'UTF-8-no-BOM smart quote source rejected',
+    'UTF-8 BOM source rejected', 'UTF-16 LE BOM source rejected',
+    'UTF-16 BE BOM source rejected', 'UTF-32 LE BOM source rejected',
+    'UTF-32 BE BOM source rejected', 'non-ASCII source comment rejected',
+    'non-ASCII source string rejected', 'invalid ASCII PowerShell source rejected by parser',
+    'valid ASCII PowerShell script accepted by Windows PowerShell 5.1',
+    'documentation Unicode remains allowed', 'non-executable explicit encoding fixtures remain allowed',
+    'repository validation reports exact source path and byte offset',
+    'current PRECHECK source passes ASCII and parser gates',
+    'every workflow-invoked G04D-C source passes both gates',
+]:
+    if regression not in g04dc_tests:
+        raise SystemExit(f'G04D-C source compatibility regression is missing: {regression}')
 for boundary in [
     'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
     'Assert-G04DCMachineStateCaptureBudget', 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED',
@@ -1100,5 +1164,6 @@ for p in ROOT.rglob('*.md'):
 
 print(
     'Repository validation passed. '
-    f'{len(rows)} feature entries found; G01-G04F1, G04D-C and G04E1 TXT-to-PDF boundaries verified.'
+    f'{len(rows)} feature entries and {g04dc_source_report["sourceFileCount"]} ASCII-only '
+    'G04D-C PowerShell sources found; G01-G04F1, G04D-C and G04E1 TXT-to-PDF boundaries verified.'
 )

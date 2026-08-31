@@ -84,6 +84,22 @@ The manual workflow remains `workflow_dispatch` only and now accepts `proofMode=
 
 The focused Windows PowerShell 5.1 suite now defines 186 cases. The C5 additions cover progress creation/flushing/order/sequence/monotonic time/privacy/failure, successful durable serialization, phase/overall/final-success/serialization/hash budgets, durable failure artifacts, bounded canonical-hash equivalence and terminal expiry, streaming-hash disposal, sealed out-of-process helper output and terminal timeout cleanup, exact component semantic equivalence including whitespace-malformed input, system/user/both scopes, access/read failures, disappearing values, disposal, Registry64/provider equivalence, the 6,092-component algorithmic scale, PRECHECK isolation, frozen full path/performance gates/timeouts and the proof-only diff boundary.
 
+## G04D-C6 Windows PowerShell 5.1 source compatibility
+
+Exact-main PRECHECK run `33382689804` failed before `Invoke-G04DCMachineStatePrecheck.ps1` began execution. The script was UTF-8 without a BOM and contained an em dash in two executable source strings. Windows PowerShell 5.1 decoded those bytes through the runner's legacy ANSI code page, produced malformed source and stopped in its parser. The run created no PRECHECK evidence directory, acquired no MSI, produced no `machine-pre.json`, and neither constructed nor invoked `msiexec /a`. This is source/bootstrap infrastructure evidence, not a LibreOffice or C5 machine-state result.
+
+G04D-C6 starts from accepted main `02d29ee7f6fcab5f721d683c91c31a87c588d856` on `feat/g04d-c6-powershell51-encoding` in the dedicated `g04d-c6-powershell51-encoding` worktree.
+
+G04D-C6 freezes one byte-level policy: every `.ps1` and `.psm1` beneath `scripts/g04d-c/` must contain only tab, CR, LF, and bytes `0x20` through `0x7E`. UTF-8, UTF-16 and UTF-32 BOMs are rejected. Documentation and explicitly non-executable fixtures remain outside that source boundary. Unicode data needed by executable tests is constructed from ASCII code-point literals at runtime rather than embedded in script bytes.
+
+`scripts/g04d_c_powershell_source_policy.py` performs deterministic raw-byte discovery and reports only a repository-relative path plus byte offset for each violation. Normal repository validation imports the same helper. `Test-G04DCPowerShell51Source.ps1` requires the actual Windows PowerShell 5.1 Desktop engine, consumes the raw-byte report, then calls the parser API without executing any inspected script. The focused verifier, normal Windows CI, and proof workflow run this gate and log the engine version, source count, ASCII status and parser status.
+
+PRECHECK now begins with a YAML-owned fail-safe bootstrap only: it creates the exact evidence directory and ASCII marker before any repository script runs. The source gate seals the checked-out SHA, Windows PowerShell version, source count and gate outcomes in `bootstrap-source-validation.json`. Only a passing bootstrap may enter PRECHECK; the script then marks `precheckScriptStarted=true` before acquisition. A parser/bootstrap failure therefore uploads truthful marker/bootstrap evidence through the existing always-run path without fabricating machine-state, MSI acquisition, extraction or classification evidence.
+
+The focused suite now defines 206 cases. Its C6 additions cover ASCII `.ps1`/`.psm1` acceptance; UTF-8-no-BOM em dash and smart-quote rejection; UTF-8, UTF-16 LE/BE and UTF-32 LE/BE BOM rejection; non-ASCII comment/string rejection; invalid-ASCII parser rejection; actual Windows PowerShell 5.1 acceptance; Unicode documentation and explicit non-executable fixture isolation; exact relative path/byte-offset reporting; deterministic discovery; current PRECHECK compatibility; workflow-invoked source coverage; and zero incomplete, malformed or unknown parser tokens.
+
+Local C6 validation on 2026-08-31 used Windows PowerShell 5.1.26100.9168 and passed the explicit source gate over 12 files, all 206 focused cases, the focused verifier, locked repository validation, link checking, `git diff --check`, npm typecheck, 185 Vitest tests, the production frontend build, Cargo formatting/check/clippy/tests and the Tauri no-bundle release build. The Tauri build retained the existing non-blocking `.app` identifier advisory. No local LibreOffice process, profile, MSI operation or proof workflow was invoked.
+
 ## Explicit non-actions
 
 - No ordinary full MSI install occurs on the laptop.
