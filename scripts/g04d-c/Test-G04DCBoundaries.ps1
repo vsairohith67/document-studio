@@ -764,5 +764,378 @@ try {
 }
 finally { Remove-Item -LiteralPath $artifactRoot -Recurse -Force }
 
-if ($passed.Count -ne 134) { throw "Expected 134 fail-closed cases; passed $($passed.Count)." }
+$telemetryRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-telemetry-test-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $telemetryRoot | Out-Null
+$context = $failureContext = $phaseBudgetContext = $overallBudgetContext = $serializationSuccessContext = $serializationContext = $helperSuccessContext = $helperContext = $successGateContext = $hashContext = $null
+try {
+    $progressPath = Join-Path $telemetryRoot 'progress.ndjson'
+    $performancePath = Join-Path $telemetryRoot 'performance.json'
+    $context = New-G04DCMachineStateCaptureContext -CaptureLabel 'synthetic-pre' -ProgressPath $progressPath -PerformancePath $performancePath
+    if (!(Test-Path -LiteralPath $progressPath -PathType Leaf) -or (Get-Item -LiteralPath $progressPath).Length -ne 0) {
+        throw 'Progress evidence was not created before the first phase.'
+    }
+    $passed.Add('machine-state progress created before first phase')
+    Start-G04DCMachineStatePhase -Context $context -Phase 'synthetic-phase'
+    if (@(Get-Content -LiteralPath $progressPath).Count -ne 1) { throw 'Phase-start progress was not durably readable before capture completion.' }
+    $passed.Add('machine-state progress flush survives in-flight capture')
+    Assert-G04DCMachineStateCaptureBudget -Context $context -Phase 'synthetic-phase' -ItemCount 7 -WriteProgress
+    Complete-G04DCMachineStatePhase -Context $context -Phase 'synthetic-phase' -ItemCount 9
+    Complete-G04DCMachineStateCapture -Context $context -Passed $true -FailureMessage $null
+    $records = @(Get-Content -LiteralPath $progressPath | ForEach-Object { $_ | ConvertFrom-Json })
+    if (($records.event -join '|') -cne 'phase-start|phase-progress|phase-end|capture-end') { throw 'Phase progress ordering is invalid.' }
+    $passed.Add('machine-state phase start and end ordering')
+    if (($records.sequence -join '|') -cne '1|2|3|4') { throw 'Progress sequence is not strictly increasing.' }
+    $passed.Add('machine-state progress sequence monotonic')
+    for ($recordIndex = 1; $recordIndex -lt $records.Count; $recordIndex++) {
+        if ([long]$records[$recordIndex].elapsedMilliseconds -lt [long]$records[$recordIndex - 1].elapsedMilliseconds) { throw 'Progress elapsed time moved backwards.' }
+    }
+    $passed.Add('machine-state progress elapsed monotonic')
+    if (@($records | Where-Object { $_.captureLabel -cne 'synthetic-pre' }).Count -ne 0 -or @($records | Select-Object -ExpandProperty captureId -Unique).Count -ne 1) {
+        throw 'Capture labels or IDs are inconsistent.'
+    }
+    $passed.Add('machine-state progress capture labels')
+    $progressJson = $records | ConvertTo-Json -Compress -Depth 8
+    if ($progressJson -match '(?i)synthetic-secret-value|Registry::|HKEY_|C:\\Users') { throw 'Progress evidence contains captured values or unrelated paths.' }
+    $passed.Add('machine-state progress excludes captured values')
+    $performance = Get-Content -LiteralPath $performancePath -Raw | ConvertFrom-Json
+    if (![bool]$performance.passed -or $performance.captureLabel -cne 'synthetic-pre' -or @($performance.phases).Count -ne 1 -or
+        [long]$performance.captureTargetMilliseconds -ne 480000 -or [long]$performance.hardCeilingMilliseconds -ne 720000 -or [long]$performance.phaseCeilingMilliseconds -ne 240000) {
+        throw 'Machine-state performance artifact is incomplete.'
+    }
+    $passed.Add('machine-state performance artifact schema')
+
+    $failureProgress = Join-Path $telemetryRoot 'failure-progress.ndjson'
+    $failurePerformance = Join-Path $telemetryRoot 'failure-performance.json'
+    $failureContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'synthetic-failure' -ProgressPath $failureProgress -PerformancePath $failurePerformance
+    Start-G04DCMachineStatePhase -Context $failureContext -Phase 'synthetic-failure-phase'
+    Complete-G04DCMachineStateCapture -Context $failureContext -Passed $false -FailureMessage '[SYNTHETIC_FAILURE] bounded'
+    $failureRecords = @(Get-Content -LiteralPath $failureProgress | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($failureRecords[-1].event -cne 'capture-failure' -or $failureRecords[-1].status -cne 'failed' -or
+        (Get-Content -LiteralPath $failurePerformance -Raw | ConvertFrom-Json).passed) {
+        throw 'Capture failure telemetry was not sealed.'
+    }
+    $passed.Add('machine-state capture failure record')
+
+    $phaseBudgetContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'phase-budget' -ProgressPath (Join-Path $telemetryRoot 'phase-budget.ndjson') -PerformancePath (Join-Path $telemetryRoot 'phase-budget.json') -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 1000 -PhaseBudgetMilliseconds 50
+    Start-G04DCMachineStatePhase -Context $phaseBudgetContext -Phase 'bounded-phase'
+    Start-Sleep -Milliseconds 100
+    Assert-Throws 'machine-state phase budget exceeded' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        Assert-G04DCMachineStateCaptureBudget -Context $phaseBudgetContext -Phase 'bounded-phase' -ItemCount 11
+    }
+    Complete-G04DCMachineStateCapture -Context $phaseBudgetContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=bounded-phase'
+
+    $overallBudgetContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'overall-budget' -ProgressPath (Join-Path $telemetryRoot 'overall-budget.ndjson') -PerformancePath (Join-Path $telemetryRoot 'overall-budget.json') -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 200 -PhaseBudgetMilliseconds 150
+    Start-G04DCMachineStatePhase -Context $overallBudgetContext -Phase 'bounded-first'
+    Start-Sleep -Milliseconds 100
+    Complete-G04DCMachineStatePhase -Context $overallBudgetContext -Phase 'bounded-first' -ItemCount 1
+    Start-G04DCMachineStatePhase -Context $overallBudgetContext -Phase 'bounded-overall'
+    Start-Sleep -Milliseconds 120
+    Assert-Throws 'machine-state overall budget exceeded' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        Assert-G04DCMachineStateCaptureBudget -Context $overallBudgetContext -Phase 'bounded-overall' -ItemCount 13
+    }
+    Complete-G04DCMachineStateCapture -Context $overallBudgetContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=bounded-overall'
+
+    $module = Get-Module G04DC.Common
+    $serializationSuccessPath = Join-Path $telemetryRoot 'machine-success.json'
+    $serializationSuccessContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'serialization-success' -ProgressPath (Join-Path $telemetryRoot 'serialization-success.ndjson') -PerformancePath (Join-Path $telemetryRoot 'serialization-success-performance.json') -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+    Start-G04DCMachineStatePhase -Context $serializationSuccessContext -Phase 'state-serialization'
+    & $module { param($Context, [string]$OutputPath) Write-G04DCBoundedMachineStateJson -Path $OutputPath -Value ([pscustomobject][ordered]@{ schemaVersion = 1; bounded = $true; values = @('alpha', '', 7, $true, $null); nested = [pscustomobject][ordered]@{ unicode = 'नमस्ते'; map = [ordered]@{ present = $true; value = 'x' } } }) -CaptureContext $Context -CapturePhase 'state-serialization' } $serializationSuccessContext $serializationSuccessPath
+    Complete-G04DCMachineStatePhase -Context $serializationSuccessContext -Phase 'state-serialization' -ItemCount 1
+    Complete-G04DCMachineStateCapture -Context $serializationSuccessContext -Passed $true -FailureMessage $null
+    $serializationSuccess = Get-Content -LiteralPath $serializationSuccessPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (!(Test-Path -LiteralPath $serializationSuccessPath -PathType Leaf) -or ![bool]$serializationSuccess.bounded -or @($serializationSuccess.values).Count -ne 5 -or [string]$serializationSuccess.nested.unicode -cne 'नमस्ते' -or ![bool]$serializationSuccess.nested.map.present) {
+        throw 'Bounded machine-state serialization did not durably publish its successful JSON output.'
+    }
+    $passed.Add('machine-state bounded serialization publishes durable JSON')
+
+    $serializationPath = Join-Path $telemetryRoot 'machine-pre.json'
+    $serializationProgress = Join-Path $telemetryRoot 'serialization-progress.ndjson'
+    $serializationPerformance = Join-Path $telemetryRoot 'serialization-performance.json'
+    $serializationContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'serialization-budget' -ProgressPath $serializationProgress -PerformancePath $serializationPerformance -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 1000 -PhaseBudgetMilliseconds 50
+    Start-G04DCMachineStatePhase -Context $serializationContext -Phase 'state-serialization'
+    Assert-Throws 'machine-state serialization helper budget exceeded' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        & $module { param($Context, [string]$OutputPath) Write-G04DCBoundedMachineStateJson -Path $OutputPath -Value ([pscustomobject]@{ bounded = ('x' * 1000000) }) -CaptureContext $Context -CapturePhase 'state-serialization' } $serializationContext $serializationPath
+    }
+    Complete-G04DCMachineStateCapture -Context $serializationContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=state-serialization'
+    $serializationRecords = @(Get-Content -LiteralPath $serializationProgress | ForEach-Object { $_ | ConvertFrom-Json })
+    $serializationEvidence = Get-Content -LiteralPath $serializationPerformance -Raw | ConvertFrom-Json
+    if ((Test-Path -LiteralPath $serializationPath) -or [bool]$serializationEvidence.passed -or $serializationEvidence.failurePhase -cne 'state-serialization' -or
+        $serializationRecords[-1].event -cne 'capture-failure' -or $serializationRecords[-1].status -cne 'budget-exceeded') {
+        throw 'Timed-out machine-state serialization produced success or lost durable failure evidence.'
+    }
+    $passed.Add('machine-state serialization failure is durable and non-successful')
+
+    $canonicalRows = @(
+        [pscustomobject][ordered]@{ path = 'zeta'; value = 3 },
+        [pscustomobject][ordered]@{ path = 'Alpha'; value = 1 },
+        [pscustomobject][ordered]@{ path = 'middle'; value = @('x', '', $null) }
+    )
+    $legacyCanonicalHash = Get-G04DCCanonicalHash -Rows $canonicalRows
+    $canonicalSuccessContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'canonical-success' -ProgressPath (Join-Path $telemetryRoot 'canonical-success.ndjson') -PerformancePath (Join-Path $telemetryRoot 'canonical-success.json') -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+    Start-G04DCMachineStatePhase -Context $canonicalSuccessContext -Phase 'canonical-hash'
+    $boundedCanonicalHash = Get-G04DCCanonicalHash -Rows $canonicalRows -CaptureContext $canonicalSuccessContext -CapturePhase 'canonical-hash'
+    Complete-G04DCMachineStatePhase -Context $canonicalSuccessContext -Phase 'canonical-hash' -ItemCount $canonicalRows.Count
+    Complete-G04DCMachineStateCapture -Context $canonicalSuccessContext -Passed $true -FailureMessage $null
+    if ($boundedCanonicalHash -cne $legacyCanonicalHash) { throw 'Bounded canonical hashing changed the legacy sorted-row digest.' }
+    $passed.Add('machine-state bounded canonical hash preserves legacy digest')
+
+    $canonicalBudgetProgress = Join-Path $telemetryRoot 'canonical-budget.ndjson'
+    $canonicalBudgetPerformance = Join-Path $telemetryRoot 'canonical-budget-performance.json'
+    $canonicalBudgetSuccess = Join-Path $telemetryRoot 'canonical-budget-success.json'
+    $canonicalBudgetRows = @(0..9999 | ForEach-Object { [pscustomobject][ordered]@{ index = $_; value = 'bounded-canonical-row' } })
+    $canonicalBudgetContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'canonical-budget' -ProgressPath $canonicalBudgetProgress -PerformancePath $canonicalBudgetPerformance -CaptureTargetMilliseconds 50 -OverallBudgetMilliseconds 1000 -PhaseBudgetMilliseconds 100
+    Start-G04DCMachineStatePhase -Context $canonicalBudgetContext -Phase 'canonical-hash'
+    Assert-Throws 'machine-state canonical hash budget exceeded' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        Get-G04DCCanonicalHash -Rows $canonicalBudgetRows -CaptureContext $canonicalBudgetContext -CapturePhase 'canonical-hash' | Out-Null
+    }
+    Complete-G04DCMachineStateCapture -Context $canonicalBudgetContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=canonical-hash'
+    $canonicalBudgetRecords = @(Get-Content -LiteralPath $canonicalBudgetProgress | ForEach-Object { $_ | ConvertFrom-Json })
+    $canonicalBudgetEvidence = Get-Content -LiteralPath $canonicalBudgetPerformance -Raw | ConvertFrom-Json
+    if ((Test-Path -LiteralPath $canonicalBudgetSuccess) -or [bool]$canonicalBudgetEvidence.passed -or $canonicalBudgetEvidence.failurePhase -cne 'canonical-hash' -or
+        $canonicalBudgetRecords[-1].event -cne 'capture-failure' -or $canonicalBudgetRecords[-1].status -cne 'budget-exceeded') {
+        throw 'Timed-out canonical hashing produced success or lost durable failure evidence.'
+    }
+    $passed.Add('machine-state canonical hash budget failure is durable')
+
+    $helperSuccessContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'helper-success' -ProgressPath (Join-Path $telemetryRoot 'helper-success.ndjson') -PerformancePath (Join-Path $telemetryRoot 'helper-success.json') -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+    Start-G04DCMachineStatePhase -Context $helperSuccessContext -Phase 'provider-inventory'
+    $helperSuccess = @(& $module { param($Context) Invoke-G04DCBoundedCaptureProcess -Context $Context -Phase 'provider-inventory' -ScriptBlock { param([string]$Value) [pscustomobject]@{ value = $Value } } -ArgumentList @('bounded-result') } $helperSuccessContext)
+    Complete-G04DCMachineStatePhase -Context $helperSuccessContext -Phase 'provider-inventory' -ItemCount $helperSuccess.Count
+    Complete-G04DCMachineStateCapture -Context $helperSuccessContext -Passed $true -FailureMessage $null
+    if ($helperSuccess.Count -ne 1 -or [string]$helperSuccess[0].value -cne 'bounded-result') { throw 'Bounded helper process did not return its sealed result.' }
+    $passed.Add('machine-state helper process returns sealed output')
+
+    $helperContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'helper-budget' -ProgressPath (Join-Path $telemetryRoot 'helper-budget.ndjson') -PerformancePath (Join-Path $telemetryRoot 'helper-budget.json') -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 1000 -PhaseBudgetMilliseconds 200
+    Start-G04DCMachineStatePhase -Context $helperContext -Phase 'provider-inventory'
+    $helperParent = if (![string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) { $env:RUNNER_TEMP } else { [IO.Path]::GetTempPath() }
+    $helperRootsBefore = @(Get-ChildItem -LiteralPath $helperParent -Directory -Filter 'document-studio-g04dc-capture-helper-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    Assert-Throws 'machine-state helper process timeout is terminally cleaned' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        & $module { param($Context) Invoke-G04DCBoundedCaptureProcess -Context $Context -Phase 'provider-inventory' -ScriptBlock { Start-Sleep -Seconds 10 } } $helperContext
+    }
+    $helperRootsAfter = @(Get-ChildItem -LiteralPath $helperParent -Directory -Filter 'document-studio-g04dc-capture-helper-*' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    if (@($helperRootsAfter | Where-Object { $helperRootsBefore -cnotcontains $_ }).Count -ne 0) { throw 'Timed-out helper process left an owned helper root behind.' }
+    Complete-G04DCMachineStateCapture -Context $helperContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=provider-inventory'
+
+    $successGateContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'success-gate' -ProgressPath (Join-Path $telemetryRoot 'success-gate.ndjson') -PerformancePath (Join-Path $telemetryRoot 'success-gate.json') -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 50 -PhaseBudgetMilliseconds 50
+    Start-G04DCMachineStatePhase -Context $successGateContext -Phase 'finalized'
+    Complete-G04DCMachineStatePhase -Context $successGateContext -Phase 'finalized' -ItemCount 1
+    Start-Sleep -Milliseconds 75
+    Assert-Throws 'machine-state final success gate enforces overall budget' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        Complete-G04DCMachineStateCapture -Context $successGateContext -Passed $true -FailureMessage $null
+    }
+    Complete-G04DCMachineStateCapture -Context $successGateContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=capture-success-gate'
+
+    $hashClosed = [pscustomobject]@{ value = $false; reads = 0 }
+    $hashAdapter = @{
+        Open = { param([string]$CandidatePath) [pscustomobject]@{ synthetic = $true } }
+        Read = { param($Handle, [byte[]]$Buffer) $hashClosed.reads++; if ($hashClosed.reads -eq 1) { Start-Sleep -Milliseconds 75; $Buffer[0] = 97; return 1 }; return 0 }.GetNewClosure()
+        Close = { param($Handle) $hashClosed.value = $true }.GetNewClosure()
+    }
+    $hashContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'hash-budget' -ProgressPath (Join-Path $telemetryRoot 'hash-budget.ndjson') -PerformancePath (Join-Path $telemetryRoot 'hash-budget.json') -CaptureTargetMilliseconds 1 -OverallBudgetMilliseconds 1000 -PhaseBudgetMilliseconds 50
+    Start-G04DCMachineStatePhase -Context $hashContext -Phase 'installer-cache-catalog'
+    Assert-Throws 'machine-state streaming hash checks deadline per buffer' 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' {
+        & $module { param($Context, $Adapter) Get-G04DCBoundedFileSha256 -Path 'C:\synthetic\large.msi' -CaptureContext $Context -CapturePhase 'installer-cache-catalog' -ItemCount 1 -ReadAdapter $Adapter } $hashContext $hashAdapter
+    }
+    Complete-G04DCMachineStateCapture -Context $hashContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=installer-cache-catalog'
+    if (!$hashClosed.value) { throw 'Bounded streaming hash did not dispose its read handle after a deadline failure.' }
+    $passed.Add('machine-state streaming hash disposes handle on failure')
+}
+finally {
+    foreach ($telemetryContext in @($context, $failureContext, $phaseBudgetContext, $overallBudgetContext, $serializationSuccessContext, $serializationContext, $helperSuccessContext, $helperContext, $successGateContext, $hashContext)) {
+        if ($telemetryContext -and $telemetryContext.writer) { $telemetryContext.writer.Dispose(); $telemetryContext.writer = $null }
+    }
+    if (Test-Path -LiteralPath $telemetryRoot) { Remove-Item -LiteralPath $telemetryRoot -Recurse -Force }
+}
+
+function New-G04DCTestMsiComponentAdapter {
+    param(
+        [hashtable]$Fixtures = @{},
+        [string]$AccessDeniedOperation = '',
+        [string]$ReadFailureOperation = ''
+    )
+    $statistics = [pscustomobject][ordered]@{ baseRootOpenCount = 0; componentOpenCount = 0; closeCount = 0; providerInvocationCount = 0 }
+    $handles = [System.Collections.Generic.List[object]]::new()
+    $adapter = @{}
+    $adapter.OpenBaseRoot = {
+        param([string]$Scope)
+        $statistics.baseRootOpenCount++
+        if ($AccessDeniedOperation -ceq "OpenBaseRoot:$Scope") { throw [System.UnauthorizedAccessException]::new('synthetic base access denied') }
+        $handle = [pscustomobject]@{ scope = $Scope; root = $true; disposed = $false }
+        $handles.Add($handle)
+        [pscustomobject]@{ rootExists = $true; handle = $handle }
+    }.GetNewClosure()
+    $adapter.OpenComponentKey = {
+        param($RootHandle, [string]$PackedComponent)
+        $statistics.componentOpenCount++
+        if ($AccessDeniedOperation -ceq 'OpenComponentKey') { throw [System.UnauthorizedAccessException]::new('synthetic component access denied') }
+        $fixtureKey = "$($RootHandle.scope)|$PackedComponent"
+        if (!$Fixtures.ContainsKey($fixtureKey)) { return $null }
+        $handle = [pscustomobject]@{ scope = $RootHandle.scope; root = $false; packedComponent = $PackedComponent; fixture = $Fixtures[$fixtureKey]; enumerationCount = 0; disposed = $false }
+        $handles.Add($handle)
+        return $handle
+    }.GetNewClosure()
+    $adapter.GetValueNames = {
+        param($Handle)
+        $Handle.enumerationCount++
+        if ([bool]$Handle.fixture.disappear -and $Handle.enumerationCount -gt 1) { return @() }
+        return @($Handle.fixture.values.Keys)
+    }.GetNewClosure()
+    $adapter.GetValueKind = {
+        param($Handle, [string]$Name)
+        if ($ReadFailureOperation -ceq 'GetValueKind') { throw [System.InvalidOperationException]::new('synthetic value-kind read failure') }
+        return [string]$Handle.fixture.values[$Name].kind
+    }.GetNewClosure()
+    $adapter.GetValue = {
+        param($Handle, [string]$Name)
+        if ($ReadFailureOperation -ceq 'GetValue') { throw [System.InvalidOperationException]::new('synthetic value read failure') }
+        if ([bool]$Handle.fixture.disappear) { return [pscustomobject]@{ present = $false; value = $null } }
+        return [pscustomobject]@{ present = $Handle.fixture.values.ContainsKey($Name); value = $Handle.fixture.values[$Name].value }
+    }.GetNewClosure()
+    $adapter.CloseKey = {
+        param($Handle)
+        if ([bool]$Handle.disposed) { throw [System.InvalidOperationException]::new('synthetic handle disposed twice') }
+        $Handle.disposed = $true
+        $statistics.closeCount++
+    }.GetNewClosure()
+    return [pscustomobject]@{ adapter = $adapter; statistics = $statistics; handles = $handles }
+}
+
+function New-G04DCTestComponentFixture([hashtable]$Values, [bool]$Disappear = $false) {
+    return [pscustomobject]@{ values = $Values; disappear = $Disappear }
+}
+
+$packedProductForComponents = ConvertTo-G04DCPackedGuid -Guid $expected.ProductCode
+$componentMissing = '{00000001-0000-0000-0000-000000000001}'
+$componentNoValue = '{00000002-0000-0000-0000-000000000002}'
+$componentEmpty = '{00000003-0000-0000-0000-000000000003}'
+$componentTyped = '{00000004-0000-0000-0000-000000000004}'
+$componentBoth = '{00000005-0000-0000-0000-000000000005}'
+$fixtureData = @{}
+$fixtureData["system|$(ConvertTo-G04DCPackedGuid $componentNoValue)"] = New-G04DCTestComponentFixture -Values @{}
+$fixtureData["system|$(ConvertTo-G04DCPackedGuid $componentEmpty)"] = New-G04DCTestComponentFixture -Values @{ $packedProductForComponents = [pscustomobject]@{ kind = 'String'; value = '' } }
+$fixtureData["user|$(ConvertTo-G04DCPackedGuid $componentTyped)"] = New-G04DCTestComponentFixture -Values @{ $packedProductForComponents = [pscustomobject]@{ kind = 'DWord'; value = 42 } }
+$fixtureData["system|$(ConvertTo-G04DCPackedGuid $componentBoth)"] = New-G04DCTestComponentFixture -Values @{ $packedProductForComponents = [pscustomobject]@{ kind = 'String'; value = 'system' } }
+$fixtureData["user|$(ConvertTo-G04DCPackedGuid $componentBoth)"] = New-G04DCTestComponentFixture -Values @{ $packedProductForComponents = [pscustomobject]@{ kind = 'String'; value = 'user' } }
+$fixtureAdapterState = New-G04DCTestMsiComponentAdapter -Fixtures $fixtureData
+$fixtureRecords = @(Get-G04DCMsiComponentRegistrationState -ComponentCodes @($componentBoth, $componentTyped, $componentMissing, $componentNoValue, $componentEmpty, $componentBoth) -PackedProductCode $packedProductForComponents -AccessAdapter $fixtureAdapterState.adapter)
+$fixtureByCode = @{}; foreach ($record in $fixtureRecords) { $fixtureByCode[$record.componentCode] = $record }
+if ($fixtureByCode[$componentMissing].systemProductValueState.keyExists -or $fixtureByCode[$componentMissing].userProductValueState.keyExists) { throw 'Missing component key semantics changed.' }
+$passed.Add('MSI component key missing equivalence')
+if (!$fixtureByCode[$componentNoValue].systemProductValueState.keyExists -or $fixtureByCode[$componentNoValue].systemProductValuePresent) { throw 'Present component key with absent product value semantics changed.' }
+$passed.Add('MSI component product value missing equivalence')
+if (!$fixtureByCode[$componentEmpty].systemProductValuePresent -or $fixtureByCode[$componentEmpty].systemProductValueState.value -cne '') { throw 'Empty product value was not preserved.' }
+$passed.Add('MSI component empty product value equivalence')
+if (!$fixtureByCode[$componentTyped].userProductValuePresent -or $fixtureByCode[$componentTyped].userProductValueState.valueType -cne 'DWord' -or [int]$fixtureByCode[$componentTyped].userProductValueState.value -ne 42) { throw 'Typed product value was not preserved.' }
+$passed.Add('MSI component value type preservation')
+if ($fixtureByCode[$componentTyped].systemProductValuePresent -or !$fixtureByCode[$componentTyped].userProductValuePresent -or
+    !$fixtureByCode[$componentBoth].systemProductValuePresent -or !$fixtureByCode[$componentBoth].userProductValuePresent) { throw 'System/user/both scope evidence is invalid.' }
+$passed.Add('MSI component system user and both scope differences')
+$expectedTypedState = [pscustomobject][ordered]@{ schemaVersion = 1; keyExists = $true; valueName = $packedProductForComponents; valuePresent = $true; valueType = 'DWord'; value = 42 }
+if (($fixtureByCode[$componentTyped].userProductValueState | ConvertTo-Json -Compress) -cne ($expectedTypedState | ConvertTo-Json -Compress)) { throw 'Optimized state is not byte-canonical equivalent to the legacy schema.' }
+$passed.Add('MSI component canonical semantic equivalence')
+if ($fixtureRecords.Count -ne 5 -or ($fixtureRecords.componentCode -join '|') -cne (($fixtureRecords.componentCode | Sort-Object -Unique) -join '|')) { throw 'Duplicate component codes or deterministic ordering changed.' }
+$passed.Add('MSI component duplicate input deterministic ordering')
+if (@($fixtureAdapterState.handles | Where-Object { ![bool]$_.disposed }).Count -ne 0) { throw 'MSI component registry handles were not all disposed.' }
+$passed.Add('MSI component handles disposed')
+if ($fixtureAdapterState.statistics.baseRootOpenCount -ne 2) { throw 'MSI component base roots were not opened a bounded number of times.' }
+$passed.Add('MSI component bounded base root handles')
+Assert-Throws 'malformed MSI component GUID rejection' 'MSI_REGISTRATION_INVALID' {
+    Get-G04DCMsiComponentRegistrationState -ComponentCodes @('not-a-guid') -PackedProductCode $packedProductForComponents -AccessAdapter (New-G04DCTestMsiComponentAdapter).adapter
+}
+$whitespaceAdapterState = New-G04DCTestMsiComponentAdapter
+Assert-Throws 'whitespace MSI component GUID rejection' 'MSI_REGISTRATION_INVALID' {
+    Get-G04DCMsiComponentRegistrationState -ComponentCodes @($componentMissing, '   ') -PackedProductCode $packedProductForComponents -AccessAdapter $whitespaceAdapterState.adapter
+}
+if (@($whitespaceAdapterState.handles | Where-Object { ![bool]$_.disposed }).Count -ne 0) { throw 'Whitespace component rejection leaked opened registry roots.' }
+$passed.Add('whitespace MSI component rejection disposes roots')
+Assert-Throws 'MSI component access denied fail closed' 'MSI_REGISTRATION_CAPTURE_FAILED' {
+    Get-G04DCMsiComponentRegistrationState -ComponentCodes @($componentMissing) -PackedProductCode $packedProductForComponents -AccessAdapter (New-G04DCTestMsiComponentAdapter -AccessDeniedOperation 'OpenBaseRoot:system').adapter
+}
+Assert-Throws 'MSI component read failure fail closed' 'MSI_REGISTRATION_CAPTURE_FAILED' {
+    $readFailureData = @{ "system|$(ConvertTo-G04DCPackedGuid $componentTyped)" = (New-G04DCTestComponentFixture -Values @{ $packedProductForComponents = [pscustomobject]@{ kind = 'String'; value = 'present' } }) }
+    Get-G04DCMsiComponentRegistrationState -ComponentCodes @($componentTyped) -PackedProductCode $packedProductForComponents -AccessAdapter (New-G04DCTestMsiComponentAdapter -Fixtures $readFailureData -ReadFailureOperation 'GetValueKind').adapter
+}
+$raceData = @{ "system|$(ConvertTo-G04DCPackedGuid $componentTyped)" = (New-G04DCTestComponentFixture -Values @{ $packedProductForComponents = [pscustomobject]@{ kind = 'String'; value = 'present' } } -Disappear $true) }
+$raceRecord = @(Get-G04DCMsiComponentRegistrationState -ComponentCodes @($componentTyped) -PackedProductCode $packedProductForComponents -AccessAdapter (New-G04DCTestMsiComponentAdapter -Fixtures $raceData).adapter)[0]
+if (!$raceRecord.systemProductValueState.keyExists -or $raceRecord.systemProductValuePresent) { throw 'Disappearing MSI product value was not reclassified safely.' }
+$passed.Add('MSI component disappearing value race')
+
+$viewTestId = [guid]::NewGuid().ToString('N')
+$viewNativeRoot = "Software\DocumentStudio-G04DC-Msi-View-$viewTestId"
+$viewProviderRoot = "Registry::HKEY_CURRENT_USER\$viewNativeRoot"
+$viewComponent = '{00000006-0000-0000-0000-000000000006}'
+$viewPackedComponent = ConvertTo-G04DCPackedGuid $viewComponent
+$viewBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Registry64)
+try {
+    $viewKey = $viewBase.CreateSubKey("$viewNativeRoot\$viewPackedComponent")
+    try { $viewKey.SetValue($packedProductForComponents, 'view-equivalent', [Microsoft.Win32.RegistryValueKind]::String) }
+    finally { $viewKey.Dispose() }
+    $viewAdapter = @{
+        OpenBaseRoot = { param([string]$Scope) if ($Scope -ceq 'system') { return [pscustomobject]@{ rootExists = $false; handle = $null } }; $root = $viewBase.OpenSubKey($viewNativeRoot, $false); [pscustomobject]@{ rootExists = $null -ne $root; handle = $root } }.GetNewClosure()
+        OpenComponentKey = { param($RootHandle, [string]$PackedComponent) $RootHandle.OpenSubKey($PackedComponent, $false) }
+        GetValueNames = { param($Handle) @($Handle.GetValueNames()) }
+        GetValueKind = { param($Handle, [string]$Name) [string]$Handle.GetValueKind($Name) }
+        GetValue = { param($Handle, [string]$Name) $missing = [object]::new(); $value = $Handle.GetValue($Name, $missing, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); [pscustomobject]@{ present = ![object]::ReferenceEquals($missing, $value); value = $value } }
+        CloseKey = { param($Handle) if ($Handle) { $Handle.Dispose() } }
+    }
+    $legacyViewState = Get-G04DCRegistryValueState -Path "$viewProviderRoot\$viewPackedComponent" -ValueName $packedProductForComponents
+    $optimizedViewState = @(Get-G04DCMsiComponentRegistrationState -ComponentCodes @($viewComponent) -PackedProductCode $packedProductForComponents -AccessAdapter $viewAdapter)[0].userProductValueState
+    if (($legacyViewState | ConvertTo-Json -Compress) -cne ($optimizedViewState | ConvertTo-Json -Compress)) { throw 'Registry64 typed access differs from the 64-bit Registry provider view.' }
+    $passed.Add('MSI component registry view equivalence')
+}
+finally {
+    $viewBase.Dispose()
+    if (Test-Path -LiteralPath $viewProviderRoot) { Remove-Item -LiteralPath $viewProviderRoot -Recurse -Force }
+}
+
+$scaleComponents = @(1..6092 | ForEach-Object { '{00000000-0000-0000-0000-' + $_.ToString('X12') + '}' })
+$scaleAdapterState = New-G04DCTestMsiComponentAdapter
+$scaleRecords = @(Get-G04DCMsiComponentRegistrationState -ComponentCodes $scaleComponents -PackedProductCode $packedProductForComponents -AccessAdapter $scaleAdapterState.adapter)
+if ($scaleRecords.Count -ne 6092) { throw 'Scale collector omitted synthetic component records.' }
+$passed.Add('MSI component 6092 record scale')
+if ($scaleAdapterState.statistics.baseRootOpenCount -ne 2 -or $scaleAdapterState.statistics.componentOpenCount -ne 12184) { throw 'Scale collector did not retain bounded root opens and exact per-component subkey checks.' }
+$passed.Add('MSI component scale bounded base roots')
+$scaleCodes = @($scaleRecords | ForEach-Object { $_.componentCode })
+if (($scaleCodes | Sort-Object -Unique).Count -ne 6092 -or ($scaleCodes -join '|') -cne (($scaleCodes | Sort-Object) -join '|')) { throw 'Scale collector output is incomplete or nondeterministic.' }
+$passed.Add('MSI component scale deterministic no omission')
+$componentFunctionSource = (Get-Command Get-G04DCMsiComponentRegistrationState).ScriptBlock.ToString()
+if ($scaleAdapterState.statistics.providerInvocationCount -ne 0 -or $componentFunctionSource.Contains('Get-G04DCRegistryValueState')) { throw 'Scale collector retained a Registry-provider classification per component.' }
+$passed.Add('MSI component scale avoids provider per component')
+
+$workflowSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\.github\workflows\g04d-c-libreoffice-runtime-proof.yml') -Raw
+$precheckSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMachineStatePrecheck.ps1') -Raw
+$adminSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCAdminImageProof.ps1') -Raw
+$minimalSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMinimalMsiProof.ps1') -Raw
+$nativeRows = @(& (Get-Module G04DC.Common) { ConvertFrom-G04DCNativeTextRows -Text "alpha  `r`n`r`nbeta`t`r`n" })
+if (($nativeRows -join '|') -cne 'alpha||beta') { throw 'Native registry digest row normalization lost internal blank rows or trailing-space semantics.' }
+$passed.Add('registry digest preserves legacy blank row semantics')
+if (!$commonSource.Contains('KillOnCloseJob') -or !$commonSource.Contains('TerminateAndVerify') -or !$commonSource.Contains('MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED')) {
+    throw 'Native registry helper is not assigned to verified kill-on-close ownership.'
+}
+$passed.Add('registry digest helper cleanup is terminally verified')
+if (!$workflowSource.Contains('proofMode:') -or !$workflowSource.Contains('- precheck') -or $workflowSource -match '(?m)^\s+(push|pull_request|schedule|workflow_run|repository_dispatch):') { throw 'PRECHECK workflow trigger/input boundary is invalid.' }
+$passed.Add('PRECHECK workflow dispatch only')
+if ($precheckSource -match '(?i)msiexec|/a|administrative-extraction') { throw 'PRECHECK contains an administrative extraction path.' }
+$passed.Add('PRECHECK never invokes administrative extraction')
+if ($precheckSource -match '(?i)soffice|libreoffice\.exe|Invoke-G04DCSandboxSmoke|AppContainer') { throw 'PRECHECK contains a runtime launch or sandbox path.' }
+$passed.Add('PRECHECK never launches runtime')
+if (!$adminSource.Contains("@('/a'") -or !$workflowSource.Contains("inputs.proofMode == 'full'")) { throw 'FULL proof path was not retained behind the full mode.' }
+$passed.Add('FULL workflow retains frozen proof path')
+if ($adminSource.IndexOf('Assert-G04DCMachineStatePerformanceEvidence', [StringComparison]::Ordinal) -lt 0 -or
+    $adminSource.IndexOf('Assert-G04DCMachineStatePerformanceEvidence', [StringComparison]::Ordinal) -gt $adminSource.IndexOf("@('/a'", [StringComparison]::Ordinal) -or
+    $minimalSource.IndexOf('Assert-G04DCMachineStatePerformanceEvidence', [StringComparison]::Ordinal) -lt 0 -or
+    $minimalSource.IndexOf('Assert-G04DCMachineStatePerformanceEvidence', [StringComparison]::Ordinal) -gt $minimalSource.IndexOf("@('/i'", [StringComparison]::Ordinal) -or
+    !$precheckSource.Contains("-StateOutputPath (Join-Path `$evidence 'machine-pre.json')")) {
+    throw 'FULL/PRECHECK Windows Installer gates do not require bounded durable state serialization first.'
+}
+$passed.Add('machine-state performance gate precedes every Windows Installer command')
+if ([regex]::Matches($workflowSource, '(?m)^\s+timeout-minutes:\s*90\s*$').Count -ne 2) { throw 'FULL proof timeout is no longer 90 minutes for both proof jobs.' }
+$passed.Add('FULL workflow retains 90 minute timeout')
+if (!$workflowSource.Contains('g04d-c-machine-state-precheck-evidence') -or [regex]::Matches($workflowSource, 'if: \$\{\{ always\(\) \}\}').Count -lt 6) { throw 'Always-run progress/performance artifact preservation is incomplete.' }
+$passed.Add('machine-state failure evidence always uploaded')
+$changedPaths = @(git -C (Join-Path $PSScriptRoot '..\..') diff --name-only origin/main --)
+if (@($changedPaths | Where-Object { $_ -match '^(apps|packages|src|migrations)/' }).Count -ne 0) { throw 'C5 modified a production path.' }
+$passed.Add('C5 has no production impact path')
+
+if ($passed.Count -ne 186) { throw "Expected 186 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

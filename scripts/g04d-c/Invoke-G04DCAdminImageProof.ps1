@@ -69,8 +69,31 @@ Write-G04DCJson -Path (Join-Path $evidence 'external-runtime-target-derivation.j
     candidatePublicProperties = $analysis.candidatePublicProperties
     targetPaths = $externalRuntimeFilePaths
 })
-$before = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-Write-G04DCJson -Path (Join-Path $evidence 'machine-pre.json') -Value $before
+$machineStateProgressPath = Join-Path $evidence 'machine-state-progress.ndjson'
+function Get-G04DCAdminMachineState {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Label,
+        [AllowNull()] [string]$EvidenceFileName
+    )
+    $performancePath = Join-Path $evidence "machine-state-performance-$Label.json"
+    $arguments = @{
+        ProtectedRegistryRows = $protectedRegistryRows
+        ProtectedFontFileNames = $protectedFontFileNames
+        ProtectedExternalFilePaths = $externalRuntimeFilePaths
+        ProtectedMsiComponentCodes = $msiComponentCodes
+        CaptureLabel = $Label
+        ProgressPath = $machineStateProgressPath
+        PerformancePath = $performancePath
+        CaptureTargetMilliseconds = 480000
+        OverallBudgetMilliseconds = 720000
+        PhaseBudgetMilliseconds = 240000
+    }
+    if (![string]::IsNullOrWhiteSpace($EvidenceFileName)) { $arguments.StateOutputPath = Join-Path $evidence $EvidenceFileName }
+    $state = Get-G04DCMachineState @arguments
+    Assert-G04DCMachineStatePerformanceEvidence -Path $performancePath -RequiredPhase $(if ($arguments.ContainsKey('StateOutputPath')) { 'state-serialization' } else { $null }) | Out-Null
+    return $state
+}
+$before = Get-G04DCAdminMachineState -Label 'pre' -EvidenceFileName 'machine-pre.json'
 if (@($before.installedProduct).Count -ne 0) { throw '[PREEXISTING_PRODUCT] Disposable runner already has the accepted ProductCode.' }
 Assert-G04DCRunnerIsolation -State $before | Out-Null
 Assert-G04DCMsiRegistrationAbsent -State $before.msiRegistration | Out-Null
@@ -100,8 +123,7 @@ if ($process.ExitCode -ne 0) {
     $reasons.Add("[ADMIN_EXTRACTION_FAILED] msiexec /a exited $($process.ExitCode).")
 }
 else {
-    $afterExtraction = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-    Write-G04DCJson -Path (Join-Path $evidence 'machine-post-extraction.json') -Value $afterExtraction
+    $afterExtraction = Get-G04DCAdminMachineState -Label 'post-extraction' -EvidenceFileName 'machine-post-extraction.json'
     $extractionComparison = Compare-G04DCMachineState -Before $before -After $afterExtraction -IncludeInstalledProductCatalog -IncludeAcceptedMsiRegistration -IncludeInstallerCacheCatalog
     Write-G04DCJson -Path (Join-Path $evidence 'machine-extraction-comparison.json') -Value $extractionComparison
     try {
@@ -110,8 +132,7 @@ else {
         Assert-G04DCRunnerIsolation -State $afterExtraction -Code 'ADMINISTRATIVE_EXTRACTION_MUTATION' | Out-Null
         & (Join-Path $PSScriptRoot 'New-G04DCRuntimeManifest.ps1') -RuntimeRoot $adminImage -OutputPath (Join-Path $evidence 'runtime-manifest.json') | Out-Null
         & (Join-Path $PSScriptRoot 'Invoke-G04DCSandboxSmoke.ps1') -RuntimeRoot $adminImage -WorkRoot $work -EvidenceDirectory $evidence -RepositoryRoot $repo | Out-Null
-        $afterSmoke = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-        Write-G04DCJson -Path (Join-Path $evidence 'machine-post-smoke.json') -Value $afterSmoke
+        $afterSmoke = Get-G04DCAdminMachineState -Label 'post-smoke' -EvidenceFileName 'machine-post-smoke.json'
         $smokeComparison = Compare-G04DCMachineState -Before $before -After $afterSmoke -IncludeInstalledProductCatalog -IncludeAcceptedMsiRegistration -IncludeInstallerCacheCatalog
         Write-G04DCJson -Path (Join-Path $evidence 'machine-smoke-comparison.json') -Value $smokeComparison
         Assert-G04DCNonMutation -Comparison $smokeComparison -Code 'ADMINISTRATIVE_RUNTIME_MUTATION' | Out-Null
@@ -121,8 +142,7 @@ else {
     }
     catch { $reasons.Add($_.Exception.Message) }
 }
-$afterRuntimeAttempt = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-Write-G04DCJson -Path (Join-Path $evidence 'machine-post-runtime-attempt.json') -Value $afterRuntimeAttempt
+$afterRuntimeAttempt = Get-G04DCAdminMachineState -Label 'post-runtime-attempt' -EvidenceFileName 'machine-post-runtime-attempt.json'
 $runtimeAttemptComparison = Compare-G04DCMachineState -Before $before -After $afterRuntimeAttempt -IncludeInstalledProductCatalog -IncludeAcceptedMsiRegistration -IncludeInstallerCacheCatalog
 Write-G04DCJson -Path (Join-Path $evidence 'machine-runtime-attempt-comparison.json') -Value $runtimeAttemptComparison
 if ([bool]$runtimeAttemptComparison.protectedMutation) { $reasons.Add('[ADMINISTRATIVE_RUNTIME_MUTATION] Runtime attempt changed protected machine state.'); $candidate = $false; $sandboxPassed = $false }
@@ -132,7 +152,7 @@ $cleanup = Remove-G04DCOwnedRoot -OwnedRoot $ownedRoot -MarkerPath $ownedMarker 
 if (!$cleanup.removed) { $reasons.Add('[CLEANUP_OWNERSHIP_MISMATCH] Marker-owned administrative image was not removed.'); $candidate = $false }
 try { Assert-G04DCCleanupEvidence -Evidence $cleanup | Out-Null } catch { $reasons.Add($_.Exception.Message); $candidate = $false }
 Write-G04DCJson -Path (Join-Path $evidence 'cleanup.json') -Value $cleanup
-$finalState = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
+$finalState = Get-G04DCAdminMachineState -Label 'final'
 $finalComparison = Compare-G04DCMachineState -Before $before -After $finalState -IncludeInstalledProductCatalog -IncludeAcceptedMsiRegistration -IncludeInstallerCacheCatalog
 Write-G04DCJson -Path (Join-Path $evidence 'machine-final-comparison.json') -Value $finalComparison
 if ($finalComparison.protectedMutation) { $reasons.Add('[ADMINISTRATIVE_RUNTIME_MUTATION] Final runner state differs from pre-state.'); $candidate = $false }

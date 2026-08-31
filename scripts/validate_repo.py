@@ -93,6 +93,7 @@ required = [
     'scripts/g04d-c/G04DC.Sandbox.cs',
     'scripts/g04d-c/G04DC.MsiCondition.cs',
     'scripts/g04d-c/Invoke-G04DCAdminImageProof.ps1',
+    'scripts/g04d-c/Invoke-G04DCMachineStatePrecheck.ps1',
     'scripts/g04d-c/Invoke-G04DCLocalMsiReadOnlyValidation.ps1',
     'scripts/g04d-c/Invoke-G04DCMinimalMsiProof.ps1',
     'scripts/g04d-c/Invoke-G04DCSandboxSmoke.ps1',
@@ -935,20 +936,51 @@ g04dc_common = (ROOT / 'scripts/g04d-c/G04DC.Common.psm1').read_text(encoding='u
 g04dc_sandbox = (ROOT / 'scripts/g04d-c/G04DC.Sandbox.cs').read_text(encoding='utf-8')
 g04dc_sandbox_wrapper = (ROOT / 'scripts/g04d-c/Invoke-G04DCSandboxSmoke.ps1').read_text(encoding='utf-8')
 g04dc_admin = (ROOT / 'scripts/g04d-c/Invoke-G04DCAdminImageProof.ps1').read_text(encoding='utf-8')
+g04dc_precheck = (ROOT / 'scripts/g04d-c/Invoke-G04DCMachineStatePrecheck.ps1').read_text(encoding='utf-8')
 g04dc_minimal = (ROOT / 'scripts/g04d-c/Invoke-G04DCMinimalMsiProof.ps1').read_text(encoding='utf-8')
 g04dc_manifest = (ROOT / 'scripts/g04d-c/New-G04DCRuntimeManifest.ps1').read_text(encoding='utf-8')
 g04dc_decision = (ROOT / 'scripts/g04d-c/New-G04DCCandidateDecision.ps1').read_text(encoding='utf-8')
 g04dc_tests = (ROOT / 'scripts/g04d-c/Test-G04DCBoundaries.ps1').read_text(encoding='utf-8')
-if 'workflow_dispatch:' not in g04dc_workflow or re.search(r'^\s+(push|pull_request|schedule):', g04dc_workflow, re.MULTILINE):
+if 'workflow_dispatch:' not in g04dc_workflow or re.search(r'^\s+(push|pull_request|schedule|workflow_run|repository_dispatch):', g04dc_workflow, re.MULTILINE):
     raise SystemExit('G04D-C proof workflow must remain workflow_dispatch only')
-for job in ['admin-image:', 'minimal-msi:', 'decision:']:
+for job in ['machine-state-precheck:', 'admin-image:', 'minimal-msi:', 'decision:']:
     if job not in g04dc_workflow:
         raise SystemExit(f'G04D-C fresh-runner workflow job is missing: {job}')
 for action in re.findall(r'^\s*-\s+uses:\s*([^\s]+)', g04dc_workflow, re.MULTILINE):
     if not re.search(r'@[0-9a-f]{40}$', action):
         raise SystemExit(f'G04D-C workflow action is not pinned: {action}')
-if len(re.findall(r'persist-credentials:\s*false', g04dc_workflow)) != 3:
+if len(re.findall(r'persist-credentials:\s*false', g04dc_workflow)) != 4:
     raise SystemExit('G04D-C checkout credentials must not persist onto proof runners')
+for boundary in [
+    'proofMode:', '- precheck', '- full', "inputs.proofMode == 'precheck'", "inputs.proofMode == 'full'",
+    'timeout-minutes: 20', 'g04d-c-machine-state-precheck-evidence',
+]:
+    if boundary not in g04dc_workflow:
+        raise SystemExit(f'G04D-C PRECHECK workflow boundary is missing: {boundary}')
+if len(re.findall(r'^\s+timeout-minutes:\s*90\s*$', g04dc_workflow, re.MULTILINE)) != 2:
+    raise SystemExit('G04D-C FULL proof jobs must retain the 90-minute timeout')
+if re.search(r'(?i)msiexec|/a|soffice|Invoke-G04DCSandboxSmoke|AppContainer', g04dc_precheck):
+    raise SystemExit('G04D-C PRECHECK may not extract, install or launch the runtime')
+for boundary in [
+    'machine-pre.json', 'machine-state-progress.ndjson', 'machine-state-performance.json',
+    'MACHINE_STATE_PRECHECK_PASS', 'MACHINE_STATE_PRECHECK_BLOCKED',
+    'Assert-G04DCRunnerIsolation', 'Assert-G04DCMsiRegistrationAbsent',
+    'candidateClassificationProduced = $false',
+]:
+    if boundary not in g04dc_precheck:
+        raise SystemExit(f'G04D-C PRECHECK proof boundary is missing: {boundary}')
+for boundary in [
+    'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
+    'Assert-G04DCMachineStateCaptureBudget', 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED',
+    'captureTargetMilliseconds', 'hardCeilingMilliseconds', 'phaseCeilingMilliseconds',
+    'Get-G04DCMsiComponentRegistrationState', 'RegistryView]::Registry64',
+    'canonical-state-finalization', 'state-serialization', 'Write-G04DCBoundedMachineStateJson',
+    'Get-G04DCBoundedFileSha256', 'Invoke-G04DCBoundedCaptureProcess',
+    'DOCUMENT-STUDIO-G04DC-CANONICAL-HASH-OWNED', 'Canonical hash input exceeded the 128 MiB ceiling',
+    'KillOnCloseJob', 'TerminateAndVerify', 'Assert-G04DCMachineStatePerformanceEvidence',
+]:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C bounded machine-state boundary is missing: {boundary}')
 for identity in [
     '372948992', 'f15ba07bfcb0186986cf3171063506f5d207c11f8cc051ba0d135209e9e915f9',
     '{3B467719-C25B-478C-8F4C-8E2EDA0E2093}', '{4B17E523-5D91-4E69-BD96-7FD81CFA81BB}',

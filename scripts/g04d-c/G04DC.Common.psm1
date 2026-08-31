@@ -1,6 +1,113 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (!('DocumentStudio.G04DC.KillOnCloseJob' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace DocumentStudio.G04DC {
+    public sealed class KillOnCloseJob : IDisposable {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BasicLimitInformation {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoCounters {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ExtendedLimitInformation {
+            public BasicLimitInformation BasicLimitInformation;
+            public IoCounters IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        private const uint KillOnJobClose = 0x00002000;
+        private IntPtr handle;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(IntPtr job, int informationClass, IntPtr information, uint informationLength);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        public KillOnCloseJob() {
+            handle = CreateJobObject(IntPtr.Zero, null);
+            if (handle == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject");
+            ExtendedLimitInformation limits = new ExtendedLimitInformation();
+            limits.BasicLimitInformation.LimitFlags = KillOnJobClose;
+            IntPtr buffer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(ExtendedLimitInformation)));
+            try {
+                Marshal.StructureToPtr(limits, buffer, false);
+                if (!SetInformationJobObject(handle, 9, buffer, (uint)Marshal.SizeOf(typeof(ExtendedLimitInformation)))) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetInformationJobObject");
+                }
+            }
+            catch {
+                CloseHandle(handle);
+                handle = IntPtr.Zero;
+                throw;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
+        public void Assign(Process process) {
+            if (process == null) throw new ArgumentNullException("process");
+            if (process.HasExited) return;
+            if (!AssignProcessToJobObject(handle, process.Handle) && !process.HasExited) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject");
+            }
+        }
+
+        public void TerminateAndVerify(Process process, int waitMilliseconds) {
+            if (process == null || process.HasExited) return;
+            if (!TerminateJobObject(handle, 0xD5040003) && !process.HasExited) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "TerminateJobObject");
+            }
+            if (!process.WaitForExit(waitMilliseconds) || !process.HasExited) {
+                throw new InvalidOperationException("Owned helper did not reach terminal exit.");
+            }
+        }
+
+        public void Dispose() {
+            if (handle != IntPtr.Zero) {
+                if (!CloseHandle(handle)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CloseHandle(job)");
+                handle = IntPtr.Zero;
+            }
+        }
+    }
+}
+'@
+}
+
+$script:G04DCCommonModulePath = $PSCommandPath
+
 $script:G04DCExpectedMsi = [ordered]@{
     Url = 'https://download.documentfoundation.org/libreoffice/stable/26.2.5/win/x86_64/LibreOffice_26.2.5_Win_x86-64.msi'
     FileName = 'LibreOffice_26.2.5_Win_x86-64.msi'
@@ -451,15 +558,117 @@ function Assert-G04DCFailedDownloadCleanup {
 
 function Get-G04DCCanonicalHash {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$Rows)
-    $canonical = (($Rows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 12 }) | Sort-Object) -join "`n"
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonical)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$Rows,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'canonical-hash'
+    )
+    if (!$CaptureContext) {
+        $canonical = (($Rows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 12 }) | Sort-Object) -join "`n"
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonical)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    }
+
+    Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount 0
+    if ($Rows.Count -gt 1000000) { throw '[MACHINE_STATE_CAPTURE_FAILED] Canonical hash exceeded the bounded row ceiling.' }
+    $temporaryParent = if (![string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
+        [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+    }
+    else { [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') }
+    $ownedRoot = Join-Path $temporaryParent ('document-studio-g04dc-canonical-hash-' + [guid]::NewGuid().ToString('N'))
+    $markerPath = Join-Path $ownedRoot '.g04d-c-owned-canonical-hash'
+    $inputPath = Join-Path $ownedRoot 'rows.ndjson'
+    $markerText = "DOCUMENT-STUDIO-G04DC-CANONICAL-HASH-OWNED`n"
+    $ownedRootCreated = $false
     try {
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        [IO.Directory]::CreateDirectory($ownedRoot) | Out-Null
+        $ownedRootCreated = $true
+        [IO.File]::WriteAllText($markerPath, $markerText, [Text.UTF8Encoding]::new($false))
+        $stream = [IO.FileStream]::new($inputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $writer = $null
+        try {
+            $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+            try {
+                $totalInputBytes = 0L
+                for ($index = 0; $index -lt $Rows.Count; $index++) {
+                    Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $index
+                    $line = $Rows[$index] | ConvertTo-Json -Compress -Depth 12
+                    $lineBytes = [Text.Encoding]::UTF8.GetByteCount($line)
+                    if ($lineBytes -gt 16777216) { throw '[MACHINE_STATE_CAPTURE_FAILED] Canonical hash row exceeded the 16 MiB ceiling.' }
+                    $totalInputBytes += $lineBytes + 2L
+                    if ($totalInputBytes -gt 134217728) { throw '[MACHINE_STATE_CAPTURE_FAILED] Canonical hash input exceeded the 128 MiB ceiling.' }
+                    $writer.WriteLine($line)
+                    if (($index + 1) % 128 -eq 0 -or $index + 1 -eq $Rows.Count) {
+                        Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ($index + 1) -WriteProgress
+                    }
+                }
+                $writer.Flush()
+                $stream.Flush($true)
+            }
+            finally { if ($writer) { $writer.Dispose() } }
+        }
+        catch { $stream.Dispose(); throw }
+
+        $hashEvidence = @(Invoke-G04DCBoundedCaptureProcess -Context $CaptureContext -Phase $CapturePhase -ScriptBlock {
+            param([string]$InputPath, [string]$MarkerPath, [string]$ExpectedMarker)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $inputItem = Get-Item -LiteralPath $InputPath -Force -ErrorAction Stop
+            $markerItem = Get-Item -LiteralPath $MarkerPath -Force -ErrorAction Stop
+            if ($inputItem.PSIsContainer -or $markerItem.PSIsContainer -or
+                [bool]($inputItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                [bool]($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                $inputItem.DirectoryName -cne $markerItem.DirectoryName -or
+                [long]$inputItem.Length -gt 134217728 -or
+                [IO.File]::ReadAllText($MarkerPath, [Text.UTF8Encoding]::new($false)) -cne $ExpectedMarker) {
+                throw '[MACHINE_STATE_CAPTURE_FAILED] Canonical hash helper input is not marker-owned or bounded.'
+            }
+            $sortedRows = @(Get-Content -LiteralPath $InputPath -Encoding UTF8 | Sort-Object)
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try {
+                $newline = [byte[]]@(10)
+                for ($index = 0; $index -lt $sortedRows.Count; $index++) {
+                    if ($index -ne 0) { [void]$sha.TransformBlock($newline, 0, 1, $newline, 0) }
+                    $bytes = [Text.Encoding]::UTF8.GetBytes([string]$sortedRows[$index])
+                    if ($bytes.Length -ne 0) { [void]$sha.TransformBlock($bytes, 0, $bytes.Length, $bytes, 0) }
+                }
+                [void]$sha.TransformFinalBlock([byte[]]::new(0), 0, 0)
+                [pscustomobject][ordered]@{
+                    rowCount = $sortedRows.Count
+                    sha256 = ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+                }
+            }
+            finally { $sha.Dispose() }
+        } -ArgumentList @($inputPath, $markerPath, $markerText) -ItemCount $Rows.Count)
+        if ($hashEvidence.Count -ne 1 -or [long]$hashEvidence[0].rowCount -ne $Rows.Count -or [string]$hashEvidence[0].sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw '[MACHINE_STATE_CAPTURE_FAILED] Canonical hash helper returned invalid evidence.'
+        }
+        Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $Rows.Count
+        return [string]$hashEvidence[0].sha256
     }
     finally {
-        $sha.Dispose()
+        if ($ownedRootCreated) {
+            try {
+                $rootItem = Get-Item -LiteralPath $ownedRoot -Force -ErrorAction Stop
+                $markerItem = Get-Item -LiteralPath $markerPath -Force -ErrorAction Stop
+                if (!$rootItem.PSIsContainer -or [bool]($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                    $markerItem.PSIsContainer -or [bool]($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                    [IO.File]::ReadAllText($markerPath, [Text.UTF8Encoding]::new($false)) -cne $markerText) {
+                    throw 'canonical hash ownership mismatch'
+                }
+                foreach ($knownPath in @($inputPath, $markerPath)) {
+                    if (Test-Path -LiteralPath $knownPath) {
+                        $knownItem = Get-Item -LiteralPath $knownPath -Force
+                        if ($knownItem.PSIsContainer -or [bool]($knownItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'noncanonical hash entry' }
+                        [IO.File]::Delete($knownPath)
+                    }
+                }
+                [IO.Directory]::Delete($ownedRoot, $false)
+            }
+            catch { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Canonical hash helper path cleanup failed ($($_.Exception.GetType().FullName))." }
+        }
     }
 }
 
@@ -1520,6 +1729,534 @@ function Get-G04DCRegistryDefaultValueState {
     return [pscustomobject]$defaultState
 }
 
+function New-G04DCMachineStateCaptureContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')] [string]$CaptureLabel,
+        [AllowNull()] [string]$ProgressPath,
+        [AllowNull()] [string]$PerformancePath,
+        [ValidateRange(1, 3600000)] [long]$CaptureTargetMilliseconds = 480000,
+        [ValidateRange(1, 3600000)] [long]$OverallBudgetMilliseconds = 720000,
+        [ValidateRange(1, 3600000)] [long]$PhaseBudgetMilliseconds = 240000
+    )
+    if ($CaptureTargetMilliseconds -gt $OverallBudgetMilliseconds -or $PhaseBudgetMilliseconds -gt $OverallBudgetMilliseconds) {
+        throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Capture target or phase ceiling exceeds the overall ceiling.'
+    }
+    $writer = $null
+    if (![string]::IsNullOrWhiteSpace($ProgressPath)) {
+        $progressCanonical = [IO.Path]::GetFullPath($ProgressPath)
+        $parent = Split-Path -Parent $progressCanonical
+        if (!(Test-Path -LiteralPath $parent -PathType Container)) {
+            throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Progress evidence parent directory is absent.'
+        }
+        $stream = [IO.FileStream]::new($progressCanonical, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        try { $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false)) }
+        catch { $stream.Dispose(); throw }
+    }
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        captureId = [guid]::NewGuid().ToString('D')
+        captureLabel = $CaptureLabel
+        progressPath = if ([string]::IsNullOrWhiteSpace($ProgressPath)) { $null } else { [IO.Path]::GetFullPath($ProgressPath) }
+        performancePath = if ([string]::IsNullOrWhiteSpace($PerformancePath)) { $null } else { [IO.Path]::GetFullPath($PerformancePath) }
+        captureTargetMilliseconds = $CaptureTargetMilliseconds
+        overallBudgetMilliseconds = $OverallBudgetMilliseconds
+        phaseBudgetMilliseconds = $PhaseBudgetMilliseconds
+        stopwatch = $stopwatch
+        writer = $writer
+        sequence = 0L
+        activePhase = $null
+        activePhaseStartMilliseconds = 0L
+        activeItemCount = 0L
+        phases = [System.Collections.Generic.List[object]]::new()
+        metrics = [ordered]@{}
+        completed = $false
+    }
+}
+
+function Write-G04DCMachineStateProgressRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [ValidateSet('phase-start', 'phase-progress', 'phase-end', 'capture-end', 'capture-failure')] [string]$Event,
+        [AllowNull()] [string]$Phase,
+        [Parameter(Mandatory = $true)] [ValidateSet('running', 'success', 'failed', 'budget-exceeded')] [string]$Status,
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0
+    )
+    if (!$Context.writer) { return }
+    $Context.sequence = [long]$Context.sequence + 1
+    $record = [ordered]@{
+        schemaVersion = 1
+        captureId = [string]$Context.captureId
+        captureLabel = [string]$Context.captureLabel
+        sequence = [long]$Context.sequence
+        event = $Event
+        phase = if ([string]::IsNullOrWhiteSpace($Phase)) { $null } else { $Phase }
+        elapsedMilliseconds = [long]$Context.stopwatch.ElapsedMilliseconds
+        itemCount = $ItemCount
+        status = $Status
+    }
+    $line = $record | ConvertTo-Json -Compress -Depth 4
+    $Context.writer.WriteLine($line)
+    $Context.writer.Flush()
+    $Context.writer.BaseStream.Flush($true)
+}
+
+function Start-G04DCMachineStatePhase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')] [string]$Phase
+    )
+    if ($Context.completed -or ![string]::IsNullOrWhiteSpace([string]$Context.activePhase)) {
+        throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Machine-state phase lifecycle is invalid.'
+    }
+    $Context.activePhase = $Phase
+    $Context.activePhaseStartMilliseconds = [long]$Context.stopwatch.ElapsedMilliseconds
+    $Context.activeItemCount = 0L
+    Write-G04DCMachineStateProgressRecord -Context $Context -Event 'phase-start' -Phase $Phase -Status 'running' -ItemCount 0
+    Assert-G04DCMachineStateCaptureBudget -Context $Context -Phase $Phase -ItemCount 0
+}
+
+function Assert-G04DCMachineStateCaptureBudget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [string]$Phase,
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0,
+        [switch]$WriteProgress
+    )
+    if ([string]$Context.activePhase -cne $Phase) {
+        throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Deadline check does not match the active phase.'
+    }
+    $Context.activeItemCount = $ItemCount
+    $elapsed = [long]$Context.stopwatch.ElapsedMilliseconds
+    $phaseElapsed = $elapsed - [long]$Context.activePhaseStartMilliseconds
+    if ($elapsed -gt [long]$Context.overallBudgetMilliseconds -or $phaseElapsed -gt [long]$Context.phaseBudgetMilliseconds) {
+        Write-G04DCMachineStateProgressRecord -Context $Context -Event 'phase-progress' -Phase $Phase -Status 'budget-exceeded' -ItemCount $ItemCount
+        throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=$Phase elapsedMilliseconds=$elapsed phaseElapsedMilliseconds=$phaseElapsed itemCount=$ItemCount"
+    }
+    if ($WriteProgress) {
+        Write-G04DCMachineStateProgressRecord -Context $Context -Event 'phase-progress' -Phase $Phase -Status 'running' -ItemCount $ItemCount
+    }
+}
+
+function Get-G04DCMachineStateRemainingBudgetMilliseconds {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [string]$Phase,
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0
+    )
+    Assert-G04DCMachineStateCaptureBudget -Context $Context -Phase $Phase -ItemCount $ItemCount
+    $elapsed = [long]$Context.stopwatch.ElapsedMilliseconds
+    $phaseElapsed = $elapsed - [long]$Context.activePhaseStartMilliseconds
+    $overallRemaining = [long]$Context.overallBudgetMilliseconds - $elapsed
+    $phaseRemaining = [long]$Context.phaseBudgetMilliseconds - $phaseElapsed
+    return [Math]::Max(1L, [Math]::Min($overallRemaining, $phaseRemaining))
+}
+
+function Invoke-G04DCBoundedCaptureProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [string]$Phase,
+        [Parameter(Mandatory = $true)] [scriptblock]$ScriptBlock,
+        [AllowEmptyCollection()] [string[]]$ArgumentList = @(),
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0
+    )
+    $argumentJson = ConvertTo-Json -InputObject ([pscustomobject]@{ arguments = [object[]]@($ArgumentList) }) -Compress
+    if ($argumentJson.Length -gt 16384) { throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Bounded helper argument list is too large.' }
+    $argumentBase64 = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($argumentJson))
+    $temporaryParent = if (![string]::IsNullOrWhiteSpace($env:RUNNER_TEMP) -and (Test-Path -LiteralPath $env:RUNNER_TEMP -PathType Container)) {
+        [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+    }
+    else { [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') }
+    $ownedRoot = Join-Path $temporaryParent ('document-studio-g04dc-capture-helper-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($ownedRoot) | Out-Null
+    $markerPath = Join-Path $ownedRoot '.g04d-c-owned-helper'
+    $operationPath = Join-Path $ownedRoot 'operation.ps1'
+    $wrapperPath = Join-Path $ownedRoot 'wrapper.ps1'
+    $outputPath = Join-Path $ownedRoot 'output.clixml'
+    $markerText = "DOCUMENT-STUDIO-G04DC-CAPTURE-HELPER-OWNED`n"
+    [IO.File]::WriteAllText($markerPath, $markerText, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($operationPath, $ScriptBlock.ToString(), [Text.UTF8Encoding]::new($false))
+    $wrapperSource = @'
+param(
+    [Parameter(Mandatory = $true)] [string]$OperationPath,
+    [Parameter(Mandatory = $true)] [string]$OutputPath,
+    [Parameter(Mandatory = $true)] [string]$ArgumentJsonBase64
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$json = [Text.UTF8Encoding]::new($false).GetString([Convert]::FromBase64String($ArgumentJsonBase64))
+$decoded = $json | ConvertFrom-Json
+[object[]]$argumentList = @($decoded.arguments)
+$operation = [scriptblock]::Create([IO.File]::ReadAllText($OperationPath, [Text.UTF8Encoding]::new($false)))
+$result = @(& $operation @argumentList)
+$result | Export-Clixml -LiteralPath $OutputPath -Depth 20 -Encoding UTF8
+'@
+    [IO.File]::WriteAllText($wrapperPath, $wrapperSource, [Text.UTF8Encoding]::new($false))
+    $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $powershellPath
+    $startInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$wrapperPath`" -OperationPath `"$operationPath`" -OutputPath `"$outputPath`" -ArgumentJsonBase64 $argumentBase64"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $job = $null
+    $started = $false
+    $output = @()
+    try {
+        $job = [DocumentStudio.G04DC.KillOnCloseJob]::new()
+        if (!$process.Start()) { throw '[MACHINE_STATE_CAPTURE_FAILED] Bounded capture helper did not start.' }
+        $started = $true
+        $job.Assign($process)
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $remaining = [int][Math]::Min([int]::MaxValue, (Get-G04DCMachineStateRemainingBudgetMilliseconds -Context $Context -Phase $Phase -ItemCount $ItemCount))
+        if (!$process.WaitForExit($remaining)) {
+            try { $job.TerminateAndVerify($process, 5000) }
+            catch { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Bounded capture helper termination was not proven ($($_.Exception.GetType().FullName))." }
+            $elapsed = [long]$Context.stopwatch.ElapsedMilliseconds
+            $phaseElapsed = $elapsed - [long]$Context.activePhaseStartMilliseconds
+            Write-G04DCMachineStateProgressRecord -Context $Context -Event 'phase-progress' -Phase $Phase -Status 'budget-exceeded' -ItemCount $ItemCount
+            throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=$Phase elapsedMilliseconds=$elapsed phaseElapsedMilliseconds=$phaseElapsed itemCount=$ItemCount"
+        }
+        $process.WaitForExit()
+        [void]$stdoutTask.Result
+        [void]$stderrTask.Result
+        if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+            throw "[MACHINE_STATE_CAPTURE_FAILED] Bounded capture helper failed (exit=$($process.ExitCode))."
+        }
+        $outputItem = Get-Item -LiteralPath $outputPath -Force
+        if ([bool]($outputItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or [long]$outputItem.Length -gt 134217728) {
+            throw '[MACHINE_STATE_CAPTURE_FAILED] Bounded capture helper output is noncanonical or oversized.'
+        }
+        $output = @(Import-Clixml -LiteralPath $outputPath)
+        Assert-G04DCMachineStateCaptureBudget -Context $Context -Phase $Phase -ItemCount ($ItemCount + $output.Count)
+    }
+    finally {
+        if ($started -and !$process.HasExited) {
+            try { $job.TerminateAndVerify($process, 5000) }
+            catch { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Bounded capture helper final termination was not proven ($($_.Exception.GetType().FullName))." }
+        }
+        $process.Dispose()
+        if ($job) {
+            try { $job.Dispose() }
+            catch { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Bounded capture helper job cleanup failed ($($_.Exception.GetType().FullName))." }
+        }
+        try {
+            if ((Get-Content -LiteralPath $markerPath -Raw) -cne $markerText) { throw 'marker mismatch' }
+            foreach ($knownPath in @($outputPath, $wrapperPath, $operationPath, $markerPath)) {
+                if (Test-Path -LiteralPath $knownPath) {
+                    $knownItem = Get-Item -LiteralPath $knownPath -Force
+                    if ($knownItem.PSIsContainer -or [bool]($knownItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'noncanonical helper entry' }
+                    [IO.File]::Delete($knownPath)
+                }
+            }
+            [IO.Directory]::Delete($ownedRoot, $false)
+        }
+        catch {
+            throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Bounded capture helper path cleanup failed ($($_.Exception.GetType().FullName))."
+        }
+    }
+    return $output
+}
+
+function Get-G04DCBoundedFileSha256 {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] $CaptureContext,
+        [Parameter(Mandatory = $true)] [string]$CapturePhase,
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$ReadAdapter
+    )
+    if (!$ReadAdapter) {
+        $ReadAdapter = @{
+            Open = { param([string]$CandidatePath) [IO.FileStream]::new($CandidatePath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 1048576, [IO.FileOptions]::SequentialScan) }
+            Read = { param($Handle, [byte[]]$Buffer) $Handle.Read($Buffer, 0, $Buffer.Length) }
+            Close = { param($Handle) $Handle.Dispose() }
+        }
+    }
+    foreach ($operation in @('Open', 'Read', 'Close')) {
+        if (!$ReadAdapter.ContainsKey($operation) -or $ReadAdapter[$operation] -isnot [scriptblock]) {
+            throw '[MACHINE_STATE_CAPTURE_FAILED] Bounded hash adapter is incomplete.'
+        }
+    }
+    $stream = $null
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $buffer = [byte[]]::new(1048576)
+    $bytesReadTotal = 0L
+    $nextProgress = 67108864L
+    try {
+        $stream = & $ReadAdapter.Open ([IO.Path]::GetFullPath($Path))
+        while ($true) {
+            $read = [int](& $ReadAdapter.Read $stream $buffer)
+            if ($read -lt 0 -or $read -gt $buffer.Length) { throw '[MACHINE_STATE_CAPTURE_FAILED] Bounded hash adapter returned an invalid read length.' }
+            if ($read -eq 0) { break }
+            [void]$sha256.TransformBlock($buffer, 0, $read, $null, 0)
+            $bytesReadTotal += $read
+            $writeProgress = $bytesReadTotal -ge $nextProgress
+            Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $ItemCount -WriteProgress:$writeProgress
+            if ($writeProgress) { $nextProgress = $bytesReadTotal + 67108864L }
+        }
+        [void]$sha256.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        return ([BitConverter]::ToString($sha256.Hash).Replace('-', '').ToLowerInvariant())
+    }
+    finally {
+        if ($null -ne $stream) { & $ReadAdapter.Close $stream }
+        $sha256.Dispose()
+    }
+}
+
+function Write-G04DCBoundedJsonString {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [IO.StreamWriter]$Writer,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$Value,
+        [Parameter(Mandatory = $true)] $CaptureContext,
+        [Parameter(Mandatory = $true)] [string]$CapturePhase,
+        [Parameter(Mandatory = $true)] [ref]$TokenCount
+    )
+    $Writer.Write('"')
+    for ($index = 0; $index -lt $Value.Length; $index++) {
+        $character = $Value[$index]
+        $code = [int]$character
+        switch ($code) {
+            8 { $Writer.Write('\b'); break }
+            9 { $Writer.Write('\t'); break }
+            10 { $Writer.Write('\n'); break }
+            12 { $Writer.Write('\f'); break }
+            13 { $Writer.Write('\r'); break }
+            34 { $Writer.Write('\"'); break }
+            92 { $Writer.Write('\\'); break }
+            default {
+                if ($code -lt 32) { $Writer.Write(('\u{0:x4}' -f $code)) }
+                else { $Writer.Write($character) }
+            }
+        }
+        if (($index + 1) % 4096 -eq 0) {
+            Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$TokenCount.Value)
+        }
+    }
+    $Writer.Write('"')
+}
+
+function Write-G04DCBoundedJsonValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [IO.StreamWriter]$Writer,
+        [AllowNull()] $Value,
+        [Parameter(Mandatory = $true)] $CaptureContext,
+        [Parameter(Mandatory = $true)] [string]$CapturePhase,
+        [Parameter(Mandatory = $true)] [ref]$TokenCount,
+        [ValidateRange(0, 20)] [int]$Depth = 0
+    )
+    if ($Depth -gt 20) { throw '[MACHINE_STATE_CAPTURE_FAILED] Machine-state JSON exceeded the bounded depth.' }
+    $TokenCount.Value = [long]$TokenCount.Value + 1
+    if ([long]$TokenCount.Value % 1024 -eq 0) {
+        Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$TokenCount.Value) -WriteProgress
+    }
+    if ($null -eq $Value) { $Writer.Write('null'); return }
+    if ($Value -is [string] -or $Value -is [char] -or $Value -is [guid] -or $Value -is [datetime]) {
+        $text = if ($Value -is [datetime]) { ([datetime]$Value).ToString('o') } else { [string]$Value }
+        Write-G04DCBoundedJsonString -Writer $Writer -Value $text -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount
+        return
+    }
+    if ($Value -is [bool]) { $Writer.Write($(if ([bool]$Value) { 'true' } else { 'false' })); return }
+    if ($Value.GetType().IsEnum) {
+        Write-G04DCBoundedJsonString -Writer $Writer -Value ([string]$Value) -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount
+        return
+    }
+    $typeCode = [Type]::GetTypeCode($Value.GetType())
+    if ($typeCode -in @(
+        [TypeCode]::Byte, [TypeCode]::SByte, [TypeCode]::Int16, [TypeCode]::UInt16,
+        [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64,
+        [TypeCode]::Single, [TypeCode]::Double, [TypeCode]::Decimal
+    )) {
+        if (($Value -is [double] -and ([double]::IsNaN($Value) -or [double]::IsInfinity($Value))) -or
+            ($Value -is [single] -and ([single]::IsNaN($Value) -or [single]::IsInfinity($Value)))) {
+            throw '[MACHINE_STATE_CAPTURE_FAILED] Machine-state JSON contains a non-finite number.'
+        }
+        $Writer.Write(([IFormattable]$Value).ToString($null, [Globalization.CultureInfo]::InvariantCulture))
+        return
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        $Writer.Write('{')
+        $first = $true
+        foreach ($key in $Value.Keys) {
+            if (!$first) { $Writer.Write(',') }
+            $first = $false
+            Write-G04DCBoundedJsonString -Writer $Writer -Value ([string]$key) -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount
+            $Writer.Write(':')
+            Write-G04DCBoundedJsonValue -Writer $Writer -Value $Value[$key] -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount -Depth ($Depth + 1)
+        }
+        $Writer.Write('}')
+        return
+    }
+    if ($Value -is [Collections.IEnumerable]) {
+        $Writer.Write('[')
+        $first = $true
+        foreach ($entry in $Value) {
+            if (!$first) { $Writer.Write(',') }
+            $first = $false
+            Write-G04DCBoundedJsonValue -Writer $Writer -Value $entry -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount -Depth ($Depth + 1)
+        }
+        $Writer.Write(']')
+        return
+    }
+    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -in @('NoteProperty', 'Property', 'AliasProperty') })
+    if ($properties.Count -eq 0) { throw '[MACHINE_STATE_CAPTURE_FAILED] Machine-state JSON contains an unsupported value type.' }
+    $Writer.Write('{')
+    for ($propertyIndex = 0; $propertyIndex -lt $properties.Count; $propertyIndex++) {
+        if ($propertyIndex -ne 0) { $Writer.Write(',') }
+        $property = $properties[$propertyIndex]
+        Write-G04DCBoundedJsonString -Writer $Writer -Value ([string]$property.Name) -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount
+        $Writer.Write(':')
+        Write-G04DCBoundedJsonValue -Writer $Writer -Value $property.Value -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount $TokenCount -Depth ($Depth + 1)
+    }
+    $Writer.Write('}')
+}
+
+function Write-G04DCBoundedMachineStateJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)] $CaptureContext,
+        [Parameter(Mandatory = $true)] [string]$CapturePhase
+    )
+    $canonicalPath = [IO.Path]::GetFullPath($Path)
+    $parent = Split-Path -Parent $canonicalPath
+    if (!(Test-Path -LiteralPath $parent -PathType Container) -or (Test-Path -LiteralPath $canonicalPath)) {
+        throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Machine-state evidence path is absent or already exists.'
+    }
+    $temporaryPath = "$canonicalPath.$($CaptureContext.captureId).partial"
+    $stream = $null
+    $writer = $null
+    $tokenCount = 0L
+    try {
+        $stream = [IO.FileStream]::new($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false), 65536, $true)
+        Write-G04DCBoundedJsonValue -Writer $writer -Value $Value -CaptureContext $CaptureContext -CapturePhase $CapturePhase -TokenCount ([ref]$tokenCount)
+        $writer.WriteLine()
+        $writer.Flush()
+        $stream.Flush($true)
+        Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $tokenCount -WriteProgress
+        $writer.Dispose()
+        $writer = $null
+        $stream.Dispose()
+        $stream = $null
+        [IO.File]::Move($temporaryPath, $canonicalPath)
+    }
+    finally {
+        if ($writer) { $writer.Dispose() }
+        if ($stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force }
+    }
+}
+
+function Assert-G04DCMachineStatePerformanceEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [AllowNull()] [string]$RequiredPhase
+    )
+    $performance = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+    $phases = @($performance.phases)
+    if ([int]$performance.schemaVersion -ne 1 -or ![bool]$performance.passed -or
+        [long]$performance.totalElapsedMilliseconds -gt [long]$performance.hardCeilingMilliseconds -or
+        @($phases | Where-Object { [string]$_.status -cne 'success' -or [long]$_.elapsedMilliseconds -gt [long]$performance.phaseCeilingMilliseconds }).Count -ne 0 -or
+        (![string]::IsNullOrWhiteSpace($RequiredPhase) -and @($phases | Where-Object { [string]$_.phase -ceq $RequiredPhase }).Count -ne 1)) {
+        throw '[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=performance-gate elapsedMilliseconds=0 phaseElapsedMilliseconds=0 itemCount=0'
+    }
+    return $performance
+}
+
+function Complete-G04DCMachineStatePhase {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [string]$Phase,
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0
+    )
+    Assert-G04DCMachineStateCaptureBudget -Context $Context -Phase $Phase -ItemCount $ItemCount
+    $elapsed = [long]$Context.stopwatch.ElapsedMilliseconds
+    $phaseElapsed = $elapsed - [long]$Context.activePhaseStartMilliseconds
+    Write-G04DCMachineStateProgressRecord -Context $Context -Event 'phase-end' -Phase $Phase -Status 'success' -ItemCount $ItemCount
+    $Context.phases.Add([pscustomobject][ordered]@{
+        phase = $Phase
+        elapsedMilliseconds = $phaseElapsed
+        itemCount = $ItemCount
+        status = 'success'
+    })
+    $Context.activePhase = $null
+    $Context.activePhaseStartMilliseconds = 0L
+    $Context.activeItemCount = 0L
+}
+
+function Complete-G04DCMachineStateCapture {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Context,
+        [Parameter(Mandatory = $true)] [bool]$Passed,
+        [AllowNull()] [string]$FailureMessage
+    )
+    if ($Context.completed) { return }
+    if ($Passed -and [long]$Context.stopwatch.ElapsedMilliseconds -gt [long]$Context.overallBudgetMilliseconds) {
+        $elapsed = [long]$Context.stopwatch.ElapsedMilliseconds
+        throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=capture-success-gate elapsedMilliseconds=$elapsed phaseElapsedMilliseconds=0 itemCount=0"
+    }
+    $status = if ($FailureMessage -and $FailureMessage.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { 'budget-exceeded' } else { 'failed' }
+    if (![string]::IsNullOrWhiteSpace([string]$Context.activePhase)) {
+        $phase = [string]$Context.activePhase
+        $phaseElapsed = [long]$Context.stopwatch.ElapsedMilliseconds - [long]$Context.activePhaseStartMilliseconds
+        if (!$Passed) {
+            Write-G04DCMachineStateProgressRecord -Context $Context -Event 'phase-end' -Phase $phase -Status $status -ItemCount ([long]$Context.activeItemCount)
+            $Context.phases.Add([pscustomobject][ordered]@{
+                phase = $phase
+                elapsedMilliseconds = $phaseElapsed
+                itemCount = [long]$Context.activeItemCount
+                status = $status
+            })
+        }
+    }
+    $Context.stopwatch.Stop()
+    $terminalPhase = if (![string]::IsNullOrWhiteSpace([string]$Context.activePhase)) {
+        [string]$Context.activePhase
+    }
+    elseif ($FailureMessage -match 'phase=([a-z0-9-]+)') { $Matches[1] }
+    else { $null }
+    Write-G04DCMachineStateProgressRecord -Context $Context -Event $(if ($Passed) { 'capture-end' } else { 'capture-failure' }) -Phase $terminalPhase -Status $(if ($Passed) { 'success' } else { $status }) -ItemCount ([long]$Context.activeItemCount)
+    if (![string]::IsNullOrWhiteSpace([string]$Context.performancePath)) {
+        $performance = [ordered]@{
+            schemaVersion = 1
+            captureId = [string]$Context.captureId
+            captureLabel = [string]$Context.captureLabel
+            totalElapsedMilliseconds = [long]$Context.stopwatch.ElapsedMilliseconds
+            phases = @($Context.phases.ToArray())
+            metrics = [pscustomobject]$Context.metrics
+            captureTargetMilliseconds = [long]$Context.captureTargetMilliseconds
+            hardCeilingMilliseconds = [long]$Context.overallBudgetMilliseconds
+            phaseCeilingMilliseconds = [long]$Context.phaseBudgetMilliseconds
+            passed = $Passed
+            failurePhase = if ($Passed) { $null } else { $terminalPhase }
+        }
+        Write-G04DCJson -Path ([string]$Context.performancePath) -Value $performance
+    }
+    $Context.completed = $true
+    if ($Context.writer) {
+        $Context.writer.Dispose()
+        $Context.writer = $null
+    }
+}
+
 function ConvertTo-G04DCPackedGuid {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)] [string]$Guid)
@@ -1532,9 +2269,156 @@ function ConvertTo-G04DCPackedGuid {
     return (Reverse-G04DCText $parts[0]) + (Reverse-G04DCText $parts[1]) + (Reverse-G04DCText $parts[2]) + $swappedTail
 }
 
+function Get-G04DCMsiComponentRegistrationState {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()] [string[]]$ComponentCodes = @(),
+        [Parameter(Mandatory = $true)] [string]$PackedProductCode,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$AccessAdapter,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'msi-registration'
+    )
+    if ($PackedProductCode -notmatch '^[0-9A-F]{32}$') {
+        throw '[MSI_REGISTRATION_INVALID] Packed product code is malformed.'
+    }
+    if (!$AccessAdapter) {
+        $AccessAdapter = @{
+            OpenBaseRoot = {
+                param([string]$Scope)
+                $hive = if ($Scope -ceq 'system') { [Microsoft.Win32.RegistryHive]::LocalMachine } else { [Microsoft.Win32.RegistryHive]::CurrentUser }
+                $relative = if ($Scope -ceq 'system') {
+                    'SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components'
+                }
+                else {
+                    'SOFTWARE\Microsoft\Installer\Components'
+                }
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, [Microsoft.Win32.RegistryView]::Registry64)
+                try {
+                    $root = $base.OpenSubKey($relative, $false)
+                    [pscustomobject][ordered]@{ rootExists = $null -ne $root; handle = $root }
+                }
+                finally { $base.Dispose() }
+            }
+            OpenComponentKey = { param($RootHandle, [string]$PackedComponent) $RootHandle.OpenSubKey($PackedComponent, $false) }
+            GetValueNames = { param($Handle) @($Handle.GetValueNames()) }
+            GetValueKind = { param($Handle, [string]$Name) [string]$Handle.GetValueKind($Name) }
+            GetValue = {
+                param($Handle, [string]$Name)
+                $missing = [object]::new()
+                $observed = $Handle.GetValue($Name, $missing, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                [pscustomobject][ordered]@{ present = ![object]::ReferenceEquals($missing, $observed); value = $observed }
+            }
+            CloseKey = { param($Handle) if ($Handle -is [IDisposable]) { $Handle.Dispose() } }
+        }
+    }
+    foreach ($operation in @('OpenBaseRoot', 'OpenComponentKey', 'GetValueNames', 'GetValueKind', 'GetValue', 'CloseKey')) {
+        if (!$AccessAdapter.ContainsKey($operation) -or $AccessAdapter[$operation] -isnot [scriptblock]) {
+            throw '[MSI_REGISTRATION_CAPTURE_FAILED] MSI component registry adapter is incomplete.'
+        }
+    }
+
+    function Read-G04DCMsiComponentValueState($RootState, [string]$PackedComponent) {
+        if (!$RootState -or !$RootState.PSObject.Properties['rootExists'] -or !$RootState.PSObject.Properties['handle']) {
+            throw '[MSI_REGISTRATION_CAPTURE_FAILED] MSI component base-root state is invalid.'
+        }
+        if (![bool]$RootState.rootExists) {
+            return New-G04DCRegistryValueState -KeyExists $false -ValueName $PackedProductCode -ValuePresent $false
+        }
+        $handle = $null
+        try {
+            $handle = & $AccessAdapter.OpenComponentKey $RootState.handle $PackedComponent
+            if ($null -eq $handle) {
+                return New-G04DCRegistryValueState -KeyExists $false -ValueName $PackedProductCode -ValuePresent $false
+            }
+            $names = @(& $AccessAdapter.GetValueNames $handle)
+            if (!(Test-G04DCRegistryValueNamePresent -Names $names -ValueName $PackedProductCode)) {
+                return New-G04DCRegistryValueState -KeyExists $true -ValueName $PackedProductCode -ValuePresent $false
+            }
+            try {
+                $valueType = [string](& $AccessAdapter.GetValueKind $handle $PackedProductCode)
+                $valueResult = & $AccessAdapter.GetValue $handle $PackedProductCode
+            }
+            catch [System.IO.IOException] {
+                $namesAfterRace = @(& $AccessAdapter.GetValueNames $handle)
+                if (!(Test-G04DCRegistryValueNamePresent -Names $namesAfterRace -ValueName $PackedProductCode)) {
+                    return New-G04DCRegistryValueState -KeyExists $true -ValueName $PackedProductCode -ValuePresent $false
+                }
+                throw '[MSI_REGISTRATION_CAPTURE_FAILED] MSI component product value changed during classification.'
+            }
+            if (!$valueResult -or !$valueResult.PSObject.Properties['present']) {
+                throw '[MSI_REGISTRATION_CAPTURE_FAILED] MSI component registry adapter returned an invalid value state.'
+            }
+            if (![bool]$valueResult.present) {
+                $namesAfterRace = @(& $AccessAdapter.GetValueNames $handle)
+                if (!(Test-G04DCRegistryValueNamePresent -Names $namesAfterRace -ValueName $PackedProductCode)) {
+                    return New-G04DCRegistryValueState -KeyExists $true -ValueName $PackedProductCode -ValuePresent $false
+                }
+                throw '[MSI_REGISTRATION_CAPTURE_FAILED] MSI component product value changed during classification.'
+            }
+            $bounded = ConvertTo-G04DCBoundedRegistryValue -ValueType $valueType -Value $valueResult.value
+            return New-G04DCRegistryValueState -KeyExists $true -ValueName $PackedProductCode -ValuePresent $true -ValueType $valueType -Value $bounded
+        }
+        finally {
+            if ($null -ne $handle) { & $AccessAdapter.CloseKey $handle }
+        }
+    }
+
+    $systemRoot = $null
+    $userRoot = $null
+    try {
+        $systemRoot = & $AccessAdapter.OpenBaseRoot 'system'
+        $userRoot = & $AccessAdapter.OpenBaseRoot 'user'
+        $records = [System.Collections.Generic.List[object]]::new()
+        # Preserve the legacy `Where-Object { $_ }` contract exactly: null and
+        # empty strings are absent inputs, while whitespace is malformed and
+        # must reach ConvertTo-G04DCPackedGuid so capture fails closed.
+        $orderedCodes = @($ComponentCodes | Where-Object { $_ } | Sort-Object -Unique)
+        for ($index = 0; $index -lt $orderedCodes.Count; $index++) {
+            $componentCode = [string]$orderedCodes[$index]
+            $packedComponent = ConvertTo-G04DCPackedGuid -Guid $componentCode
+            $systemPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components\$packedComponent"
+            $userPath = "Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Installer\Components\$packedComponent"
+            $systemValueState = Read-G04DCMsiComponentValueState -RootState $systemRoot -PackedComponent $packedComponent
+            $userValueState = Read-G04DCMsiComponentValueState -RootState $userRoot -PackedComponent $packedComponent
+            $records.Add([pscustomobject][ordered]@{
+                componentCode = $componentCode
+                packedComponent = $packedComponent
+                systemPath = $systemPath
+                systemProductValuePresent = [bool]$systemValueState.valuePresent
+                systemProductValueState = $systemValueState
+                userPath = $userPath
+                userProductValuePresent = [bool]$userValueState.valuePresent
+                userProductValueState = $userValueState
+            })
+            if ($CaptureContext -and (($index + 1) % 64 -eq 0 -or $index + 1 -eq $orderedCodes.Count)) {
+                Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ($index + 1) -WriteProgress
+            }
+        }
+        return @($records.ToArray())
+    }
+    catch {
+        if ($_.Exception.Message.StartsWith('[MSI_REGISTRATION_', [StringComparison]::Ordinal) -or
+            $_.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_', [StringComparison]::Ordinal)) { throw }
+        throw "[MSI_REGISTRATION_CAPTURE_FAILED] Read-only MSI component classification failed ($($_.Exception.GetType().FullName))."
+    }
+    finally {
+        foreach ($rootState in @($userRoot, $systemRoot)) {
+            if ($rootState -and $rootState.PSObject.Properties['handle'] -and $null -ne $rootState.handle) {
+                try { & $AccessAdapter.CloseKey $rootState.handle }
+                catch { throw "[MSI_REGISTRATION_CAPTURE_FAILED] MSI component base-root cleanup failed ($($_.Exception.GetType().FullName))." }
+            }
+        }
+    }
+}
+
 function Get-G04DCMsiRegistrationState {
     [CmdletBinding()]
-    param([AllowEmptyCollection()] [string[]]$ComponentCodes = @())
+    param(
+        [AllowEmptyCollection()] [string[]]$ComponentCodes = @(),
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$ComponentAccessAdapter,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'msi-registration'
+    )
     $expected = Get-G04DCExpectedMsi
     $packedProduct = ConvertTo-G04DCPackedGuid -Guid $expected.ProductCode
     $packedUpgrade = ConvertTo-G04DCPackedGuid -Guid $expected.UpgradeCode
@@ -1545,7 +2429,24 @@ function Get-G04DCMsiRegistrationState {
     }
     finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer) }
     $localPackageItem = if ($localPackage) { Get-Item -LiteralPath $localPackage -Force -ErrorAction SilentlyContinue } else { $null }
-    $localPackageSignature = if ($localPackageItem -and !$localPackageItem.PSIsContainer) { Get-G04DCAuthenticodeEvidence -Path $localPackageItem.FullName } else { $null }
+    $localPackageSignature = if ($localPackageItem -and !$localPackageItem.PSIsContainer) {
+        if ($CaptureContext) {
+            $signatureRows = @(Invoke-G04DCBoundedCaptureProcess -Context $CaptureContext -Phase $CapturePhase -ScriptBlock {
+                param([string]$CommonModulePath, [string]$CandidatePath)
+                Import-Module $CommonModulePath -Force
+                Get-G04DCAuthenticodeEvidence -Path $CandidatePath
+            } -ArgumentList @($script:G04DCCommonModulePath, $localPackageItem.FullName))
+            if ($signatureRows.Count -ne 1) { throw '[MSI_REGISTRATION_CAPTURE_FAILED] Cached-package Authenticode helper returned an invalid result count.' }
+            $signatureRows[0]
+        }
+        else { Get-G04DCAuthenticodeEvidence -Path $localPackageItem.FullName }
+    }
+    else { $null }
+    $localPackageSha256 = if ($localPackageItem -and !$localPackageItem.PSIsContainer) {
+        if ($CaptureContext) { Get-G04DCBoundedFileSha256 -Path $localPackageItem.FullName -CaptureContext $CaptureContext -CapturePhase $CapturePhase }
+        else { Get-G04DCSha256 -Path $localPackageItem.FullName }
+    }
+    else { $null }
     $productRegistryPaths = @(
         "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\Products\$packedProduct",
         "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\Features\$packedProduct",
@@ -1558,24 +2459,14 @@ function Get-G04DCMsiRegistrationState {
     })
     $upgradePath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Installer\UpgradeCodes\$packedUpgrade"
     $upgradeValueState = Get-G04DCRegistryValueState -Path $upgradePath -ValueName $packedProduct
-    $componentRegistrations = @($ComponentCodes | Where-Object { $_ } | Sort-Object -Unique | ForEach-Object {
-        $componentCode = $_
-        $packedComponent = ConvertTo-G04DCPackedGuid -Guid $componentCode
-        $systemPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components\$packedComponent"
-        $userPath = "Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Installer\Components\$packedComponent"
-        $systemValueState = Get-G04DCRegistryValueState -Path $systemPath -ValueName $packedProduct
-        $userValueState = Get-G04DCRegistryValueState -Path $userPath -ValueName $packedProduct
-        [pscustomobject][ordered]@{
-            componentCode = $componentCode
-            packedComponent = $packedComponent
-            systemPath = $systemPath
-            systemProductValuePresent = [bool]$systemValueState.valuePresent
-            systemProductValueState = $systemValueState
-            userPath = $userPath
-            userProductValuePresent = [bool]$userValueState.valuePresent
-            userProductValueState = $userValueState
-        }
-    })
+    $componentArguments = @{
+        ComponentCodes = $ComponentCodes
+        PackedProductCode = $packedProduct
+        CaptureContext = $CaptureContext
+        CapturePhase = $CapturePhase
+    }
+    if ($ComponentAccessAdapter) { $componentArguments.AccessAdapter = $ComponentAccessAdapter }
+    $componentRegistrations = @(Get-G04DCMsiComponentRegistrationState @componentArguments)
     return [pscustomobject][ordered]@{
         productCode = $expected.ProductCode
         packedProductCode = $packedProduct
@@ -1593,7 +2484,7 @@ function Get-G04DCMsiRegistrationState {
             regularFile = [bool]($localPackageItem -and !$localPackageItem.PSIsContainer)
             reparsePoint = if ($localPackageItem) { [bool]($localPackageItem.Attributes -band [IO.FileAttributes]::ReparsePoint) } else { $false }
             sizeBytes = if ($localPackageItem -and !$localPackageItem.PSIsContainer) { [long]$localPackageItem.Length } else { 0 }
-            sha256 = if ($localPackageItem -and !$localPackageItem.PSIsContainer) { Get-G04DCSha256 -Path $localPackageItem.FullName } else { $null }
+            sha256 = $localPackageSha256
             authenticode = $localPackageSignature
         }
     }
@@ -1648,22 +2539,88 @@ function Get-G04DCRegistryValues {
     })
 }
 
+function ConvertFrom-G04DCNativeTextRows {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string]$Text)
+    if ($Text.Length -eq 0) { return @() }
+    $splitRows = @($Text -split "`r?`n")
+    if ($splitRows.Count -ne 0 -and [string]$splitRows[$splitRows.Count - 1] -ceq '') {
+        $splitRows = @($splitRows | Select-Object -First ($splitRows.Count - 1))
+    }
+    return @($splitRows | ForEach-Object { ([string]$_).TrimEnd() })
+}
+
 function Get-G04DCRegistryTreeDigest {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)] [string]$NativePath)
+    param(
+        [Parameter(Mandatory = $true)] [string]$NativePath,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'registry-digest'
+    )
+    if ($NativePath.Length -gt 2048 -or $NativePath -notmatch '^HKEY_(LOCAL_MACHINE|CLASSES_ROOT)(\\|$)') {
+        throw '[MACHINE_STATE_CAPTURE_FAILED] Registry digest path is outside the bounded native model.'
+    }
     $reg = Join-Path $env:SystemRoot 'System32\reg.exe'
-    $rows = @(& $reg query $NativePath /s 2>&1 | ForEach-Object { ([string]$_).TrimEnd() })
-    if ($LASTEXITCODE -ne 0) { throw "[MACHINE_STATE_CAPTURE_FAILED] reg.exe could not seal $NativePath." }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $reg
+    $startInfo.Arguments = "query `"$NativePath`" /s"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $job = $null
+    try {
+        $job = [DocumentStudio.G04DC.KillOnCloseJob]::new()
+        if (!$process.Start()) { throw '[MACHINE_STATE_CAPTURE_FAILED] reg.exe did not start.' }
+        $job.Assign($process)
+        $timeout = if ($CaptureContext) {
+            [int][Math]::Min([int]::MaxValue, (Get-G04DCMachineStateRemainingBudgetMilliseconds -Context $CaptureContext -Phase $CapturePhase))
+        }
+        else { 240000 }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (!$process.WaitForExit($timeout)) {
+            try { $job.TerminateAndVerify($process, 5000) }
+            catch { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] reg.exe termination was not proven ($($_.Exception.GetType().FullName))." }
+            $elapsed = if ($CaptureContext) { [long]$CaptureContext.stopwatch.ElapsedMilliseconds } else { $timeout }
+            $phaseElapsed = if ($CaptureContext) { $elapsed - [long]$CaptureContext.activePhaseStartMilliseconds } else { $timeout }
+            if ($CaptureContext) {
+                Write-G04DCMachineStateProgressRecord -Context $CaptureContext -Event 'phase-progress' -Phase $CapturePhase -Status 'budget-exceeded' -ItemCount 0
+            }
+            throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=$CapturePhase elapsedMilliseconds=$elapsed phaseElapsedMilliseconds=$phaseElapsed itemCount=0"
+        }
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        if ($process.ExitCode -ne 0) { throw "[MACHINE_STATE_CAPTURE_FAILED] reg.exe could not seal $NativePath (exit=$($process.ExitCode))." }
+        $combined = $stdout + $(if ([string]::IsNullOrEmpty($stderr)) { '' } else { "`r`n$stderr" })
+        $rows = @(ConvertFrom-G04DCNativeTextRows -Text $combined)
+        if ($rows.Count -gt 1000000) { throw '[MACHINE_STATE_CAPTURE_FAILED] Registry digest exceeded the bounded row ceiling.' }
+        if ($CaptureContext) { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $rows.Count -WriteProgress }
+    }
+    finally {
+        $process.Dispose()
+        if ($job) {
+            try { $job.Dispose() }
+            catch { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] reg.exe job cleanup failed ($($_.Exception.GetType().FullName))." }
+        }
+    }
     return [pscustomobject][ordered]@{
         path = $NativePath
         rowCount = $rows.Count
-        sha256 = Get-G04DCCanonicalHash -Rows $rows
+        sha256 = Get-G04DCCanonicalHash -Rows $rows -CaptureContext $CaptureContext -CapturePhase $CapturePhase
     }
 }
 
 function Get-G04DCRegistryValueDigest {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)] [string[]]$Paths)
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$Paths,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'registry-value-digest'
+    )
     $rows = @($Paths | Sort-Object -Unique | ForEach-Object {
         $path = $_
         if (Test-Path -LiteralPath $path) {
@@ -1678,48 +2635,88 @@ function Get-G04DCRegistryValueDigest {
             }
         }
     })
-    return [pscustomobject][ordered]@{ rowCount = $rows.Count; sha256 = Get-G04DCCanonicalHash -Rows $rows }
+    return [pscustomobject][ordered]@{ rowCount = $rows.Count; sha256 = Get-G04DCCanonicalHash -Rows $rows -CaptureContext $CaptureContext -CapturePhase $CapturePhase }
 }
 
 function Get-G04DCDirectoryTreeDigest {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)] [string[]]$Roots)
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$Roots,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'directory-digest'
+    )
     $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($candidateRoot in @($Roots | Sort-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace($candidateRoot)) { throw '[MACHINE_STATE_CAPTURE_FAILED] A shortcut boundary root was unresolved.' }
         $root = [IO.Path]::GetFullPath($candidateRoot).TrimEnd('\')
-        $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction SilentlyContinue
-        if (!$rootItem) {
-            $rows.Add([pscustomobject][ordered]@{ root = $root; path = ''; present = $false; directory = $true; reparsePoint = $false; sizeBytes = 0; sha256 = $null; lastWriteUtc = $null })
-            continue
+        $inventoryScript = {
+            param([string]$InventoryRoot)
+            Set-StrictMode -Version Latest
+            $ErrorActionPreference = 'Stop'
+            $rootItem = Get-Item -LiteralPath $InventoryRoot -Force -ErrorAction SilentlyContinue
+            if (!$rootItem) {
+                [pscustomobject][ordered]@{ fullPath = $null; path = ''; present = $false; directory = $true; reparsePoint = $false; sizeBytes = 0; lastWriteUtc = $null }
+                return
+            }
+            if (!$rootItem.PSIsContainer -or [bool]($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw '[MACHINE_STATE_CAPTURE_FAILED] Directory boundary root is not a canonical non-reparse directory.'
+            }
+            $queue = [System.Collections.Generic.Queue[string]]::new()
+            $queue.Enqueue($InventoryRoot)
+            $count = 0
+            while ($queue.Count -ne 0) {
+                $directory = $queue.Dequeue()
+                foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop | Sort-Object FullName)) {
+                    $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                    [pscustomobject][ordered]@{
+                        fullPath = $item.FullName
+                        path = $item.FullName.Substring($InventoryRoot.Length).TrimStart('\')
+                        present = $true
+                        directory = [bool]$item.PSIsContainer
+                        reparsePoint = $isReparse
+                        sizeBytes = if ($item.PSIsContainer) { 0 } else { [long]$item.Length }
+                        lastWriteUtc = $item.LastWriteTimeUtc.ToString('o')
+                    }
+                    if ($item.PSIsContainer -and !$isReparse) { $queue.Enqueue($item.FullName) }
+                    $count++
+                    if ($count -gt 100000) { throw '[MACHINE_STATE_CAPTURE_FAILED] Directory boundary exceeded 100000 entries.' }
+                }
+            }
         }
-        if (!$rootItem.PSIsContainer -or [bool]($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw "[MACHINE_STATE_CAPTURE_FAILED] Shortcut boundary root is not a canonical non-reparse directory: $root"
+        $inventory = if ($CaptureContext) {
+            @(Invoke-G04DCBoundedCaptureProcess -Context $CaptureContext -Phase $CapturePhase -ScriptBlock $inventoryScript -ArgumentList @($root) -ItemCount $rows.Count)
         }
-        $queue = [System.Collections.Generic.Queue[string]]::new()
-        $queue.Enqueue($root)
-        while ($queue.Count -ne 0) {
-            $directory = $queue.Dequeue()
-            foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop | Sort-Object FullName)) {
-                $relative = $item.FullName.Substring($root.Length).TrimStart('\')
-                $isReparse = [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
-                $rows.Add([pscustomobject][ordered]@{
-                    root = $root
-                    path = $relative
-                    present = $true
-                    directory = [bool]$item.PSIsContainer
-                    reparsePoint = $isReparse
-                    sizeBytes = if ($item.PSIsContainer) { 0 } else { [long]$item.Length }
-                    sha256 = if (!$item.PSIsContainer -and !$isReparse) { Get-G04DCSha256 -Path $item.FullName } else { $null }
-                    lastWriteUtc = $item.LastWriteTimeUtc.ToString('o')
-                })
-                if ($item.PSIsContainer -and !$isReparse) { $queue.Enqueue($item.FullName) }
-                if ($rows.Count -gt 100000) { throw '[MACHINE_STATE_CAPTURE_FAILED] Shortcut boundary exceeded 100000 entries.' }
+        else {
+            @(& $inventoryScript $root)
+        }
+        foreach ($entry in $inventory) {
+            $rowNumber = $rows.Count + 1
+            $hash = if ([bool]$entry.present -and ![bool]$entry.directory -and ![bool]$entry.reparsePoint) {
+                if ($CaptureContext) {
+                    Get-G04DCBoundedFileSha256 -Path ([string]$entry.fullPath) -CaptureContext $CaptureContext -CapturePhase $CapturePhase -ItemCount $rowNumber
+                }
+                else { Get-G04DCSha256 -Path ([string]$entry.fullPath) }
+            }
+            else { $null }
+            $rows.Add([pscustomobject][ordered]@{
+                root = $root
+                path = [string]$entry.path
+                present = [bool]$entry.present
+                directory = [bool]$entry.directory
+                reparsePoint = [bool]$entry.reparsePoint
+                sizeBytes = [long]$entry.sizeBytes
+                sha256 = $hash
+                lastWriteUtc = if ($null -eq $entry.lastWriteUtc) { $null } else { [string]$entry.lastWriteUtc }
+            })
+            if ($rows.Count -gt 100000) { throw '[MACHINE_STATE_CAPTURE_FAILED] Directory boundary exceeded 100000 entries.' }
+            if ($CaptureContext -and ($rows.Count % 128 -eq 0 -or $rows.Count -eq $inventory.Count)) {
+                Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $rows.Count -WriteProgress
             }
         }
     }
-    $canonicalRows = @($rows.ToArray() | Sort-Object root, path)
-    return [pscustomobject][ordered]@{ rowCount = $canonicalRows.Count; sha256 = Get-G04DCCanonicalHash -Rows $canonicalRows }
+    if ($CaptureContext) { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $rows.Count -WriteProgress }
+    $canonicalRows = @($rows.ToArray())
+    return [pscustomobject][ordered]@{ rowCount = $canonicalRows.Count; sha256 = Get-G04DCCanonicalHash -Rows $canonicalRows -CaptureContext $CaptureContext -CapturePhase $CapturePhase }
 }
 
 function Get-G04DCSafePropertyState {
@@ -2017,7 +3014,9 @@ function Get-G04DCScheduledTaskCatalogEvidence {
     [CmdletBinding()]
     param(
         [Parameter(DontShow = $true)] [AllowNull()] [object[]]$Tasks,
-        [Parameter(DontShow = $true)] [AllowNull()] [scriptblock]$ExportTaskAdapter
+        [Parameter(DontShow = $true)] [AllowNull()] [scriptblock]$ExportTaskAdapter,
+        [Parameter(DontShow = $true)] [AllowNull()] $CaptureContext,
+        [Parameter(DontShow = $true)] [string]$CapturePhase = 'scheduled-tasks'
     )
     if (!$PSBoundParameters.ContainsKey('Tasks')) {
         try { $Tasks = @(Get-ScheduledTask -ErrorAction Stop) }
@@ -2030,8 +3029,13 @@ function Get-G04DCScheduledTaskCatalogEvidence {
         }
     }
     $rows = [System.Collections.Generic.List[object]]::new()
+    $taskIndex = 0
     foreach ($task in @($Tasks)) {
         $rows.Add((ConvertTo-G04DCScheduledTaskEvidence -Task $task -ExportTaskAdapter $ExportTaskAdapter))
+        $taskIndex++
+        if ($CaptureContext -and ($taskIndex % 16 -eq 0 -or $taskIndex -eq @($Tasks).Count)) {
+            Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $taskIndex -WriteProgress
+        }
     }
     return @($rows.ToArray() | Sort-Object taskPath, taskName)
 }
@@ -2053,8 +3057,31 @@ function Get-G04DCMachineState {
         [AllowEmptyCollection()] [object[]]$ProtectedRegistryRows = @(),
         [AllowEmptyCollection()] [string[]]$ProtectedFontFileNames = @(),
         [AllowEmptyCollection()] [string[]]$ProtectedExternalFilePaths = @(),
-        [AllowEmptyCollection()] [string[]]$ProtectedMsiComponentCodes = @()
+        [AllowEmptyCollection()] [string[]]$ProtectedMsiComponentCodes = @(),
+        [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')] [string]$CaptureLabel = 'machine-state',
+        [AllowNull()] [string]$ProgressPath,
+        [AllowNull()] [string]$PerformancePath,
+        [ValidateRange(1, 3600000)] [long]$CaptureTargetMilliseconds = 480000,
+        [ValidateRange(1, 3600000)] [long]$OverallBudgetMilliseconds = 720000,
+        [ValidateRange(1, 3600000)] [long]$PhaseBudgetMilliseconds = 240000,
+        [AllowNull()] [string]$StateOutputPath,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$MsiComponentAccessAdapter
     )
+    $contextArguments = @{
+        CaptureLabel = $CaptureLabel
+        ProgressPath = $ProgressPath
+        PerformancePath = $PerformancePath
+        CaptureTargetMilliseconds = $CaptureTargetMilliseconds
+        OverallBudgetMilliseconds = $OverallBudgetMilliseconds
+        PhaseBudgetMilliseconds = $PhaseBudgetMilliseconds
+    }
+    $captureContext = New-G04DCMachineStateCaptureContext @contextArguments
+    $captureContext.metrics['protectedRegistryRowCount'] = @($ProtectedRegistryRows).Count
+    $captureContext.metrics['protectedFontFileCount'] = @($ProtectedFontFileNames).Count
+    $captureContext.metrics['externalRuntimeTargetCount'] = @($ProtectedExternalFilePaths).Count
+    $captureContext.metrics['expectedMsiComponentCount'] = @($ProtectedMsiComponentCodes | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique).Count
+    try {
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'associations'
     $extensions = @('.odt', '.ods', '.odp', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.pdf')
     $associations = @($extensions | ForEach-Object {
         $extension = $_
@@ -2069,6 +3096,9 @@ function Get-G04DCMachineState {
             userChoicePresent = [bool]$userChoiceProgIdState.keyExists
         }
     })
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'associations' -ItemCount $associations.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'font-registry-catalog'
     $fontRoots = @(
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts',
         'Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
@@ -2077,7 +3107,12 @@ function Get-G04DCMachineState {
         $fontRoot = $_
         @(Get-G04DCRegistryValues -Path $fontRoot) | ForEach-Object { [pscustomobject][ordered]@{ path = $fontRoot; name = $_.name; value = $_.value } }
     })
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'font-registry-catalog' -ItemCount $fontCatalogRows.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'protected-font-files'
+    $protectedFontIndex = 0
     $msiFontTargets = @($ProtectedFontFileNames | Sort-Object -Unique | ForEach-Object {
+        $protectedFontIndex++
         $fontFileName = $_
         $fontPath = Join-Path (Join-Path $env:SystemRoot 'Fonts') $fontFileName
         $fontItem = Get-Item -LiteralPath $fontPath -Force -ErrorAction SilentlyContinue
@@ -2087,23 +3122,37 @@ function Get-G04DCMachineState {
             filePresent = [bool]$fontItem
             fileReparsePoint = if ($fontItem) { [bool]($fontItem.Attributes -band [IO.FileAttributes]::ReparsePoint) } else { $false }
             fileSizeBytes = if ($fontItem) { [long]$fontItem.Length } else { 0 }
-            fileSha256 = if ($fontItem -and !$fontItem.PSIsContainer) { Get-G04DCSha256 -Path $fontItem.FullName } else { $null }
+            fileSha256 = if ($fontItem -and !$fontItem.PSIsContainer) { Get-G04DCBoundedFileSha256 -Path $fontItem.FullName -CaptureContext $captureContext -CapturePhase 'protected-font-files' -ItemCount $protectedFontIndex } else { $null }
             registryMatches = @($fontCatalogRows | Where-Object {
                 ([IO.Path]::GetFileName([string]$_.value) -ieq $fontFileName) -or ([string]$_.name -imatch [regex]::Escape([IO.Path]::GetFileNameWithoutExtension($fontFileName)))
             })
         }
     })
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'protected-font-files' -ItemCount $msiFontTargets.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'external-runtime-targets'
+    $externalRuntimeIndex = 0
     $externalRuntimeTargets = @($ProtectedExternalFilePaths | Sort-Object -Unique | ForEach-Object {
+        $externalRuntimeIndex++
         $targetPath = [IO.Path]::GetFullPath($_)
         $targetItem = Get-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
-        $signature = if ($targetItem -and !$targetItem.PSIsContainer) { Get-G04DCAuthenticodeEvidence -Path $targetItem.FullName } else { $null }
+        $signature = if ($targetItem -and !$targetItem.PSIsContainer) {
+            $signatureRows = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'external-runtime-targets' -ScriptBlock {
+                param([string]$CommonModulePath, [string]$CandidatePath)
+                Import-Module $CommonModulePath -Force
+                Get-G04DCAuthenticodeEvidence -Path $CandidatePath
+            } -ArgumentList @($script:G04DCCommonModulePath, $targetItem.FullName) -ItemCount $externalRuntimeIndex)
+            if ($signatureRows.Count -ne 1) { throw '[MACHINE_STATE_CAPTURE_FAILED] Authenticode helper returned an invalid result count.' }
+            $signatureRows[0]
+        }
+        else { $null }
         [pscustomobject][ordered]@{
             path = $targetPath
             present = [bool]$targetItem
             regularFile = [bool]($targetItem -and !$targetItem.PSIsContainer)
             reparsePoint = if ($targetItem) { [bool]($targetItem.Attributes -band [IO.FileAttributes]::ReparsePoint) } else { $false }
             sizeBytes = if ($targetItem -and !$targetItem.PSIsContainer) { [long]$targetItem.Length } else { 0 }
-            sha256 = if ($targetItem -and !$targetItem.PSIsContainer) { Get-G04DCSha256 -Path $targetItem.FullName } else { $null }
+            sha256 = if ($targetItem -and !$targetItem.PSIsContainer) { Get-G04DCBoundedFileSha256 -Path $targetItem.FullName -CaptureContext $captureContext -CapturePhase 'external-runtime-targets' -ItemCount $externalRuntimeIndex } else { $null }
             authenticodeStatus = if ($signature) { [string]$signature.status } else { $null }
             signer = if ($signature) { [string]$signature.signerSubject } else { $null }
             signerThumbprint = if ($signature) { [string]$signature.signerThumbprint } else { $null }
@@ -2112,23 +3161,42 @@ function Get-G04DCMachineState {
             fileVersion = if ($targetItem -and !$targetItem.PSIsContainer) { [string]$targetItem.VersionInfo.FileVersion } else { $null }
         }
     })
-    $services = @(Get-CimInstance Win32_Service | Sort-Object Name | ForEach-Object {
-        [pscustomobject][ordered]@{
-            name = $_.Name
-            displayName = $_.DisplayName
-            state = $_.State
-            status = $_.Status
-            startMode = $_.StartMode
-            pathName = $_.PathName
-            serviceType = $_.ServiceType
-            startName = $_.StartName
-            errorControl = $_.ErrorControl
-            desktopInteract = [bool]$_.DesktopInteract
-            processId = [int]$_.ProcessId
-        }
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'external-runtime-targets' -ItemCount $externalRuntimeTargets.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'service-catalog'
+    $serviceSource = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'service-catalog' -ScriptBlock {
+        Get-CimInstance Win32_Service -ErrorAction Stop
     })
-    $serviceRegistryCatalog = Get-G04DCRegistryTreeDigest -NativePath 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services'
+    $serviceRows = [System.Collections.Generic.List[object]]::new()
+    $serviceIndex = 0
+    foreach ($service in @($serviceSource | Sort-Object Name)) {
+        $serviceRows.Add([pscustomobject][ordered]@{
+            name = $service.Name
+            displayName = $service.DisplayName
+            state = $service.State
+            status = $service.Status
+            startMode = $service.StartMode
+            pathName = $service.PathName
+            serviceType = $service.ServiceType
+            startName = $service.StartName
+            errorControl = $service.ErrorControl
+            desktopInteract = [bool]$service.DesktopInteract
+            processId = [int]$service.ProcessId
+        })
+        $serviceIndex++
+        if ($serviceIndex % 64 -eq 0 -or $serviceIndex -eq $serviceSource.Count) {
+            Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'service-catalog' -ItemCount $serviceIndex -WriteProgress
+        }
+    }
+    $services = @($serviceRows.ToArray())
     $libreOfficeServices = @($services | Where-Object { $_.name -match '(?i)libreoffice|soffice' -or $_.pathName -match '(?i)libreoffice|soffice' })
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'service-catalog' -ItemCount $services.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'service-registry-digest'
+    $serviceRegistryCatalog = Get-G04DCRegistryTreeDigest -NativePath 'HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services' -CaptureContext $captureContext -CapturePhase 'service-registry-digest'
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'service-registry-digest' -ItemCount $serviceRegistryCatalog.rowCount
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'app-paths'
     $appPathKeys = @(
         foreach ($scope in @(
             'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths',
@@ -2146,24 +3214,49 @@ function Get-G04DCMachineState {
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths',
         'Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths'
     )
-    $appPathCatalogRows = @($appPathScopes | ForEach-Object {
-        $scope = $_
-        if (Test-Path -LiteralPath $scope) {
-            Get-ChildItem -LiteralPath $scope -ErrorAction SilentlyContinue | Sort-Object PSChildName | ForEach-Object {
-                [pscustomobject][ordered]@{ path = "$scope\$($_.PSChildName)"; values = @(Get-G04DCRegistryValues -Path $_.PSPath) }
+    $appPathCatalogRowsList = [System.Collections.Generic.List[object]]::new()
+    foreach ($scope in $appPathScopes) {
+        $childNames = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'app-paths' -ScriptBlock {
+            param([string]$RegistryScope)
+            if (Test-Path -LiteralPath $RegistryScope) {
+                Get-ChildItem -LiteralPath $RegistryScope -ErrorAction Stop | ForEach-Object { $_.PSChildName }
             }
+        } -ArgumentList @($scope) -ItemCount $appPathCatalogRowsList.Count)
+        foreach ($childName in @($childNames | Sort-Object)) {
+            $path = "$scope\$childName"
+            $appPathCatalogRowsList.Add([pscustomobject][ordered]@{ path = $path; values = @(Get-G04DCRegistryValues -Path $path) })
+            Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'app-paths' -ItemCount $appPathCatalogRowsList.Count
         }
-    })
-    $classKeyNames = @(Get-ChildItem -LiteralPath 'Registry::HKEY_CLASSES_ROOT' -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName } | Sort-Object)
-    $classRegistryCatalog = Get-G04DCRegistryTreeDigest -NativePath 'HKEY_CLASSES_ROOT'
-    $progIds = @(Get-ChildItem -LiteralPath 'Registry::HKEY_CLASSES_ROOT' -ErrorAction SilentlyContinue | Where-Object {
-        $_.PSChildName -match '^(?i:LibreOffice\.|soffice\.)'
-    } | Sort-Object PSChildName | ForEach-Object {
-        [pscustomobject][ordered]@{
-            key = $_.PSChildName
-            defaultValueState = Get-G04DCRegistryDefaultValueState -Path "Registry::HKEY_CLASSES_ROOT\$($_.PSChildName)"
+    }
+    $appPathCatalogRows = @($appPathCatalogRowsList.ToArray())
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'app-paths' -ItemCount ($appPaths.Count + $appPathCatalogRows.Count)
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'class-key-catalog'
+    $classKeyNames = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'class-key-catalog' -ScriptBlock {
+        Get-ChildItem -LiteralPath 'Registry::HKEY_CLASSES_ROOT' -ErrorAction Stop | ForEach-Object { $_.PSChildName }
+    } | Sort-Object)
+    $progIdRows = [System.Collections.Generic.List[object]]::new()
+    $classKeyIndex = 0
+    foreach ($classKeyName in $classKeyNames) {
+        if ($classKeyName -match '^(?i:LibreOffice\.|soffice\.)') {
+            $progIdRows.Add([pscustomobject][ordered]@{
+                key = $classKeyName
+                defaultValueState = Get-G04DCRegistryDefaultValueState -Path "Registry::HKEY_CLASSES_ROOT\$classKeyName"
+            })
         }
-    })
+        $classKeyIndex++
+        if ($classKeyIndex % 128 -eq 0 -or $classKeyIndex -eq $classKeyNames.Count) {
+            Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'class-key-catalog' -ItemCount $classKeyIndex -WriteProgress
+        }
+    }
+    $progIds = @($progIdRows.ToArray())
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'class-key-catalog' -ItemCount ($classKeyNames.Count + $progIds.Count)
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'class-registry-digest'
+    $classRegistryCatalog = Get-G04DCRegistryTreeDigest -NativePath 'HKEY_CLASSES_ROOT' -CaptureContext $captureContext -CapturePhase 'class-registry-digest'
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'class-registry-digest' -ItemCount $classRegistryCatalog.rowCount
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'startup'
     $startupKeys = @(
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
@@ -2179,10 +3272,12 @@ function Get-G04DCMachineState {
         [pscustomobject]@{ name = 'machine'; path = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup' },
         [pscustomobject]@{ name = 'user'; path = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup) }
     )
+    $startupFileIndex = 0
     $startupFileRows = @($startupFolderRoots | ForEach-Object {
         $startupRoot = $_
         if (Test-Path -LiteralPath $startupRoot.path) {
             Get-ChildItem -LiteralPath $startupRoot.path -Force -ErrorAction Stop | Sort-Object Name | ForEach-Object {
+                $startupFileIndex++
                 [pscustomobject][ordered]@{
                     type = 'file'
                     root = $startupRoot.name
@@ -2190,7 +3285,7 @@ function Get-G04DCMachineState {
                     directory = $_.PSIsContainer
                     reparsePoint = [bool]($_.Attributes -band [IO.FileAttributes]::ReparsePoint)
                     sizeBytes = if ($_.PSIsContainer) { 0 } else { [long]$_.Length }
-                    sha256 = if (!$_.PSIsContainer -and ![bool]($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Get-G04DCSha256 -Path $_.FullName } else { $null }
+                    sha256 = if (!$_.PSIsContainer -and ![bool]($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Get-G04DCBoundedFileSha256 -Path $_.FullName -CaptureContext $captureContext -CapturePhase 'startup' -ItemCount $startupFileIndex } else { $null }
                     lastWriteUtc = $_.LastWriteTimeUtc.ToString('o')
                 }
             }
@@ -2203,47 +3298,99 @@ function Get-G04DCMachineState {
         })
         @($startupFileRows | Where-Object { $_.name -match '(?i)libreoffice|soffice' })
     )
-    $allTaskRows = @(Get-G04DCScheduledTaskCatalogEvidence)
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'startup' -ItemCount $startupCatalogRows.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'scheduled-tasks'
+    $allTaskRows = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'scheduled-tasks' -ScriptBlock {
+        param([string]$CommonModulePath)
+        Import-Module $CommonModulePath -Force
+        Get-G04DCScheduledTaskCatalogEvidence
+    } -ArgumentList @($script:G04DCCommonModulePath))
+    $tasks = @($allTaskRows | Where-Object {
+        $_.taskName -match '(?i)libreoffice|soffice' -or $_.taskPath -match '(?i)libreoffice|soffice' -or
+        (@($_.actions | Where-Object { Test-G04DCScheduledTaskActionLibreOfficeReference -ActionEvidence $_ }).Count -ne 0)
+    })
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'scheduled-tasks' -ItemCount $allTaskRows.Count
+    $captureContext.metrics['scheduledTaskCount'] = $allTaskRows.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'shortcut-catalog'
     $shortcutCatalog = Get-G04DCDirectoryTreeDigest -Roots @(
         (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
         ([Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)),
         ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonDesktopDirectory)),
         ([Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory))
-    )
+    ) -CaptureContext $captureContext -CapturePhase 'shortcut-catalog'
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'shortcut-catalog' -ItemCount $shortcutCatalog.rowCount
+    $captureContext.metrics['shortcutEntryCount'] = $shortcutCatalog.rowCount
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'environment-catalog'
     $environmentCatalog = Get-G04DCRegistryValueDigest -Paths @(
         'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment',
         'Registry::HKEY_CURRENT_USER\Environment'
-    )
-    $tasks = @($allTaskRows | Where-Object {
-        $_.taskName -match '(?i)libreoffice|soffice' -or $_.taskPath -match '(?i)libreoffice|soffice' -or
-        (@($_.actions | Where-Object { Test-G04DCScheduledTaskActionLibreOfficeReference -ActionEvidence $_ }).Count -ne 0)
-    })
-    $allFirewallApplicationPrograms = @{}
-    foreach ($filter in @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue)) {
-        $allFirewallApplicationPrograms[[string]$filter.InstanceID] = [string]$filter.Program
-    }
-    $allFirewallRows = @(Get-NetFirewallRule -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object {
-        [pscustomobject][ordered]@{
-            name = $_.Name
-            displayName = $_.DisplayName
-            enabled = [string]$_.Enabled
-            direction = [string]$_.Direction
-            action = [string]$_.Action
-            profile = [string]$_.Profile
-            edgeTraversalPolicy = [string]$_.EdgeTraversalPolicy
-            program = $allFirewallApplicationPrograms[[string]$_.InstanceID]
+    ) -CaptureContext $captureContext -CapturePhase 'environment-catalog'
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'environment-catalog' -ItemCount $environmentCatalog.rowCount
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'firewall-catalog'
+    $firewallSource = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'firewall-catalog' -ScriptBlock {
+        Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'application'; instanceId = $_.InstanceID; program = $_.Program; package = $_.Package }
+        }
+        Get-NetFirewallRule -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'rule'; name = $_.Name; displayName = $_.DisplayName; enabled = $_.Enabled; direction = $_.Direction; action = $_.Action; profile = $_.Profile; edgeTraversalPolicy = $_.EdgeTraversalPolicy; instanceId = $_.InstanceID }
+        }
+        Get-NetFirewallPortFilter -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'port'; instanceId = $_.InstanceID; protocol = $_.Protocol; localPort = $_.LocalPort; remotePort = $_.RemotePort; icmpType = $_.IcmpType }
+        }
+        Get-NetFirewallAddressFilter -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'address'; instanceId = $_.InstanceID; localAddress = $_.LocalAddress; remoteAddress = $_.RemoteAddress }
+        }
+        Get-NetFirewallServiceFilter -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'service'; instanceId = $_.InstanceID; service = $_.Service }
+        }
+        Get-NetFirewallInterfaceFilter -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'interface'; instanceId = $_.InstanceID; interfaceAlias = $_.InterfaceAlias }
+        }
+        Get-NetFirewallSecurityFilter -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject][ordered]@{ captureKind = 'security'; instanceId = $_.InstanceID; authentication = $_.Authentication; encryption = $_.Encryption; localUser = $_.LocalUser; remoteUser = $_.RemoteUser; remoteMachine = $_.RemoteMachine; overrideBlockRules = $_.OverrideBlockRules }
         }
     })
-    $allFirewallFilterRows = @(
-        @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject][ordered]@{ type = 'application'; instanceId = $_.InstanceID; program = $_.Program; package = $_.Package } })
-        @(Get-NetFirewallPortFilter -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject][ordered]@{ type = 'port'; instanceId = $_.InstanceID; protocol = [string]$_.Protocol; localPort = [string]$_.LocalPort; remotePort = [string]$_.RemotePort; icmpType = [string]$_.IcmpType } })
-        @(Get-NetFirewallAddressFilter -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject][ordered]@{ type = 'address'; instanceId = $_.InstanceID; localAddress = [string]$_.LocalAddress; remoteAddress = [string]$_.RemoteAddress } })
-        @(Get-NetFirewallServiceFilter -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject][ordered]@{ type = 'service'; instanceId = $_.InstanceID; service = $_.Service } })
-        @(Get-NetFirewallInterfaceFilter -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject][ordered]@{ type = 'interface'; instanceId = $_.InstanceID; interfaceAlias = [string]$_.InterfaceAlias } })
-        @(Get-NetFirewallSecurityFilter -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject][ordered]@{ type = 'security'; instanceId = $_.InstanceID; authentication = [string]$_.Authentication; encryption = [string]$_.Encryption; localUser = [string]$_.LocalUser; remoteUser = [string]$_.RemoteUser; remoteMachine = [string]$_.RemoteMachine; overrideBlockRules = [string]$_.OverrideBlockRules } })
-    )
+    $allFirewallApplicationPrograms = @{}
+    foreach ($filter in @($firewallSource | Where-Object { [string]$_.captureKind -ceq 'application' })) {
+        $allFirewallApplicationPrograms[[string]$filter.instanceId] = [string]$filter.program
+    }
+    $allFirewallRows = @($firewallSource | Where-Object { [string]$_.captureKind -ceq 'rule' } | Sort-Object name | ForEach-Object {
+        [pscustomobject][ordered]@{
+            name = $_.name
+            displayName = $_.displayName
+            enabled = [string]$_.enabled
+            direction = [string]$_.direction
+            action = [string]$_.action
+            profile = [string]$_.profile
+            edgeTraversalPolicy = [string]$_.edgeTraversalPolicy
+            program = $allFirewallApplicationPrograms[[string]$_.instanceId]
+        }
+    })
+    $allFirewallFilterRows = @($firewallSource | Where-Object { [string]$_.captureKind -cne 'rule' } | ForEach-Object {
+        switch ([string]$_.captureKind) {
+            'application' { [pscustomobject][ordered]@{ type = 'application'; instanceId = $_.instanceId; program = $_.program; package = $_.package } }
+            'port' { [pscustomobject][ordered]@{ type = 'port'; instanceId = $_.instanceId; protocol = [string]$_.protocol; localPort = [string]$_.localPort; remotePort = [string]$_.remotePort; icmpType = [string]$_.icmpType } }
+            'address' { [pscustomobject][ordered]@{ type = 'address'; instanceId = $_.instanceId; localAddress = [string]$_.localAddress; remoteAddress = [string]$_.remoteAddress } }
+            'service' { [pscustomobject][ordered]@{ type = 'service'; instanceId = $_.instanceId; service = $_.service } }
+            'interface' { [pscustomobject][ordered]@{ type = 'interface'; instanceId = $_.instanceId; interfaceAlias = [string]$_.interfaceAlias } }
+            'security' { [pscustomobject][ordered]@{ type = 'security'; instanceId = $_.instanceId; authentication = [string]$_.authentication; encryption = [string]$_.encryption; localUser = [string]$_.localUser; remoteUser = [string]$_.remoteUser; remoteMachine = [string]$_.remoteMachine; overrideBlockRules = [string]$_.overrideBlockRules } }
+        }
+    })
+    for ($firewallIndex = 64; $firewallIndex -lt $firewallSource.Count; $firewallIndex += 64) {
+        Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'firewall-catalog' -ItemCount $firewallIndex -WriteProgress
+    }
     $firewall = @($allFirewallRows | Where-Object { $_.displayName -match '(?i)libreoffice|soffice' -or $_.name -match '(?i)libreoffice|soffice' -or $_.program -match '(?i)libreoffice|soffice' })
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'firewall-catalog' -ItemCount ($allFirewallRows.Count + $allFirewallFilterRows.Count)
+    $captureContext.metrics['firewallRuleCount'] = $allFirewallRows.Count
+    $captureContext.metrics['firewallFilterCount'] = $allFirewallFilterRows.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'protected-registry-targets'
     $protectedTargets = [System.Collections.Generic.List[object]]::new()
+    $protectedRegistryIndex = 0
     foreach ($row in $ProtectedRegistryRows) {
         $roots = switch ([string]$row.Root) {
             '0' { @('Registry::HKEY_CLASSES_ROOT') }
@@ -2264,11 +3411,33 @@ function Get-G04DCMachineState {
             }
             $protectedTargets.Add([pscustomobject][ordered]@{ path = $path; name = $name; pathPresent = [bool]$valueState.keyExists; valueState = $valueState })
         }
+        $protectedRegistryIndex++
+        if ($protectedRegistryIndex % 64 -eq 0 -or $protectedRegistryIndex -eq @($ProtectedRegistryRows).Count) {
+            Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'protected-registry-targets' -ItemCount $protectedRegistryIndex -WriteProgress
+        }
     }
     $protectedTargets = @($protectedTargets.ToArray() | Sort-Object path, name -Unique)
-    $processes = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(?i:soffice|libreoffice).*' -or $_.ExecutablePath -match '(?i)libreoffice' } | Sort-Object ProcessId | ForEach-Object {
-        [pscustomobject][ordered]@{ pid = [int]$_.ProcessId; parentPid = [int]$_.ParentProcessId; name = $_.Name; executablePath = $_.ExecutablePath }
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'protected-registry-targets' -ItemCount $protectedTargets.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'process-catalog'
+    $processSource = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'process-catalog' -ScriptBlock {
+        Get-CimInstance Win32_Process -ErrorAction Stop
     })
+    $processRows = [System.Collections.Generic.List[object]]::new()
+    $processIndex = 0
+    foreach ($candidateProcess in $processSource) {
+        if ($candidateProcess.Name -match '^(?i:soffice|libreoffice).*' -or $candidateProcess.ExecutablePath -match '(?i)libreoffice') {
+            $processRows.Add([pscustomobject][ordered]@{ pid = [int]$candidateProcess.ProcessId; parentPid = [int]$candidateProcess.ParentProcessId; name = $candidateProcess.Name; executablePath = $candidateProcess.ExecutablePath })
+        }
+        $processIndex++
+        if ($processIndex % 64 -eq 0 -or $processIndex -eq $processSource.Count) {
+            Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'process-catalog' -ItemCount $processIndex -WriteProgress
+        }
+    }
+    $processes = @($processRows.ToArray() | Sort-Object pid)
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'process-catalog' -ItemCount $processSource.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'installed-product-catalog'
     $productCode = $script:G04DCExpectedMsi.ProductCode
     $productKeys = @(
         "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$productCode",
@@ -2279,58 +3448,86 @@ function Get-G04DCMachineState {
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
     )
-    $productCatalogRows = @($uninstallRoots | ForEach-Object {
-        $scope = $_
-        if (Test-Path -LiteralPath $scope) {
-            Get-ChildItem -LiteralPath $scope -ErrorAction SilentlyContinue | Sort-Object PSChildName | ForEach-Object {
-                [pscustomobject][ordered]@{ path = "$scope\$($_.PSChildName)"; values = @(Get-G04DCRegistryValues -Path $_.PSPath) }
+    $productCatalogList = [System.Collections.Generic.List[object]]::new()
+    foreach ($scope in $uninstallRoots) {
+        $productChildNames = @(Invoke-G04DCBoundedCaptureProcess -Context $captureContext -Phase 'installed-product-catalog' -ScriptBlock {
+            param([string]$RegistryScope)
+            if (Test-Path -LiteralPath $RegistryScope) {
+                Get-ChildItem -LiteralPath $RegistryScope -ErrorAction Stop | ForEach-Object { $_.PSChildName }
+            }
+        } -ArgumentList @($scope) -ItemCount $productCatalogList.Count)
+        foreach ($childName in @($productChildNames | Sort-Object)) {
+            $path = "$scope\$childName"
+            $productCatalogList.Add([pscustomobject][ordered]@{ path = $path; values = @(Get-G04DCRegistryValues -Path $path) })
+            if ($productCatalogList.Count % 64 -eq 0 -or $productCatalogList.Count -eq $productChildNames.Count) {
+                Assert-G04DCMachineStateCaptureBudget -Context $captureContext -Phase 'installed-product-catalog' -ItemCount $productCatalogList.Count -WriteProgress
             }
         }
-    })
+    }
+    $productCatalogRows = @($productCatalogList.ToArray())
     $otherProductCatalogRows = @($productCatalogRows | Where-Object { !([string]$_.path).EndsWith($productCode, [StringComparison]::OrdinalIgnoreCase) })
-    $installerCacheCatalog = Get-G04DCDirectoryTreeDigest -Roots @((Join-Path $env:SystemRoot 'Installer'))
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'installed-product-catalog' -ItemCount $productCatalogRows.Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'installer-cache-catalog'
+    $installerCacheCatalog = Get-G04DCDirectoryTreeDigest -Roots @((Join-Path $env:SystemRoot 'Installer')) -CaptureContext $captureContext -CapturePhase 'installer-cache-catalog'
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'installer-cache-catalog' -ItemCount $installerCacheCatalog.rowCount
+    $captureContext.metrics['installerCacheEntryCount'] = $installerCacheCatalog.rowCount
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'pending-reboot'
     $pendingFileRenameKey = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager'
     $pendingReboot = [pscustomobject][ordered]@{
         componentBasedServicing = Test-Path -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
         windowsUpdate = Test-Path -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
         pendingFileRenameOperationsState = Get-G04DCRegistryValueState -Path $pendingFileRenameKey -ValueName 'PendingFileRenameOperations'
     }
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'pending-reboot' -ItemCount 3
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'msi-registration'
     $serviceDigestRows = @($services)
-    $msiRegistration = Get-G04DCMsiRegistrationState -ComponentCodes $ProtectedMsiComponentCodes
-    return [pscustomobject][ordered]@{
+    $msiRegistrationArguments = @{
+        ComponentCodes = $ProtectedMsiComponentCodes
+        CaptureContext = $captureContext
+        CapturePhase = 'msi-registration'
+    }
+    if ($MsiComponentAccessAdapter) { $msiRegistrationArguments.ComponentAccessAdapter = $MsiComponentAccessAdapter }
+    $msiRegistration = Get-G04DCMsiRegistrationState @msiRegistrationArguments
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'msi-registration' -ItemCount @($msiRegistration.componentRegistrations).Count
+
+    Start-G04DCMachineStatePhase -Context $captureContext -Phase 'canonical-state-finalization'
+    $state = [pscustomobject][ordered]@{
         capturedAtUtc = [DateTime]::UtcNow.ToString('o')
         fontCatalogCount = $fontCatalogRows.Count
-        fontCatalogSha256 = Get-G04DCCanonicalHash -Rows $fontCatalogRows
+        fontCatalogSha256 = Get-G04DCCanonicalHash -Rows $fontCatalogRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         msiFontTargets = $msiFontTargets
         externalRuntimeTargets = $externalRuntimeTargets
         associations = $associations
         libreOfficeServices = $libreOfficeServices
         serviceCatalogCount = $services.Count
-        serviceCatalogSha256 = Get-G04DCCanonicalHash -Rows $serviceDigestRows
+        serviceCatalogSha256 = Get-G04DCCanonicalHash -Rows $serviceDigestRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         serviceRegistryCatalogCount = $serviceRegistryCatalog.rowCount
         serviceRegistryCatalogSha256 = $serviceRegistryCatalog.sha256
         appPaths = $appPaths
         appPathCatalogCount = $appPathCatalogRows.Count
-        appPathCatalogSha256 = Get-G04DCCanonicalHash -Rows $appPathCatalogRows
+        appPathCatalogSha256 = Get-G04DCCanonicalHash -Rows $appPathCatalogRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         libreOfficeProgIds = $progIds
         classKeyCatalogCount = $classKeyNames.Count
-        classKeyCatalogSha256 = Get-G04DCCanonicalHash -Rows $classKeyNames
+        classKeyCatalogSha256 = Get-G04DCCanonicalHash -Rows $classKeyNames -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         classRegistryCatalogCount = $classRegistryCatalog.rowCount
         classRegistryCatalogSha256 = $classRegistryCatalog.sha256
         msiProtectedRegistryTargets = $protectedTargets
         scheduledTasks = $tasks
         scheduledTaskCatalogCount = $allTaskRows.Count
-        scheduledTaskCatalogSha256 = Get-G04DCCanonicalHash -Rows $allTaskRows
+        scheduledTaskCatalogSha256 = Get-G04DCCanonicalHash -Rows $allTaskRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         startup = $startup
         startupCatalogCount = $startupCatalogRows.Count
-        startupCatalogSha256 = Get-G04DCCanonicalHash -Rows $startupCatalogRows
+        startupCatalogSha256 = Get-G04DCCanonicalHash -Rows $startupCatalogRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         shortcutCatalogCount = $shortcutCatalog.rowCount
         shortcutCatalogSha256 = $shortcutCatalog.sha256
         firewallRules = $firewall
         firewallCatalogCount = $allFirewallRows.Count
-        firewallCatalogSha256 = Get-G04DCCanonicalHash -Rows $allFirewallRows
+        firewallCatalogSha256 = Get-G04DCCanonicalHash -Rows $allFirewallRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         firewallFilterCatalogCount = $allFirewallFilterRows.Count
-        firewallFilterCatalogSha256 = Get-G04DCCanonicalHash -Rows $allFirewallFilterRows
+        firewallFilterCatalogSha256 = Get-G04DCCanonicalHash -Rows $allFirewallFilterRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         machinePath = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
         userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
         environmentCatalogCount = $environmentCatalog.rowCount
@@ -2338,9 +3535,9 @@ function Get-G04DCMachineState {
         installedProduct = $products
         msiRegistration = $msiRegistration
         otherInstalledProductCatalogCount = $otherProductCatalogRows.Count
-        otherInstalledProductCatalogSha256 = Get-G04DCCanonicalHash -Rows $otherProductCatalogRows
+        otherInstalledProductCatalogSha256 = Get-G04DCCanonicalHash -Rows $otherProductCatalogRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         installedProductCatalogCount = $productCatalogRows.Count
-        installedProductCatalogSha256 = Get-G04DCCanonicalHash -Rows $productCatalogRows
+        installedProductCatalogSha256 = Get-G04DCCanonicalHash -Rows $productCatalogRows -CaptureContext $captureContext -CapturePhase 'canonical-state-finalization'
         installerCacheCatalogCount = $installerCacheCatalog.rowCount
         installerCacheCatalogSha256 = $installerCacheCatalog.sha256
         pendingReboot = $pendingReboot
@@ -2351,6 +3548,27 @@ function Get-G04DCMachineState {
             localPresent = Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'LibreOffice')
         }
         libreOfficeProcesses = $processes
+    }
+    Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'canonical-state-finalization' -ItemCount 1
+    if (![string]::IsNullOrWhiteSpace($StateOutputPath)) {
+        Start-G04DCMachineStatePhase -Context $captureContext -Phase 'state-serialization'
+        Write-G04DCBoundedMachineStateJson -Path $StateOutputPath -Value $state -CaptureContext $captureContext -CapturePhase 'state-serialization'
+        Complete-G04DCMachineStatePhase -Context $captureContext -Phase 'state-serialization' -ItemCount 1
+    }
+    Complete-G04DCMachineStateCapture -Context $captureContext -Passed $true -FailureMessage $null
+    return $state
+    }
+    catch {
+        $original = $_
+        try { Complete-G04DCMachineStateCapture -Context $captureContext -Passed $false -FailureMessage $original.Exception.Message }
+        catch { throw "[MACHINE_STATE_CAPTURE_TELEMETRY_FAILED] $($_.Exception.Message) Original: $($original.Exception.Message)" }
+        throw $original
+    }
+    finally {
+        if ($captureContext.writer) {
+            $captureContext.writer.Dispose()
+            $captureContext.writer = $null
+        }
     }
 }
 
@@ -2703,9 +3921,12 @@ Export-ModuleMember -Function @(
     'Assert-G04DCInstalledFileOwnership',
     'Get-G04DCExternalRuntimeTargetPaths',
     'Get-G04DCRegistryValueState', 'Get-G04DCRegistryDefaultValueState',
+    'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
+    'Start-G04DCMachineStatePhase', 'Assert-G04DCMachineStateCaptureBudget',
+    'Complete-G04DCMachineStatePhase', 'Complete-G04DCMachineStateCapture', 'Assert-G04DCMachineStatePerformanceEvidence',
     'Get-G04DCSafePropertyState', 'ConvertTo-G04DCScheduledTaskActionEvidence',
     'ConvertTo-G04DCScheduledTaskEvidence', 'Get-G04DCScheduledTaskCatalogEvidence',
-    'ConvertTo-G04DCPackedGuid', 'Get-G04DCMsiRegistrationState', 'Assert-G04DCMsiRegistrationAbsent', 'Assert-G04DCMsiRegistrationInstalled',
+    'ConvertTo-G04DCPackedGuid', 'Get-G04DCMsiComponentRegistrationState', 'Get-G04DCMsiRegistrationState', 'Assert-G04DCMsiRegistrationAbsent', 'Assert-G04DCMsiRegistrationInstalled',
     'Get-G04DCMachineState', 'Compare-G04DCMachineState',
     'Assert-G04DCNonMutation', 'Assert-G04DCRunnerIsolation', 'Assert-G04DCExternalRuntimeDependencies',
     'Assert-G04DCProcessEvidence', 'Get-G04DCLoadBearingModuleEvidence', 'Assert-G04DCLoadBearingModuleEvidence', 'Assert-G04DCOutputEvidence',

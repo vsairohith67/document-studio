@@ -97,8 +97,31 @@ Write-G04DCJson -Path (Join-Path $evidence 'external-runtime-target-derivation.j
     candidatePublicProperties = $analysis.candidatePublicProperties
     targetPaths = $externalRuntimeFilePaths
 })
-$before = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-Write-G04DCJson -Path (Join-Path $evidence 'machine-pre.json') -Value $before
+$machineStateProgressPath = Join-Path $evidence 'machine-state-progress.ndjson'
+function Get-G04DCMinimalMachineState {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Label,
+        [AllowNull()] [string]$EvidenceFileName
+    )
+    $performancePath = Join-Path $evidence "machine-state-performance-$Label.json"
+    $arguments = @{
+        ProtectedRegistryRows = $protectedRegistryRows
+        ProtectedFontFileNames = $protectedFontFileNames
+        ProtectedExternalFilePaths = $externalRuntimeFilePaths
+        ProtectedMsiComponentCodes = $msiComponentCodes
+        CaptureLabel = $Label
+        ProgressPath = $machineStateProgressPath
+        PerformancePath = $performancePath
+        CaptureTargetMilliseconds = 480000
+        OverallBudgetMilliseconds = 720000
+        PhaseBudgetMilliseconds = 240000
+    }
+    if (![string]::IsNullOrWhiteSpace($EvidenceFileName)) { $arguments.StateOutputPath = Join-Path $evidence $EvidenceFileName }
+    $state = Get-G04DCMachineState @arguments
+    Assert-G04DCMachineStatePerformanceEvidence -Path $performancePath -RequiredPhase $(if ($arguments.ContainsKey('StateOutputPath')) { 'state-serialization' } else { $null }) | Out-Null
+    return $state
+}
+$before = Get-G04DCMinimalMachineState -Label 'pre' -EvidenceFileName 'machine-pre.json'
 if (@($before.installedProduct).Count -ne 0) { throw '[PREEXISTING_PRODUCT] Disposable runner already has the accepted ProductCode.' }
 Assert-G04DCRunnerIsolation -State $before | Out-Null
 Assert-G04DCExternalRuntimeDependencies -State $before | Out-Null
@@ -141,8 +164,7 @@ $registrationExact = $false
 $installExitClean = $process.ExitCode -eq 0 -and !$installResult.rebootRequired
 $uninstallExitClean = $false
 $installed = $process.ExitCode -in @(0, 1641, 3010)
-$afterInstall = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-Write-G04DCJson -Path (Join-Path $evidence 'machine-post-install.json') -Value $afterInstall
+$afterInstall = Get-G04DCMinimalMachineState -Label 'post-install' -EvidenceFileName 'machine-post-install.json'
 $installComparison = Compare-G04DCMachineState -Before $before -After $afterInstall
 Write-G04DCJson -Path (Join-Path $evidence 'machine-install-comparison.json') -Value $installComparison
 $requiresUninstall = $installed -or @($afterInstall.installedProduct).Count -ne 0
@@ -195,8 +217,7 @@ if ($requiresUninstall) {
             exactSelectedComponentPathOwnershipPassed = $true
         })
         & (Join-Path $PSScriptRoot 'Invoke-G04DCSandboxSmoke.ps1') -RuntimeRoot $installRoot -WorkRoot $work -EvidenceDirectory $evidence -RepositoryRoot $repo | Out-Null
-        $afterSmoke = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-        Write-G04DCJson -Path (Join-Path $evidence 'machine-post-smoke.json') -Value $afterSmoke
+        $afterSmoke = Get-G04DCMinimalMachineState -Label 'post-smoke' -EvidenceFileName 'machine-post-smoke.json'
         $smokeComparison = Compare-G04DCMachineState -Before $before -After $afterSmoke
         Write-G04DCJson -Path (Join-Path $evidence 'machine-smoke-comparison.json') -Value $smokeComparison
         Assert-G04DCNonMutation -Comparison $smokeComparison -Code 'MINIMAL_RUNTIME_MUTATION' | Out-Null
@@ -207,8 +228,7 @@ if ($requiresUninstall) {
         $reasons.Add($_.Exception.Message)
     }
 
-    $afterRuntimeAttempt = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-    Write-G04DCJson -Path (Join-Path $evidence 'machine-post-runtime-attempt.json') -Value $afterRuntimeAttempt
+    $afterRuntimeAttempt = Get-G04DCMinimalMachineState -Label 'post-runtime-attempt' -EvidenceFileName 'machine-post-runtime-attempt.json'
     $runtimeAttemptComparison = Compare-G04DCMachineState -Before $before -After $afterRuntimeAttempt
     Write-G04DCJson -Path (Join-Path $evidence 'machine-runtime-attempt-comparison.json') -Value $runtimeAttemptComparison
     if ([bool]$runtimeAttemptComparison.protectedMutation) { $reasons.Add('[MINIMAL_RUNTIME_MUTATION] Runtime attempt changed protected machine state.'); $sandboxPassed = $false }
@@ -231,8 +251,7 @@ if ($requiresUninstall) {
     })
     $uninstallExitClean = $uninstall.ExitCode -eq 0 -and $uninstall.ExitCode -notin @(1641, 3010)
     if (!$uninstallExitClean) { $reasons.Add("[UNINSTALL_FAILED] Exact uninstall must exit 0 without reboot; msiexec exited $($uninstall.ExitCode).") }
-    $afterUninstall = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
-    Write-G04DCJson -Path (Join-Path $evidence 'machine-post-uninstall.json') -Value $afterUninstall
+    $afterUninstall = Get-G04DCMinimalMachineState -Label 'post-uninstall' -EvidenceFileName 'machine-post-uninstall.json'
     $uninstallComparison = Compare-G04DCMachineState -Before $before -After $afterUninstall -IncludeInstalledProductCatalog -IncludeAcceptedMsiRegistration -IncludeInstallerCacheCatalog
     Write-G04DCJson -Path (Join-Path $evidence 'machine-uninstall-comparison.json') -Value $uninstallComparison
     $installRootResidue = if (Test-Path -LiteralPath $installRoot) {
@@ -272,7 +291,7 @@ $cleanup = Remove-G04DCOwnedRoot -OwnedRoot $ownedRoot -MarkerPath $ownedMarker 
 if (!$cleanup.removed) { $reasons.Add('[CLEANUP_OWNERSHIP_MISMATCH] Marker-owned minimal runtime was not removed.'); $candidate = $false }
 try { Assert-G04DCCleanupEvidence -Evidence $cleanup | Out-Null } catch { $reasons.Add($_.Exception.Message); $candidate = $false }
 Write-G04DCJson -Path (Join-Path $evidence 'cleanup.json') -Value $cleanup
-$finalState = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames -ProtectedExternalFilePaths $externalRuntimeFilePaths -ProtectedMsiComponentCodes $msiComponentCodes
+$finalState = Get-G04DCMinimalMachineState -Label 'final'
 $finalComparison = Compare-G04DCMachineState -Before $before -After $finalState -IncludeInstalledProductCatalog -IncludeAcceptedMsiRegistration -IncludeInstallerCacheCatalog
 Write-G04DCJson -Path (Join-Path $evidence 'machine-final-comparison.json') -Value $finalComparison
 if ($finalComparison.protectedMutation) { $reasons.Add('[UNINSTALL_RESIDUE] Final runner state differs from pre-state.'); $candidate = $false }

@@ -19,7 +19,43 @@ $sandboxProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCS
 $commonProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'G04DC.Common.psm1') -Raw
 $runtimeManifestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCRuntimeManifest.ps1') -Raw
 $decisionProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCCandidateDecision.ps1') -Raw
+$precheckProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMachineStatePrecheck.ps1') -Raw
 $tests = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCBoundaries.ps1') -Raw
+foreach ($telemetryBoundary in @(
+    'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
+    'Start-G04DCMachineStatePhase', 'Assert-G04DCMachineStateCaptureBudget',
+    'Complete-G04DCMachineStatePhase', 'Complete-G04DCMachineStateCapture',
+    'machine-state-progress.ndjson', 'machine-state-performance',
+    'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED', 'captureTargetMilliseconds',
+    'hardCeilingMilliseconds', 'phaseCeilingMilliseconds', 'Flush($true)',
+    'canonical-state-finalization', 'state-serialization', 'Write-G04DCBoundedMachineStateJson',
+    'Get-G04DCBoundedFileSha256', 'Invoke-G04DCBoundedCaptureProcess',
+    'KillOnCloseJob', 'TerminateAndVerify', 'Assert-G04DCMachineStatePerformanceEvidence'
+)) {
+    if (!$commonProof.Contains($telemetryBoundary) -and !$allProof.Contains($telemetryBoundary)) { throw "G04D-C machine-state telemetry boundary is missing: $telemetryBoundary" }
+}
+foreach ($phase in @(
+    'associations', 'font-registry-catalog', 'protected-font-files', 'external-runtime-targets',
+    'service-catalog', 'service-registry-digest', 'app-paths', 'class-key-catalog',
+    'class-registry-digest', 'startup', 'scheduled-tasks', 'shortcut-catalog',
+    'environment-catalog', 'firewall-catalog', 'protected-registry-targets', 'process-catalog',
+    'installed-product-catalog', 'installer-cache-catalog', 'pending-reboot', 'msi-registration'
+)) {
+    if (!$commonProof.Contains("-Phase '$phase'")) { throw "G04D-C machine-state phase is not independently timed: $phase" }
+}
+foreach ($registrationBoundary in @(
+    'Get-G04DCMsiComponentRegistrationState', 'RegistryView]::Registry64', 'OpenBaseKey',
+    'OpenComponentKey', 'OpenSubKey($PackedComponent, $false)', 'DoNotExpandEnvironmentNames',
+    'systemProductValueState', 'userProductValueState'
+)) {
+    if (!$commonProof.Contains($registrationBoundary)) { throw "G04D-C optimized MSI registration boundary is missing: $registrationBoundary" }
+}
+$componentCollectorStart = $commonProof.IndexOf('function Get-G04DCMsiComponentRegistrationState', [StringComparison]::Ordinal)
+$registrationCollectorStart = $commonProof.IndexOf('function Get-G04DCMsiRegistrationState', [StringComparison]::Ordinal)
+if ($componentCollectorStart -lt 0 -or $registrationCollectorStart -le $componentCollectorStart -or
+    $commonProof.Substring($componentCollectorStart, $registrationCollectorStart - $componentCollectorStart).Contains('Get-G04DCRegistryValueState')) {
+    throw 'G04D-C optimized component collector may not invoke the Registry provider value helper per component.'
+}
 foreach ($registryStateBoundary in @(
     'Get-G04DCRegistryValueState', 'Get-G04DCRegistryDefaultValueState',
     'keyExists', 'defaultValuePresent', 'defaultValueType', 'defaultValue',
@@ -76,12 +112,12 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 134 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 186 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
 $registryRowsDefinition = '$protectedRegistryRows = @($analysis.protectedOwnership.allRegistryRows)'
-$firstRegistryRowsUse = '$before = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames'
+$firstRegistryRowsUse = '$before = Get-G04DCAdminMachineState -Label ''pre'''
 if (!$adminProof.Contains($registryRowsDefinition) -or !$adminProof.Contains($firstRegistryRowsUse) -or
     $adminProof.IndexOf($registryRowsDefinition, [StringComparison]::Ordinal) -gt $adminProof.IndexOf($firstRegistryRowsUse, [StringComparison]::Ordinal)) {
     throw 'G04D-C administrative-image proof must derive protected registry rows before its first strict-mode state capture.'
@@ -160,9 +196,28 @@ if (!$adminProof.Contains('Assert-G04DCRunnerIsolation -State $before') -or !$mi
     throw 'G04D-C modes must fail closed on a pre-existing ordinary profile or LibreOffice process.'
 }
 if ($workflow -match '(?m)^\s+(push|pull_request|schedule):') { throw 'G04D-C expensive proof workflow must be workflow_dispatch only.' }
-if ([regex]::Matches($workflow, 'persist-credentials:\s*false').Count -ne 3) { throw 'G04D-C checkouts must not persist the read-scoped GitHub token.' }
+if ([regex]::Matches($workflow, 'persist-credentials:\s*false').Count -ne 4) { throw 'G04D-C checkouts must not persist the read-scoped GitHub token.' }
 if (!$workflow.Contains('if: ${{ always() }}') -or !$workflow.Contains('PROOF_PROVENANCE_OR_INFRASTRUCTURE_FAILURE') -or !$decisionProof.Contains('Assert-G04DCArtifactManifest')) {
     throw 'G04D-C decision must always run, separate infrastructure failure, and validate both artifact manifests.'
+}
+if (!$workflow.Contains('proofMode:') -or !$workflow.Contains('- precheck') -or !$workflow.Contains('- full') -or
+    !$workflow.Contains("inputs.proofMode == 'precheck'") -or !$workflow.Contains("inputs.proofMode == 'full'")) {
+    throw 'G04D-C workflow must expose bounded precheck/full dispatch modes.'
+}
+if ([regex]::Matches($workflow, '(?m)^\s+timeout-minutes:\s*90\s*$').Count -ne 2 -or
+    [regex]::Matches($workflow, '(?m)^\s+timeout-minutes:\s*20\s*$').Count -ne 1) {
+    throw 'G04D-C PRECHECK must be 20 minutes and both FULL proof jobs must remain 90 minutes.'
+}
+if ($precheckProof -match '(?i)msiexec|/a|soffice|Invoke-G04DCSandboxSmoke|AppContainer') {
+    throw 'G04D-C PRECHECK may not extract, install, or launch the runtime.'
+}
+foreach ($precheckBoundary in @(
+    'machine-pre.json', 'machine-state-progress.ndjson', 'machine-state-performance.json',
+    'MACHINE_STATE_PRECHECK_PASS', 'MACHINE_STATE_PRECHECK_BLOCKED',
+    'Assert-G04DCRunnerIsolation', 'Assert-G04DCMsiRegistrationAbsent',
+    'candidateClassificationProduced = $false'
+)) {
+    if (!$precheckProof.Contains($precheckBoundary)) { throw "G04D-C PRECHECK boundary is missing: $precheckBoundary" }
 }
 foreach ($sourceBoundary in @(
     'TcpClient]::new', '$tcp.Connect($selected, 443)', 'AuthenticateAsClient', 'RemoteEndPoint',
