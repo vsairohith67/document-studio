@@ -207,6 +207,216 @@ Assert-Throws 'unbounded administrative custom action' 'UNBOUNDED_MSI_CUSTOM_ACT
     Assert-G04DCAdminMutationClosure -Closure ([pscustomobject]@{ unboundedAdminCustomActions = @([pscustomobject]@{ action = 'arbitrary' }) })
 }
 
+function New-G04DCTestScheduledTaskAction {
+    param(
+        [Parameter(Mandatory = $true)] [string]$CimClassName,
+        [System.Collections.IDictionary]$Properties = ([ordered]@{})
+    )
+    $action = [ordered]@{ CimClass = [pscustomobject][ordered]@{ CimClassName = $CimClassName } }
+    foreach ($name in $Properties.Keys) { $action[$name] = $Properties[$name] }
+    return [pscustomobject]$action
+}
+
+function New-G04DCTestScheduledTask {
+    param(
+        [Parameter(Mandatory = $true)] [string]$TaskPath,
+        [Parameter(Mandatory = $true)] [string]$TaskName,
+        [Parameter(Mandatory = $true)] [object[]]$Actions,
+        [Parameter(Mandatory = $true)] [string]$DefinitionXml
+    )
+    return [pscustomobject][ordered]@{
+        TaskPath = $TaskPath
+        TaskName = $TaskName
+        State = 'Ready'
+        Actions = $Actions
+        DefinitionXml = $DefinitionXml
+    }
+}
+
+$testTaskExportAdapter = {
+    param($Task, [string]$TaskName, [string]$TaskPath)
+    return $Task.DefinitionXml
+}
+$execAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{
+    Id = 'exec-1'; Execute = 'C:\Synthetic\exec-one.exe'; Arguments = '--synthetic'; WorkingDirectory = 'C:\Synthetic'
+})
+$execEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $execAction -Index 0
+if ($execEvidence.index -ne 0 -or $execEvidence.cimClass -cne 'MSFT_TaskExecAction' -or $execEvidence.actionKind -cne 'exec' -or
+    $execEvidence.properties.Execute -cne 'C:\Synthetic\exec-one.exe' -or $execEvidence.properties.Arguments -cne '--synthetic') {
+    throw 'Normal executable scheduled-task action evidence is invalid.'
+}
+$passed.Add('normal scheduled task Exec action')
+
+$emptyArgumentsAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{ Execute = 'synthetic.exe'; Arguments = ''; WorkingDirectory = 'C:\' })
+$emptyArgumentsEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $emptyArgumentsAction -Index 0
+if (!$emptyArgumentsEvidence.properties.PSObject.Properties['Arguments'] -or $emptyArgumentsEvidence.properties.Arguments -cne '') { throw 'Empty Exec Arguments were not preserved.' }
+$passed.Add('scheduled task Exec empty Arguments')
+
+$absentWorkingDirectoryAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{ Execute = 'synthetic.exe'; Arguments = '--synthetic' })
+$absentWorkingDirectoryEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $absentWorkingDirectoryAction -Index 0
+if ($absentWorkingDirectoryEvidence.properties.PSObject.Properties['WorkingDirectory']) { throw 'Absent Exec WorkingDirectory was serialized.' }
+$passed.Add('scheduled task Exec absent WorkingDirectory')
+
+$comAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandlerAction' -Properties ([ordered]@{ Id = 'com-1'; ClassId = '{11111111-2222-3333-4444-555555555555}'; Data = $null })
+$comEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $comAction -Index 0
+if ($comEvidence.actionKind -cne 'comHandler' -or $comEvidence.properties.PSObject.Properties['Execute']) { throw 'COM handler action incorrectly required Execute.' }
+$passed.Add('scheduled task COM handler without Execute')
+if ($comEvidence.properties.ClassId -cne '{11111111-2222-3333-4444-555555555555}' -or !$comEvidence.properties.PSObject.Properties['Data'] -or $null -ne $comEvidence.properties.Data) {
+    throw 'COM handler ClassId/Data evidence is invalid.'
+}
+$passed.Add('scheduled task COM ClassId and Data')
+
+$showMessageAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskShowMessageAction' -Properties ([ordered]@{ Id = 'message-1'; Title = 'Synthetic title'; Message = 'Synthetic message' })
+$showMessageEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $showMessageAction -Index 0
+if ($showMessageEvidence.actionKind -cne 'showMessage' -or $showMessageEvidence.properties.Title -cne 'Synthetic title' -or $showMessageEvidence.properties.Message -cne 'Synthetic message') {
+    throw 'A valid non-Exec scheduled-task property set was not collected.'
+}
+$passed.Add('scheduled task different valid property set')
+
+$emailAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskEmailAction' -Properties ([ordered]@{
+    Id = 'email-1'; Server = 'smtp.example.invalid'; To = @('one@example.invalid', 'two@example.invalid'); Cc = 'copy@example.invalid'; Subject = ''
+})
+$emailEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $emailAction -Index 0
+if ($emailEvidence.actionKind -cne 'email' -or $emailEvidence.properties.To -isnot [array] -or $emailEvidence.properties.To.Count -ne 2 -or
+    $emailEvidence.properties.To[0] -cne 'one@example.invalid' -or $emailEvidence.properties.Cc -isnot [string] -or $emailEvidence.properties.Subject -cne '') {
+    throw 'Scheduled-task scalar and array property shapes were not preserved.'
+}
+$passed.Add('scheduled task scalar and array shapes preserved')
+
+$mixedTaskXml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec><Command>exec-one.exe</Command></Exec><ComHandler><ClassId>{11111111-2222-3333-4444-555555555555}</ClassId></ComHandler></Actions></Task>'
+$mixedTask = New-G04DCTestScheduledTask -TaskPath '\Synthetic\' -TaskName 'Mixed' -Actions @($execAction, $comAction) -DefinitionXml $mixedTaskXml
+$mixedEvidence = ConvertTo-G04DCScheduledTaskEvidence -Task $mixedTask -ExportTaskAdapter $testTaskExportAdapter
+if ($mixedEvidence.actions.Count -ne 2 -or $mixedEvidence.actions[0].actionKind -cne 'exec' -or $mixedEvidence.actions[1].actionKind -cne 'comHandler') {
+    throw 'Mixed Exec/COM scheduled-task evidence is invalid.'
+}
+$passed.Add('mixed scheduled task Exec and COM actions')
+if ($mixedEvidence.actions[0].index -ne 0 -or $mixedEvidence.actions[1].index -ne 1 -or $mixedEvidence.actions[0].properties.Id -cne 'exec-1' -or $mixedEvidence.actions[1].properties.Id -cne 'com-1') {
+    throw 'Original scheduled-task action order was not preserved.'
+}
+$passed.Add('scheduled task original action order preserved')
+
+$presentNullWorkingDirectoryAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{ Execute = 'synthetic.exe'; Arguments = '--synthetic'; WorkingDirectory = $null })
+$presentNullWorkingDirectoryEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $presentNullWorkingDirectoryAction -Index 0
+$absentJson = $absentWorkingDirectoryEvidence | ConvertTo-Json -Compress -Depth 8
+$presentNullJson = $presentNullWorkingDirectoryEvidence | ConvertTo-Json -Compress -Depth 8
+if ($absentJson.Contains('"WorkingDirectory"') -or !$presentNullJson.Contains('"WorkingDirectory":null')) { throw 'Absent and present-null scheduled-task properties were conflated.' }
+$passed.Add('scheduled task property absent versus present null')
+if (!$emptyArgumentsEvidence.properties.PSObject.Properties['Arguments'] -or ($emptyArgumentsEvidence | ConvertTo-Json -Compress -Depth 8) -notmatch '"Arguments":""') {
+    throw 'Present empty-string scheduled-task property was not preserved.'
+}
+$passed.Add('scheduled task property present empty string')
+
+$unknownAction = New-G04DCTestScheduledTaskAction -CimClassName 'Contoso_TaskOpaqueAction' -Properties ([ordered]@{ Id = 'opaque-1'; Name = 'synthetic'; OpaqueConfig = 'not-structured' })
+$unknownEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $unknownAction -Index 0
+if ($unknownEvidence.actionKind -cne 'other' -or $unknownEvidence.cimClass -cne 'Contoso_TaskOpaqueAction' -or $unknownEvidence.properties.Id -cne 'opaque-1' -or
+    $unknownEvidence.properties.PSObject.Properties['OpaqueConfig']) { throw 'Unknown identifiable scheduled-task action was not safely bounded.' }
+$passed.Add('unknown identifiable scheduled task CIM class')
+
+$unknownXmlA = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Opaque><Config>A</Config></Opaque></Actions></Task>'
+$unknownXmlB = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Opaque><Config>B</Config></Opaque></Actions></Task>'
+$unknownTaskA = New-G04DCTestScheduledTask -TaskPath '\Synthetic\' -TaskName 'Opaque' -Actions @($unknownAction) -DefinitionXml $unknownXmlA
+$unknownTaskB = New-G04DCTestScheduledTask -TaskPath '\Synthetic\' -TaskName 'Opaque' -Actions @($unknownAction) -DefinitionXml $unknownXmlB
+$unknownTaskEvidenceA = ConvertTo-G04DCScheduledTaskEvidence -Task $unknownTaskA -ExportTaskAdapter $testTaskExportAdapter
+$unknownTaskEvidenceB = ConvertTo-G04DCScheduledTaskEvidence -Task $unknownTaskB -ExportTaskAdapter $testTaskExportAdapter
+if (($unknownTaskEvidenceA.actions | ConvertTo-Json -Compress -Depth 8) -cne ($unknownTaskEvidenceB.actions | ConvertTo-Json -Compress -Depth 8) -or
+    $unknownTaskEvidenceA.definitionSha256 -ceq $unknownTaskEvidenceB.definitionSha256) { throw 'Task XML hash did not cover an unstructured unknown-action change.' }
+$passed.Add('unknown scheduled task action retains XML hash coverage')
+
+Assert-Throws 'scheduled task action class cannot be identified' 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskActionEvidence -Action ([pscustomobject]@{ Id = 'missing-class' }) -Index 0
+}
+Assert-Throws 'scheduled task Export-ScheduledTask failure' 'SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskEvidence -Task $mixedTask -ExportTaskAdapter { param($Task, $TaskName, $TaskPath) throw [System.InvalidOperationException]::new('synthetic export failure') }
+}
+
+$getterFailureAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{ Execute = 'synthetic.exe'; Arguments = '--synthetic' })
+$getterFailureAdapter = @{
+    GetProperty = { param($CandidateObject, [string]$PropertyName) $CandidateObject.PSObject.Properties[$PropertyName] }
+    GetValue = {
+        param($Property, [string]$PropertyName)
+        if ($PropertyName -ceq 'Execute') { throw [System.InvalidOperationException]::new('synthetic getter failure') }
+        return $Property.Value
+    }
+}
+Assert-Throws 'scheduled task property getter failure' 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskActionEvidence -Action $getterFailureAction -Index 0 -PropertyAccessAdapter $getterFailureAdapter
+}
+
+$oversizedStringAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{ Execute = ('x' * 16385) })
+Assert-Throws 'scheduled task bounded string overflow' 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskActionEvidence -Action $oversizedStringAction -Index 0
+}
+$oversizedArrayAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskEmailAction' -Properties ([ordered]@{ To = (@('recipient@example.invalid') * 129) })
+Assert-Throws 'scheduled task bounded array overflow' 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskActionEvidence -Action $oversizedArrayAction -Index 0
+}
+$recursiveAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandlerAction' -Properties ([ordered]@{ ClassId = '{11111111-2222-3333-4444-555555555555}'; Data = [pscustomobject]@{ nested = 'prohibited' } })
+Assert-Throws 'scheduled task recursive object serialization' 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskActionEvidence -Action $recursiveAction -Index 0
+}
+$nonFiniteAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskEmailAction' -Properties ([ordered]@{ Server = [double]::NaN })
+Assert-Throws 'scheduled task non-finite primitive serialization' 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' {
+    ConvertTo-G04DCScheduledTaskActionEvidence -Action $nonFiniteAction -Index 0
+}
+
+$deterministicJsonA = ConvertTo-G04DCScheduledTaskActionEvidence -Action $comAction -Index 3 | ConvertTo-Json -Compress -Depth 8
+$deterministicJsonB = ConvertTo-G04DCScheduledTaskActionEvidence -Action $comAction -Index 3 | ConvertTo-Json -Compress -Depth 8
+if ($deterministicJsonA -cne $deterministicJsonB -or (Get-G04DCCanonicalHash -Rows @($deterministicJsonA)) -cne (Get-G04DCCanonicalHash -Rows @($deterministicJsonB))) {
+    throw 'Repeated scheduled-task action serialization is not deterministic.'
+}
+$passed.Add('scheduled task deterministic repeated serialization')
+
+$changedExecAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskExecAction' -Properties ([ordered]@{ Id = 'exec-1'; Execute = 'C:\Synthetic\exec-two.exe'; Arguments = '--synthetic'; WorkingDirectory = 'C:\Synthetic' })
+$changedTaskXml = $mixedTaskXml.Replace('exec-one.exe', 'exec-two.exe')
+$changedTask = New-G04DCTestScheduledTask -TaskPath '\Synthetic\' -TaskName 'Mixed' -Actions @($changedExecAction, $comAction) -DefinitionXml $changedTaskXml
+$changedEvidence = ConvertTo-G04DCScheduledTaskEvidence -Task $changedTask -ExportTaskAdapter $testTaskExportAdapter
+if ($mixedEvidence.definitionSha256 -ceq $changedEvidence.definitionSha256 -or
+    ($mixedEvidence.actions | ConvertTo-Json -Compress -Depth 8) -ceq ($changedEvidence.actions | ConvertTo-Json -Compress -Depth 8)) {
+    throw 'Changed scheduled-task action did not change both definition hash and structured evidence.'
+}
+$passed.Add('changed scheduled task action changes definition evidence')
+
+$comActionClone = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandlerAction' -Properties ([ordered]@{ Id = 'com-1'; ClassId = '{11111111-2222-3333-4444-555555555555}'; Data = $null })
+$comCloneJson = ConvertTo-G04DCScheduledTaskActionEvidence -Action $comActionClone -Index 0 | ConvertTo-Json -Compress -Depth 8
+if (($comEvidence | ConvertTo-Json -Compress -Depth 8) -cne $comCloneJson) { throw 'Unchanged heterogeneous scheduled-task actions compared unequal.' }
+$passed.Add('unchanged heterogeneous scheduled task action compares equal')
+
+$sourceBefore = $unknownAction | ConvertTo-Json -Compress -Depth 8
+ConvertTo-G04DCScheduledTaskActionEvidence -Action $unknownAction -Index 0 | Out-Null
+$sourceAfter = $unknownAction | ConvertTo-Json -Compress -Depth 8
+$commonSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'G04DC.Common.psm1') -Raw
+if ($sourceBefore -cne $sourceAfter -or $commonSource -match '(?i)(Register|Set|Unregister|Disable|Enable)-ScheduledTask') {
+    throw 'Scheduled-task evidence collection mutated input or contains a task mutation command.'
+}
+$passed.Add('scheduled task collection performs no mutation')
+
+$runnerShapedComAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandlerAction' -Properties ([ordered]@{
+    Id = $null
+    ClassId = '{7D096C5F-AC08-4F1F-BEB7-5C22C517CE39}'
+    Data = ''
+    PSComputerName = 'fv-azrunner-win'
+    RunspaceId = [guid]'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    CimSystemProperties = [pscustomobject]@{ Namespace = 'Root/Microsoft/Windows/TaskScheduler' }
+})
+$runnerShapedEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $runnerShapedComAction -Index 0
+$runnerShapedJson = $runnerShapedEvidence | ConvertTo-Json -Compress -Depth 8
+if ($runnerShapedEvidence.actionKind -cne 'comHandler' -or $runnerShapedJson.Contains('Execute') -or $runnerShapedJson.Contains('PSComputerName') -or $runnerShapedJson.Contains('RunspaceId') -or $runnerShapedJson.Contains('CimSystemProperties')) {
+    throw 'GitHub-hosted runner-shaped non-Exec action was not safely serialized.'
+}
+$passed.Add('GitHub runner shaped non-Exec scheduled task action')
+
+if ($commonSource -match '\$_\.Execute|\$action\.Execute|\$Action\.Execute') { throw 'Direct .Execute assumption remains in scheduled-task catalog collection.' }
+$passed.Add('no direct Execute assumption in scheduled task catalog')
+
+$taskA = New-G04DCTestScheduledTask -TaskPath '\Zeta\' -TaskName 'Alpha' -Actions @($execAction) -DefinitionXml '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec /></Actions></Task>'
+$taskB = New-G04DCTestScheduledTask -TaskPath '\Alpha\' -TaskName 'Zulu' -Actions @($execAction) -DefinitionXml '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec /></Actions></Task>'
+$taskC = New-G04DCTestScheduledTask -TaskPath '\Alpha\' -TaskName 'Alpha' -Actions @($execAction) -DefinitionXml '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec /></Actions></Task>'
+$orderedTasks = @(Get-G04DCScheduledTaskCatalogEvidence -Tasks @($taskA, $taskB, $taskC) -ExportTaskAdapter $testTaskExportAdapter)
+if (($orderedTasks | ForEach-Object { "$($_.taskPath)$($_.taskName)" }) -join '|' -cne '\Alpha\Alpha|\Alpha\Zulu|\Zeta\Alpha') {
+    throw 'Scheduled-task catalog ordering is not TaskPath plus TaskName.'
+}
+$passed.Add('scheduled task TaskPath and TaskName ordering')
+
 function New-State(
     [string]$FontValue = 'baseline',
     [string]$Service = '',
@@ -525,5 +735,5 @@ try {
 }
 finally { Remove-Item -LiteralPath $artifactRoot -Recurse -Force }
 
-if ($passed.Count -ne 104) { throw "Expected 104 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 131) { throw "Expected 131 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

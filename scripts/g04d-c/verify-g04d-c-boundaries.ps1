@@ -41,6 +41,43 @@ foreach ($registryRegression in @(
 )) {
     if (!$tests.Contains($registryRegression)) { throw "G04D-C registry-state regression is missing: $registryRegression" }
 }
+foreach ($scheduledTaskBoundary in @(
+    'Get-G04DCSafePropertyState', 'ConvertTo-G04DCScheduledTaskActionEvidence',
+    'ConvertTo-G04DCScheduledTaskEvidence', 'Get-G04DCScheduledTaskCatalogEvidence',
+    'SCHEDULED_TASK_ACTION_CAPTURE_FAILED', 'SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED',
+    'cimClass', 'actionKind', 'properties', 'definitionSha256',
+    "'exec'", "'comHandler'", "'email'", "'showMessage'", "'other'",
+    "@('Id', 'Execute', 'Arguments', 'WorkingDirectory')",
+    "@('Id', 'ClassId', 'Data')", "Get-ScheduledTask -ErrorAction Stop",
+    'Export-ScheduledTask', 'maximumStringCharacters = 16384', 'maximumArrayMembers = 128'
+)) {
+    if (!$commonProof.Contains($scheduledTaskBoundary)) { throw "G04D-C heterogeneous scheduled-task evidence boundary is missing: $scheduledTaskBoundary" }
+}
+if ($commonProof -match '\$_\.Execute|\$action\.Execute|\$Action\.Execute') {
+    throw 'G04D-C scheduled-task catalog may not directly assume an Execute property.'
+}
+if ($commonProof -match '(?i)(Register|Set|Unregister|Disable|Enable)-ScheduledTask') {
+    throw 'G04D-C scheduled-task evidence collection may not mutate scheduled tasks.'
+}
+foreach ($scheduledTaskRegression in @(
+    'normal scheduled task Exec action', 'scheduled task Exec empty Arguments',
+    'scheduled task Exec absent WorkingDirectory', 'scheduled task COM handler without Execute',
+    'scheduled task COM ClassId and Data', 'scheduled task different valid property set',
+    'scheduled task scalar and array shapes preserved',
+    'mixed scheduled task Exec and COM actions', 'scheduled task original action order preserved',
+    'scheduled task property absent versus present null', 'scheduled task property present empty string',
+    'unknown identifiable scheduled task CIM class', 'unknown scheduled task action retains XML hash coverage',
+    'scheduled task action class cannot be identified', 'scheduled task Export-ScheduledTask failure',
+    'scheduled task property getter failure', 'scheduled task bounded string overflow',
+    'scheduled task bounded array overflow', 'scheduled task recursive object serialization',
+    'scheduled task non-finite primitive serialization',
+    'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
+    'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
+    'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
+    'scheduled task TaskPath and TaskName ordering', 'Expected 131 fail-closed cases'
+)) {
+    if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
+}
 $registryRowsDefinition = '$protectedRegistryRows = @($analysis.protectedOwnership.allRegistryRows)'
 $firstRegistryRowsUse = '$before = Get-G04DCMachineState -ProtectedRegistryRows $protectedRegistryRows -ProtectedFontFileNames $protectedFontFileNames'
 if (!$adminProof.Contains($registryRowsDefinition) -or !$adminProof.Contains($firstRegistryRowsUse) -or
