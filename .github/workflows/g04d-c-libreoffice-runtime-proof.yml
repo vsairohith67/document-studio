@@ -24,6 +24,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.19.0'
@@ -31,6 +34,49 @@ jobs:
       - name: Install locked PDF.js dependency tree
         shell: powershell
         run: npm ci --ignore-scripts
+      - name: Initialize fail-safe PRECHECK bootstrap evidence
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-machine-state-precheck-evidence'
+          if (Test-Path -LiteralPath $evidence) {
+            throw "Refusing to overwrite PRECHECK evidence directory: $evidence"
+          }
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          [IO.File]::WriteAllText(
+            (Join-Path $evidence 'MARKER.md'),
+            "# G04D-C machine-state precheck evidence`r`n",
+            [Text.UTF8Encoding]::new($false)
+          )
+          $bootstrap = [ordered]@{
+            schemaVersion = 1
+            checkedOutSha = $env:GITHUB_SHA
+            windowsPowerShellVersion = $PSVersionTable.PSVersion.ToString()
+            sourceFileCount = 0
+            sourceFiles = @()
+            asciiGateStatus = 'NOT_RUN'
+            parserGateStatus = 'NOT_RUN'
+            parserErrorCount = 0
+            incompleteTokenCount = 0
+            malformedStringTokenCount = 0
+            unknownTokenCount = 0
+            precheckScriptStarted = $false
+          }
+          [IO.File]::WriteAllText(
+            (Join-Path $evidence 'bootstrap-source-validation.json'),
+            ($bootstrap | ConvertTo-Json -Depth 8) + [Environment]::NewLine,
+            [Text.UTF8Encoding]::new($false)
+          )
+      - name: Validate ASCII bytes and Windows PowerShell 5.1 parsing
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-machine-state-precheck-evidence'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass `
+            -File .\scripts\g04d-c\Test-G04DCPowerShell51Source.ps1 `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -SourceRoot (Join-Path $env:GITHUB_WORKSPACE 'scripts\g04d-c') `
+            -BootstrapEvidencePath (Join-Path $evidence 'bootstrap-source-validation.json') `
+            -ExpectedSha $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'G04D-C source compatibility gate failed.' }
       - name: Validate proof boundaries with Windows PowerShell 5.1
         shell: powershell
         run: .\scripts\g04d-c\verify-g04d-c-boundaries.ps1
@@ -67,6 +113,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.19.0'
@@ -110,6 +159,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24.19.0'

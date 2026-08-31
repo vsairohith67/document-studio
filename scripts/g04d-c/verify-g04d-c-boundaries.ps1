@@ -2,6 +2,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$sourceGatePath = Join-Path $PSScriptRoot 'Test-G04DCPowerShell51Source.ps1'
+& powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File $sourceGatePath `
+    -RepositoryRoot $repositoryRoot `
+    -SourceRoot $PSScriptRoot
+if ($LASTEXITCODE -ne 0) { throw 'G04D-C source compatibility gate failed.' }
 $workflowPath = Join-Path $repositoryRoot '.github\workflows\g04d-c-libreoffice-runtime-proof.yml'
 $workflow = Get-Content -LiteralPath $workflowPath -Raw
 $allProof = @(Get-ChildItem -LiteralPath $PSScriptRoot -File | Where-Object { $_.Name -cne 'verify-g04d-c-boundaries.ps1' } | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }) -join "`n"
@@ -112,7 +118,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 186 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 206 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
@@ -215,9 +221,20 @@ foreach ($precheckBoundary in @(
     'machine-pre.json', 'machine-state-progress.ndjson', 'machine-state-performance.json',
     'MACHINE_STATE_PRECHECK_PASS', 'MACHINE_STATE_PRECHECK_BLOCKED',
     'Assert-G04DCRunnerIsolation', 'Assert-G04DCMsiRegistrationAbsent',
-    'candidateClassificationProduced = $false'
+    'candidateClassificationProduced = $false', 'bootstrap-source-validation.json',
+    'precheckScriptStarted', 'PRECHECK_BOOTSTRAP_INVALID'
 )) {
     if (!$precheckProof.Contains($precheckBoundary)) { throw "G04D-C PRECHECK boundary is missing: $precheckBoundary" }
+}
+foreach ($sourceCompatibilityBoundary in @(
+    'Test-G04DCPowerShell51Source.ps1', 'g04d_c_powershell_source_policy.py',
+    'ASCII-byte gate result: PASS', 'Windows PowerShell 5.1 parser gate result: PASS',
+    'Initialize fail-safe PRECHECK bootstrap evidence', 'bootstrap-source-validation.json',
+    'sourceFileCount', 'asciiGateStatus', 'parserGateStatus', 'precheckScriptStarted'
+)) {
+    if (!$workflow.Contains($sourceCompatibilityBoundary) -and !$allProof.Contains($sourceCompatibilityBoundary)) {
+        throw "G04D-C source/bootstrap compatibility boundary is missing: $sourceCompatibilityBoundary"
+    }
 }
 foreach ($sourceBoundary in @(
     'TcpClient]::new', '$tcp.Connect($selected, 443)', 'AuthenticateAsClient', 'RemoteEndPoint',
@@ -260,10 +277,12 @@ foreach ($regression in @('ambiguous MSI effect ownership', 'enabled MSI shortcu
 }
 
 $allowed = @(
+    '.github/workflows/ci.yml',
     '.github/workflows/g04d-c-libreoffice-runtime-proof.yml',
     'docs/adr/ADR-018-non-mutating-libreoffice-runtime-acquisition.md',
     'docs/implementation-log/G04D-C-libreoffice-runtime-admission.md',
     'scripts/g04d-c/',
+    'scripts/g04d_c_powershell_source_policy.py',
     'scripts/validate_repo.py'
 )
 $base = 'origin/main'

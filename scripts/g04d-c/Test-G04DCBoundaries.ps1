@@ -839,11 +839,12 @@ try {
     $serializationSuccessPath = Join-Path $telemetryRoot 'machine-success.json'
     $serializationSuccessContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'serialization-success' -ProgressPath (Join-Path $telemetryRoot 'serialization-success.ndjson') -PerformancePath (Join-Path $telemetryRoot 'serialization-success-performance.json') -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
     Start-G04DCMachineStatePhase -Context $serializationSuccessContext -Phase 'state-serialization'
-    & $module { param($Context, [string]$OutputPath) Write-G04DCBoundedMachineStateJson -Path $OutputPath -Value ([pscustomobject][ordered]@{ schemaVersion = 1; bounded = $true; values = @('alpha', '', 7, $true, $null); nested = [pscustomobject][ordered]@{ unicode = 'नमस्ते'; map = [ordered]@{ present = $true; value = 'x' } } }) -CaptureContext $Context -CapturePhase 'state-serialization' } $serializationSuccessContext $serializationSuccessPath
+    $unicodeSerializationValue = -join @([char]0x0928, [char]0x092E, [char]0x0938, [char]0x094D, [char]0x0924, [char]0x0947)
+    & $module { param($Context, [string]$OutputPath, [string]$UnicodeValue) Write-G04DCBoundedMachineStateJson -Path $OutputPath -Value ([pscustomobject][ordered]@{ schemaVersion = 1; bounded = $true; values = @('alpha', '', 7, $true, $null); nested = [pscustomobject][ordered]@{ unicode = $UnicodeValue; map = [ordered]@{ present = $true; value = 'x' } } }) -CaptureContext $Context -CapturePhase 'state-serialization' } $serializationSuccessContext $serializationSuccessPath $unicodeSerializationValue
     Complete-G04DCMachineStatePhase -Context $serializationSuccessContext -Phase 'state-serialization' -ItemCount 1
     Complete-G04DCMachineStateCapture -Context $serializationSuccessContext -Passed $true -FailureMessage $null
     $serializationSuccess = Get-Content -LiteralPath $serializationSuccessPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if (!(Test-Path -LiteralPath $serializationSuccessPath -PathType Leaf) -or ![bool]$serializationSuccess.bounded -or @($serializationSuccess.values).Count -ne 5 -or [string]$serializationSuccess.nested.unicode -cne 'नमस्ते' -or ![bool]$serializationSuccess.nested.map.present) {
+    if (!(Test-Path -LiteralPath $serializationSuccessPath -PathType Leaf) -or ![bool]$serializationSuccess.bounded -or @($serializationSuccess.values).Count -ne 5 -or [string]$serializationSuccess.nested.unicode -cne $unicodeSerializationValue -or ![bool]$serializationSuccess.nested.map.present) {
         throw 'Bounded machine-state serialization did not durably publish its successful JSON output.'
     }
     $passed.Add('machine-state bounded serialization publishes durable JSON')
@@ -1137,5 +1138,145 @@ $changedPaths = @(git -C (Join-Path $PSScriptRoot '..\..') diff --name-only orig
 if (@($changedPaths | Where-Object { $_ -match '^(apps|packages|src|migrations)/' }).Count -ne 0) { throw 'C5 modified a production path.' }
 $passed.Add('C5 has no production impact path')
 
-if ($passed.Count -ne 186) { throw "Expected 186 fail-closed cases; passed $($passed.Count)." }
+$sourcePolicyTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-source-policy-test-' + [guid]::NewGuid().ToString('N'))
+$sourceGateScript = Join-Path $PSScriptRoot 'Test-G04DCPowerShell51Source.ps1'
+$sourcePolicyScript = Join-Path $PSScriptRoot '..\g04d_c_powershell_source_policy.py'
+New-Item -ItemType Directory -Path $sourcePolicyTestRoot | Out-Null
+function New-G04DCSourcePolicyCase([string]$Name) {
+    $caseRoot = Join-Path $sourcePolicyTestRoot $Name
+    $caseSource = Join-Path $caseRoot 'source'
+    New-Item -ItemType Directory -Path $caseSource -Force | Out-Null
+    return [pscustomobject][ordered]@{ root = $caseRoot; source = $caseSource }
+}
+function Write-G04DCSourcePolicyBytes([string]$Path, [byte[]]$Bytes) {
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    if (!(Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    [IO.File]::WriteAllBytes($Path, $Bytes)
+}
+function Invoke-G04DCSourcePolicyCase($Case) {
+    return & $sourceGateScript `
+        -RepositoryRoot $Case.root `
+        -SourceRoot $Case.source `
+        -PythonPolicyPath $sourcePolicyScript `
+        -Quiet `
+        -PassThru
+}
+
+try {
+    $validCase = New-G04DCSourcePolicyCase 'valid-sources'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $validCase.source 'valid.ps1') -Bytes ([Text.Encoding]::ASCII.GetBytes("Write-Output 'valid'`r`n"))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $validCase.source 'valid.psm1') -Bytes ([Text.Encoding]::ASCII.GetBytes("function Get-Valid { return 1 }`r`n"))
+    $validReport = Invoke-G04DCSourcePolicyCase $validCase
+    if ($validReport.sourceFileCount -ne 2 -or $validReport.asciiGateStatus -cne 'PASS' -or $validReport.parserGateStatus -cne 'PASS') { throw 'Valid ASCII sources did not pass both source gates.' }
+    $passed.Add('ASCII-only .ps1 source passes')
+    $passed.Add('ASCII-only .psm1 source passes')
+
+    $emDashCase = New-G04DCSourcePolicyCase 'utf8-em-dash'
+    $emDashBytes = [byte[]](@([Text.Encoding]::ASCII.GetBytes('Write-Output "blocked ')) + @(0xE2, 0x80, 0x94) + @([Text.Encoding]::ASCII.GetBytes('"')))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $emDashCase.source 'em-dash.ps1') -Bytes $emDashBytes
+    Assert-Throws 'UTF-8-no-BOM em dash source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $emDashCase | Out-Null }
+
+    $smartQuoteCase = New-G04DCSourcePolicyCase 'utf8-smart-quote'
+    $smartQuoteBytes = [byte[]](@([Text.Encoding]::ASCII.GetBytes('# quote ')) + @(0xE2, 0x80, 0x9C))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $smartQuoteCase.source 'smart-quote.ps1') -Bytes $smartQuoteBytes
+    Assert-Throws 'UTF-8-no-BOM smart quote source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $smartQuoteCase | Out-Null }
+
+    $utf8BomCase = New-G04DCSourcePolicyCase 'utf8-bom'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $utf8BomCase.source 'utf8-bom.ps1') -Bytes ([byte[]](0xEF, 0xBB, 0xBF, 0x23, 0x20, 0x78))
+    Assert-Throws 'UTF-8 BOM source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $utf8BomCase | Out-Null }
+
+    $utf16LeCase = New-G04DCSourcePolicyCase 'utf16-le-bom'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $utf16LeCase.source 'utf16-le.ps1') -Bytes ([byte[]](0xFF, 0xFE, 0x57, 0x00))
+    Assert-Throws 'UTF-16 LE BOM source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $utf16LeCase | Out-Null }
+
+    $utf16BeCase = New-G04DCSourcePolicyCase 'utf16-be-bom'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $utf16BeCase.source 'utf16-be.ps1') -Bytes ([byte[]](0xFE, 0xFF, 0x00, 0x57))
+    Assert-Throws 'UTF-16 BE BOM source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $utf16BeCase | Out-Null }
+
+    $utf32LeCase = New-G04DCSourcePolicyCase 'utf32-le-bom'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $utf32LeCase.source 'utf32-le.ps1') -Bytes ([byte[]](0xFF, 0xFE, 0x00, 0x00, 0x57, 0x00, 0x00, 0x00))
+    Assert-Throws 'UTF-32 LE BOM source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $utf32LeCase | Out-Null }
+
+    $utf32BeCase = New-G04DCSourcePolicyCase 'utf32-be-bom'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $utf32BeCase.source 'utf32-be.ps1') -Bytes ([byte[]](0x00, 0x00, 0xFE, 0xFF, 0x00, 0x00, 0x00, 0x57))
+    Assert-Throws 'UTF-32 BE BOM source rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $utf32BeCase | Out-Null }
+
+    $commentCase = New-G04DCSourcePolicyCase 'non-ascii-comment'
+    $commentBytes = [byte[]](@([Text.Encoding]::ASCII.GetBytes('# comment ')) + @(0xC3, 0xA9))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $commentCase.source 'comment.ps1') -Bytes $commentBytes
+    Assert-Throws 'non-ASCII source comment rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $commentCase | Out-Null }
+
+    $stringCase = New-G04DCSourcePolicyCase 'non-ascii-string'
+    $stringBytes = [byte[]](@([Text.Encoding]::ASCII.GetBytes('Write-Output "')) + @(0xC3, 0xA9) + @([Text.Encoding]::ASCII.GetBytes('"')))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $stringCase.source 'string.ps1') -Bytes $stringBytes
+    Assert-Throws 'non-ASCII source string rejected' 'G04DC_SOURCE_ASCII_INVALID' { Invoke-G04DCSourcePolicyCase $stringCase | Out-Null }
+
+    $invalidParserCase = New-G04DCSourcePolicyCase 'invalid-ascii-parser'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $invalidParserCase.source 'invalid.ps1') -Bytes ([Text.Encoding]::ASCII.GetBytes('Write-Output "unterminated'))
+    Assert-Throws 'invalid ASCII PowerShell source rejected by parser' 'G04DC_SOURCE_PARSE_INVALID' { Invoke-G04DCSourcePolicyCase $invalidParserCase | Out-Null }
+    if ($PSVersionTable.PSEdition -cne 'Desktop' -or $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or
+        $validReport.parserErrorCount -ne 0 -or $validReport.unknownTokenCount -ne 0) {
+        throw 'Valid source was not accepted by the actual Windows PowerShell 5.1 parser.'
+    }
+    $passed.Add('valid ASCII PowerShell script accepted by Windows PowerShell 5.1')
+
+    $documentationCase = New-G04DCSourcePolicyCase 'documentation-unicode'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $documentationCase.source 'valid.ps1') -Bytes ([Text.Encoding]::ASCII.GetBytes("Write-Output 'valid'"))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $documentationCase.source 'guide.md') -Bytes ([byte[]](0x23, 0x20, 0xE2, 0x80, 0x94))
+    $documentationReport = Invoke-G04DCSourcePolicyCase $documentationCase
+    if ($documentationReport.sourceFileCount -ne 1 -or $documentationReport.parserGateStatus -cne 'PASS') { throw 'Unicode documentation crossed the executable source boundary.' }
+    $passed.Add('documentation Unicode remains allowed')
+
+    $fixtureCase = New-G04DCSourcePolicyCase 'non-executable-fixture'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $fixtureCase.source 'valid.ps1') -Bytes ([Text.Encoding]::ASCII.GetBytes("Write-Output 'valid'"))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $fixtureCase.source 'explicit-encoding.ps1.fixture') -Bytes ([byte[]](0xE2, 0x80, 0x94))
+    $fixtureReport = Invoke-G04DCSourcePolicyCase $fixtureCase
+    if ($fixtureReport.sourceFileCount -ne 1 -or $fixtureReport.parserGateStatus -cne 'PASS') { throw 'Explicit non-executable encoding fixture crossed the executable source boundary.' }
+    $passed.Add('non-executable explicit encoding fixtures remain allowed')
+
+    $offsetCase = New-G04DCSourcePolicyCase 'exact-offset'
+    $offsetPrefix = [Text.Encoding]::ASCII.GetBytes('# exact-offset ')
+    $offsetBytes = [byte[]](@($offsetPrefix) + @(0xE2, 0x80, 0x94))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $offsetCase.source 'exact.ps1') -Bytes $offsetBytes
+    try { Invoke-G04DCSourcePolicyCase $offsetCase | Out-Null; throw 'Exact-offset source policy case did not fail.' }
+    catch {
+        $expectedOffsetEvidence = "source/exact.ps1 byte offset $($offsetPrefix.Length)"
+        if ($_.Exception.Message -notmatch [regex]::Escape($expectedOffsetEvidence)) { throw "Exact offending path/offset was not reported: $($_.Exception.Message)" }
+    }
+    $passed.Add('repository validation reports exact source path and byte offset')
+
+    $deterministicCase = New-G04DCSourcePolicyCase 'deterministic-discovery'
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $deterministicCase.source 'z.ps1') -Bytes ([Text.Encoding]::ASCII.GetBytes("'z'"))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $deterministicCase.source 'A.psm1') -Bytes ([Text.Encoding]::ASCII.GetBytes("'a'"))
+    Write-G04DCSourcePolicyBytes -Path (Join-Path $deterministicCase.source 'nested\b.ps1') -Bytes ([Text.Encoding]::ASCII.GetBytes("'b'"))
+    $deterministicReport = Invoke-G04DCSourcePolicyCase $deterministicCase
+    if (($deterministicReport.sourceFiles -join '|') -cne 'source/A.psm1|source/nested/b.ps1|source/z.ps1') { throw 'Executable source discovery is not deterministic.' }
+    $passed.Add('G04D-C executable source discovery is deterministic')
+
+    $repositoryRootForSourceGate = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+    $repositoryReport = & $sourceGateScript -RepositoryRoot $repositoryRootForSourceGate -SourceRoot $PSScriptRoot -PythonPolicyPath $sourcePolicyScript -Quiet -PassThru
+    if ($repositoryReport.asciiGateStatus -cne 'PASS' -or $repositoryReport.parserGateStatus -cne 'PASS' -or
+        $repositoryReport.sourceFiles -cnotcontains 'scripts/g04d-c/Invoke-G04DCMachineStatePrecheck.ps1') {
+        throw 'Current PRECHECK script did not pass both source compatibility gates.'
+    }
+    $passed.Add('current PRECHECK source passes ASCII and parser gates')
+
+    $workflowInvokedSources = @([regex]::Matches($workflowSource, '(?i)[.]\\scripts\\g04d-c\\([A-Za-z0-9.-]+[.]ps(?:1|m1))') | ForEach-Object {
+        'scripts/g04d-c/' + $_.Groups[1].Value
+    } | Sort-Object -Unique)
+    $missingWorkflowSources = @($workflowInvokedSources | Where-Object { $repositoryReport.sourceFiles -cnotcontains $_ })
+    if ($workflowInvokedSources.Count -eq 0 -or $missingWorkflowSources.Count -ne 0 -or $repositoryReport.parserGateStatus -cne 'PASS') {
+        throw "Workflow-invoked source compatibility is incomplete: $($missingWorkflowSources -join ', ')"
+    }
+    $passed.Add('every workflow-invoked G04D-C source passes both gates')
+    if ($repositoryReport.incompleteTokenCount -ne 0 -or $repositoryReport.malformedStringTokenCount -ne 0 -or $repositoryReport.unknownTokenCount -ne 0) {
+        throw 'Repository parser report contains incomplete or malformed tokens.'
+    }
+    $passed.Add('repository parser report has zero incomplete or malformed tokens')
+}
+finally {
+    if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
+}
+
+if ($passed.Count -ne 206) { throw "Expected 206 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"
