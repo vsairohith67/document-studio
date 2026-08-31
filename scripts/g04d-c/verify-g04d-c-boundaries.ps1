@@ -47,7 +47,9 @@ foreach ($classRegistryBoundary in @(
     'ClassRegistryDigestCollector', 'BoundedTextCapture', 'BeginRead', 'AppendStderrText',
     'StringComparer.CurrentCultureIgnoreCase', 'SHA256.Create()', 'REGISTRY_DIGEST_TIMEOUT',
     'REGISTRY_DIGEST_RAW_BYTE_CEILING', 'REGISTRY_DIGEST_ROW_CEILING',
-    'REGISTRY_DIGEST_CANONICAL_BYTE_CEILING', 'REGISTRY_DIGEST_STDERR_CEILING'
+    'REGISTRY_DIGEST_CANONICAL_BYTE_CEILING', 'REGISTRY_DIGEST_STDERR_CEILING',
+    'CanonicalUtf8 = new UTF8Encoding(false, true)', 'nativeOutputEncoding',
+    'CanonicalUtf8.GetByteCount', 'CanonicalUtf8.GetBytes'
 )) {
     if (!$classRegistryDigestProof.Contains($classRegistryBoundary)) { throw "G04D-C class-registry streaming boundary is missing: $classRegistryBoundary" }
 }
@@ -66,7 +68,9 @@ if ($classRegistryDigestProof -match '(?i)CreateSubKey|SetValue|Delete(SubKey|Va
 }
 foreach ($classRegistryProcessBoundary in @(
     'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
-    'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding'
+    'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
+    'ActiveHandleCount', 'nativeCleanupFailureStage', 'secondaryNativeCleanupFailure',
+    'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED', 'LifecycleTestHooks'
 )) {
     if (!$commonProof.Contains($classRegistryProcessBoundary)) { throw "G04D-C class-registry process boundary is missing: $classRegistryProcessBoundary" }
 }
@@ -83,7 +87,11 @@ foreach ($classRegistryRegression in @(
     'class registry digest schema change', 'class registry key-count change', 'class registry value-count change',
     'direct HKCR traversal timeout', 'direct HKCR handles disposed for owned cleanup',
     'shortcut catalog transient sharing retry preserves full entry',
-    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 280 fail-closed cases'
+    'shortcut catalog persistent sharing failure remains fail closed',
+    'P1-A cleanup error precedence preserves secondary evidence',
+    'P1-A production cleanup uses no global process termination',
+    'P1-B canonical hash independent of Console OutputEncoding',
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 314 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
@@ -174,7 +182,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 280 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 314 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }

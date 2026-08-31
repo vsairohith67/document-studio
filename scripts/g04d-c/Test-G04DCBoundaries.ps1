@@ -1126,14 +1126,15 @@ function Invoke-G04DCTestClassRegistryCollector {
         [long]$MaximumCanonicalBytes = 134217728,
         [int]$ReadBufferBytes = 65536,
         [long]$NormalizeBudgetMilliseconds = 30000,
-        [long]$HashBudgetMilliseconds = 30000
+        [long]$HashBudgetMilliseconds = 30000,
+        [Text.Encoding]$NativeOutputEncoding = $utf8Strict
     )
-    $bytes = $utf8Strict.GetBytes($Text)
+    $bytes = $NativeOutputEncoding.GetBytes($Text)
     $stream = [IO.MemoryStream]::new($bytes)
     try {
         $collector = [DocumentStudio.G04DC.ClassRegistryDigestCollector]::new(
             $stream,
-            $utf8Strict,
+            $NativeOutputEncoding,
             $MaximumRawBytes,
             $MaximumRows,
             $MaximumRowCharacters,
@@ -1191,6 +1192,111 @@ foreach ($canonicalRows in $canonicalCases) {
 $passed.Add('incremental hash equality')
 if ((Invoke-G04DCTestClassRegistryCollector -Text '').sha256 -cne (Get-G04DCCanonicalHash -Rows @())) { throw 'Zero-row canonical hash changed.' }
 $passed.Add('zero-row hash')
+
+function New-G04DCTestStrictEncoding {
+    param([Parameter(Mandatory = $true)] [int]$CodePage)
+    return [Text.Encoding]::GetEncoding($CodePage, [Text.EncoderFallback]::ExceptionFallback, [Text.DecoderFallback]::ExceptionFallback)
+}
+
+function Get-G04DCTestByteSha256 {
+    param([Parameter(Mandatory = $true)] [byte[]]$Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+
+$strict1252 = New-G04DCTestStrictEncoding -CodePage 1252
+$strictOem = New-G04DCTestStrictEncoding -CodePage 437
+$strictUtf16 = New-G04DCTestStrictEncoding -CodePage 1200
+$asciiEncodingDigests = @($utf8Strict, $strict1252, $strictOem | ForEach-Object {
+    Invoke-G04DCTestClassRegistryCollector -Text "alpha`r`nbeta`r`n" -NativeOutputEncoding $_
+})
+if (@($asciiEncodingDigests.sha256 | Sort-Object -Unique).Count -ne 1 -or
+    @($asciiEncodingDigests.canonicalByteCount | Sort-Object -Unique).Count -ne 1) {
+    throw 'Equivalent ASCII native decodings changed canonical UTF-8 evidence.'
+}
+$passed.Add('P1-B equivalent ASCII rows cross-code-page digest')
+
+$latinRow = -join @('caf', [char]0x00E9)
+$latinEncodingDigests = @($utf8Strict, $strict1252, $strictOem | ForEach-Object {
+    Invoke-G04DCTestClassRegistryCollector -Text ($latinRow + "`r`n") -NativeOutputEncoding $_
+})
+if (@($latinEncodingDigests.sha256 | Sort-Object -Unique).Count -ne 1 -or
+    @($latinEncodingDigests.canonicalByteCount | Sort-Object -Unique).Count -ne 1) {
+    throw 'Equivalent non-ASCII native decodings changed canonical UTF-8 evidence.'
+}
+$passed.Add('P1-B equivalent Unicode rows cross-encoding digest')
+
+$devanagariRow = -join @([char]0x0928, [char]0x092E)
+$devanagariDigest = Invoke-G04DCTestClassRegistryCollector -Text $devanagariRow -NativeOutputEncoding $strictUtf16
+$devanagariCanonicalBytes = $utf8Strict.GetByteCount('"' + $devanagariRow + '"') + 2
+if ($devanagariDigest.canonicalByteCount -ne $devanagariCanonicalBytes) { throw 'Devanagari canonical byte count is not strict UTF-8.' }
+$passed.Add('P1-B Devanagari canonical UTF-8 byte count')
+
+$teluguRow = -join @([char]0x0C24, [char]0x0C46, [char]0x0C32, [char]0x0C41, [char]0x0C17, [char]0x0C41)
+$teluguDigest = Invoke-G04DCTestClassRegistryCollector -Text $teluguRow -NativeOutputEncoding $strictUtf16
+$teluguCanonicalBytes = $utf8Strict.GetByteCount('"' + $teluguRow + '"') + 2
+if ($teluguDigest.canonicalByteCount -ne $teluguCanonicalBytes) { throw 'Telugu canonical byte count is not strict UTF-8.' }
+$passed.Add('P1-B Telugu canonical UTF-8 byte count')
+
+$utf8RowBoundary = $utf8Strict.GetByteCount('"' + $devanagariRow + '"')
+Invoke-G04DCTestClassRegistryCollector -Text $devanagariRow -NativeOutputEncoding $strictUtf16 -MaximumCanonicalRowBytes $utf8RowBoundary | Out-Null
+$passed.Add('P1-B canonical row ceiling uses UTF-8')
+Assert-Throws 'P1-B canonical row ceiling rejects UTF-8 excess' 'REGISTRY_DIGEST_ROW_LENGTH_CEILING' {
+    Invoke-G04DCTestClassRegistryCollector -Text $devanagariRow -NativeOutputEncoding $strictUtf16 -MaximumCanonicalRowBytes ($utf8RowBoundary - 1) | Out-Null
+}
+
+Invoke-G04DCTestClassRegistryCollector -Text $devanagariRow -NativeOutputEncoding $strictUtf16 -MaximumCanonicalBytes ($utf8RowBoundary + 2) | Out-Null
+$passed.Add('P1-B aggregate canonical ceiling uses UTF-8')
+Assert-Throws 'P1-B aggregate canonical ceiling rejects UTF-8 excess' 'REGISTRY_DIGEST_CANONICAL_BYTE_CEILING' {
+    Invoke-G04DCTestClassRegistryCollector -Text $devanagariRow -NativeOutputEncoding $strictUtf16 -MaximumCanonicalBytes ($utf8RowBoundary + 1) | Out-Null
+}
+
+$singleCanonicalText = '"alpha"'
+$singleCanonicalBytes = $utf8Strict.GetBytes($singleCanonicalText)
+$singleCanonicalDigest = Invoke-G04DCTestClassRegistryCollector -Text 'alpha'
+if ($singleCanonicalDigest.sha256 -cne (Get-G04DCTestByteSha256 -Bytes $singleCanonicalBytes) -or
+    ($singleCanonicalBytes.Length -ge 3 -and $singleCanonicalBytes[0] -eq 0xEF -and $singleCanonicalBytes[1] -eq 0xBB -and $singleCanonicalBytes[2] -eq 0xBF)) {
+    throw 'Canonical hash input contains a BOM or changed its accepted bytes.'
+}
+$passed.Add('P1-B canonical hash bytes contain no BOM')
+
+$lfCanonicalBytes = $utf8Strict.GetBytes('"alpha"' + "`n" + '"beta"')
+$lfDigest = Invoke-G04DCTestClassRegistryCollector -Text "alpha`r`nbeta`r`n"
+if ($lfDigest.sha256 -cne (Get-G04DCTestByteSha256 -Bytes $lfCanonicalBytes)) { throw 'Canonical LF separator model changed.' }
+$passed.Add('P1-B LF separator model unchanged')
+
+$emptyCrossEncoding = @($utf8Strict, $strictUtf16 | ForEach-Object { Invoke-G04DCTestClassRegistryCollector -Text "`r`n" -NativeOutputEncoding $_ })
+if (@($emptyCrossEncoding.sha256 | Sort-Object -Unique).Count -ne 1 -or @($emptyCrossEncoding.rowCount | Sort-Object -Unique)[0] -ne 1) {
+    throw 'Accepted empty-row semantics changed across native encodings.'
+}
+$passed.Add('P1-B empty-row semantics unchanged')
+
+$stdoutStderrUtf8 = Invoke-G04DCTestClassRegistryCollector -Text ("alpha`r`n") -StderrText $latinRow -NativeOutputEncoding $utf8Strict
+$stdoutStderr1252 = Invoke-G04DCTestClassRegistryCollector -Text ("alpha`r`n") -StderrText $latinRow -NativeOutputEncoding $strict1252
+if ($stdoutStderrUtf8.sha256 -cne $stdoutStderr1252.sha256 -or $stdoutStderrUtf8.canonicalByteCount -ne $stdoutStderr1252.canonicalByteCount) {
+    throw 'Stdout and stderr rows did not share the strict canonical UTF-8 model.'
+}
+$passed.Add('P1-B stdout and stderr share canonical UTF-8')
+
+$nativeDecodeSelection = Invoke-G04DCTestClassRegistryCollector -Text $latinRow -NativeOutputEncoding $strict1252
+if ($nativeDecodeSelection.sha256 -cne (Get-G04DCCanonicalHash -Rows @($latinRow))) { throw 'Explicit native decoding no longer controls byte-to-text conversion.' }
+$passed.Add('P1-B native decoding follows selected encoding')
+
+Assert-Throws 'P1-B malformed native bytes fail closed' 'REGISTRY_DIGEST_DECODING_INVALID' {
+    $invalidStream = [IO.MemoryStream]::new([byte[]]@(0xC3))
+    try {
+        $invalidCollector = [DocumentStudio.G04DC.ClassRegistryDigestCollector]::new($invalidStream, $utf8Strict, 16, 16, 16, 16, 64, 1)
+        $invalidCollector.BeginRead().GetAwaiter().GetResult()
+    }
+    finally { $invalidStream.Dispose() }
+}
+
+$acceptedFixture = Invoke-G04DCTestClassRegistryCollector -Text "alpha  `r`n`r`nbeta`t`r`n" -NativeOutputEncoding $strictUtf16
+if ($acceptedFixture.sha256 -cne '14145080d3e02dad17282996a9d50b2ab896149772cd0cf510be38d881ec3820') {
+    throw 'Accepted canonical-equivalence fixture was rebaselined.'
+}
+$passed.Add('P1-B accepted canonical fixture remains byte-identical')
 
 $scaleRows = @(0..64235 | ForEach-Object { 'HKEY_CLASSES_ROOT\Synthetic\' + $_.ToString('D6') })
 $scaleText = ($scaleRows -join "`r`n") + "`r`n"
@@ -1276,7 +1382,10 @@ function Invoke-G04DCTestNativeDigest {
     param(
         [Parameter(Mandatory = $true)] [string]$Code,
         [AllowNull()] $CaptureContext,
-        [long]$MaximumStderrBytes = 1048576
+        [long]$MaximumStderrBytes = 1048576,
+        [AllowNull()] [hashtable]$LifecycleTestHooks,
+        [AllowNull()] [scriptblock]$TelemetryTestHook,
+        [int]$SubstageProgressIntervalMilliseconds = 5000
     )
     $powershellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $arguments = @{
@@ -1285,9 +1394,249 @@ function Invoke-G04DCTestNativeDigest {
         NativeArguments = New-G04DCTestNativeArguments -Code $Code
         AllowTestNativePath = $true
         MaximumStderrBytes = $MaximumStderrBytes
+        SubstageProgressIntervalMilliseconds = $SubstageProgressIntervalMilliseconds
     }
     if ($CaptureContext) { $arguments.CaptureContext = $CaptureContext; $arguments.CapturePhase = 'class-registry-digest' }
+    if ($LifecycleTestHooks) { $arguments.LifecycleTestHooks = $LifecycleTestHooks }
+    if ($TelemetryTestHook) { $arguments.TelemetryTestHook = $TelemetryTestHook }
     return & $g04dcModule { param($Arguments) Get-G04DCRegistryTreeDigest @Arguments } $arguments
+}
+
+$originalConsoleOutputEncoding = [Console]::OutputEncoding
+$consoleEncodingDigests = [System.Collections.Generic.List[string]]::new()
+try {
+    foreach ($codePage in @(65001, 1252, 437)) {
+        [Console]::OutputEncoding = New-G04DCTestStrictEncoding -CodePage $codePage
+        $consoleEncodingCode = '$encoding=[Text.Encoding]::GetEncoding(' + $codePage + ',[Text.EncoderFallback]::ExceptionFallback,[Text.DecoderFallback]::ExceptionFallback);$text=(-join @(''caf'',[char]0x00E9))+"`r`n";$bytes=$encoding.GetBytes($text);$stream=[Console]::OpenStandardOutput();$stream.Write($bytes,0,$bytes.Length);$stream.Flush()'
+        $consoleEncodingDigests.Add([string](Invoke-G04DCTestNativeDigest -Code $consoleEncodingCode).sha256)
+    }
+}
+finally { [Console]::OutputEncoding = $originalConsoleOutputEncoding }
+if (@($consoleEncodingDigests.ToArray() | Sort-Object -Unique).Count -ne 1) {
+    throw 'Console output encoding changed canonical registry digest SHA-256.'
+}
+$passed.Add('P1-B canonical hash independent of Console OutputEncoding')
+
+if (!('DocumentStudio.G04DC.Tests.InjectedEvidenceFileStream' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+
+namespace DocumentStudio.G04DC.Tests
+{
+    public sealed class InjectedEvidenceFileStream : FileStream
+    {
+        public InjectedEvidenceFileStream(string path)
+            : base(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read)
+        {
+        }
+
+        public bool FailNextFlush { get; set; }
+        public bool FailEveryFlush { get; set; }
+        public int FlushAttemptCount { get; private set; }
+        public int FailureCount { get; private set; }
+
+        private void CheckInjectedFailure()
+        {
+            FlushAttemptCount++;
+            if (FailEveryFlush || FailNextFlush)
+            {
+                FailNextFlush = false;
+                FailureCount++;
+                throw new IOException("Injected evidence persistence failure.");
+            }
+        }
+
+        public override void Flush()
+        {
+            CheckInjectedFailure();
+            base.Flush();
+        }
+
+        public override void Flush(bool flushToDisk)
+        {
+            CheckInjectedFailure();
+            base.Flush(flushToDisk);
+        }
+    }
+}
+'@
+}
+
+function New-G04DCTestLifecycleHooks {
+    param(
+        [switch]$FailTermination,
+        [switch]$FailProcessDispose,
+        [switch]$FailJobDispose
+    )
+    $state = [pscustomobject][ordered]@{
+        terminateCount = 0
+        processDisposeCount = 0
+        jobDisposeCount = 0
+        processId = 0
+    }
+    $terminate = {
+        param($Job, $Process)
+        $state.terminateCount++
+        $state.processId = [int]$Process.Id
+        $Job.TerminateAndVerify($Process, 5000)
+        if ($FailTermination) { throw '[TEST_TERMINATION_FAILURE] Injected after bounded termination.' }
+    }.GetNewClosure()
+    $disposeProcess = {
+        param($Process)
+        $state.processDisposeCount++
+        try { $state.processId = [int]$Process.Id } catch { }
+        $Process.Dispose()
+        if ($FailProcessDispose) { throw '[TEST_PROCESS_DISPOSE_FAILURE] Injected after Process.Dispose.' }
+    }.GetNewClosure()
+    $disposeJob = {
+        param($Job)
+        $state.jobDisposeCount++
+        $Job.Dispose()
+        if ($FailJobDispose) { throw '[TEST_JOB_DISPOSE_FAILURE] Injected after Job.Dispose.' }
+    }.GetNewClosure()
+    return [pscustomobject][ordered]@{
+        state = $state
+        hooks = @{
+            TerminateAndVerify = $terminate
+            DisposeProcess = $disposeProcess
+            DisposeJob = $disposeJob
+        }
+    }
+}
+
+function Assert-G04DCTestLifecycleClosed {
+    param(
+        [Parameter(Mandatory = $true)] $Lifecycle,
+        [Parameter(Mandatory = $true)] [int]$BaselineJobHandles,
+        [Parameter(Mandatory = $true)] [string]$CaseName
+    )
+    if ($Lifecycle.state.processDisposeCount -ne 1 -or $Lifecycle.state.jobDisposeCount -ne 1) {
+        throw "$CaseName did not attempt both Process and Job Object disposal exactly once."
+    }
+    if ([DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount -ne $BaselineJobHandles) {
+        throw "$CaseName leaked an owned Job Object handle."
+    }
+    if ($Lifecycle.state.processId -gt 0 -and (Get-Process -Id $Lifecycle.state.processId -ErrorAction SilentlyContinue)) {
+        throw "$CaseName left its synthetic native helper alive."
+    }
+}
+
+function Invoke-G04DCTestTelemetryLifecycleFailure {
+    param(
+        [Parameter(Mandatory = $true)] [string]$FailureEvent,
+        [switch]$LongRunning,
+        [switch]$PersistentFailure,
+        [AllowNull()] [string]$PrimaryFailureEvent,
+        [switch]$FailTermination,
+        [string]$ExpectedCode = 'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED'
+    )
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-p1a-' + [guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($root) | Out-Null
+    $context = $null
+    $injectedStream = $null
+    $writer = $null
+    $baselineJobHandles = [DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount
+    $lifecycle = New-G04DCTestLifecycleHooks -FailTermination:$FailTermination
+    $observedMessage = $null
+    $secondaryTelemetryRecorded = $false
+    try {
+        $context = New-G04DCMachineStateCaptureContext -CaptureLabel 'p1a-injected' -ProgressPath (Join-Path $root 'initial.ndjson') -PerformancePath (Join-Path $root 'performance.json') -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+        Start-G04DCMachineStatePhase -Context $context -Phase 'class-registry-digest'
+        $context.writer.Dispose()
+        $injectedStream = [DocumentStudio.G04DC.Tests.InjectedEvidenceFileStream]::new((Join-Path $root 'injected.ndjson'))
+        $writer = [IO.StreamWriter]::new($injectedStream, [Text.UTF8Encoding]::new($false), 1024, $true)
+        $context.writer = $writer
+        $telemetryHook = {
+            param([string]$EventName, $IgnoredContext)
+            if (![string]::IsNullOrWhiteSpace($PrimaryFailureEvent) -and $EventName -ceq $PrimaryFailureEvent) {
+                throw '[MACHINE_STATE_CAPTURE_CANCELLED] Injected capture cancellation.'
+            }
+            if ($EventName -ceq $FailureEvent) {
+                if ($PersistentFailure) { $injectedStream.FailEveryFlush = $true }
+                else { $injectedStream.FailNextFlush = $true }
+            }
+        }.GetNewClosure()
+        $code = if ($LongRunning) {
+            '$stream=[Console]::OpenStandardOutput();$bytes=[Text.Encoding]::ASCII.GetBytes("alpha`r`n");$stream.Write($bytes,0,$bytes.Length);$stream.Flush();Start-Sleep -Seconds 30'
+        }
+        else {
+            '$stream=[Console]::OpenStandardOutput();$bytes=[Text.Encoding]::ASCII.GetBytes("alpha`r`n");$stream.Write($bytes,0,$bytes.Length);$stream.Flush()'
+        }
+        try {
+            Invoke-G04DCTestNativeDigest -Code $code -CaptureContext $context -LifecycleTestHooks $lifecycle.hooks -TelemetryTestHook $telemetryHook -SubstageProgressIntervalMilliseconds 25 | Out-Null
+            throw "Injected telemetry case $FailureEvent did not fail."
+        }
+        catch {
+            $observedMessage = $_.Exception.Message
+            $secondaryTelemetryRecorded = [bool]$_.Exception.Data['G04DCSecondaryTelemetryFailure']
+            if ($_.Exception.Message -notmatch [regex]::Escape("[$ExpectedCode]")) {
+                throw "Injected telemetry case $FailureEvent returned unexpected failure: $($_.Exception.Message)"
+            }
+        }
+        Assert-G04DCTestLifecycleClosed -Lifecycle $lifecycle -BaselineJobHandles $baselineJobHandles -CaseName $FailureEvent
+        if ($injectedStream.FailureCount -lt 1) { throw "Injected telemetry case $FailureEvent did not exercise the failing evidence stream." }
+        return [pscustomobject][ordered]@{ lifecycle = $lifecycle; errorMessage = $observedMessage; secondaryTelemetryRecorded = $secondaryTelemetryRecorded }
+    }
+    finally {
+        if ($injectedStream) { $injectedStream.FailEveryFlush = $false; $injectedStream.FailNextFlush = $false }
+        if ($writer) { try { $writer.Dispose() } catch { } }
+        if ($injectedStream) { try { $injectedStream.Dispose() } catch { } }
+        if ($context) { $context.writer = $null }
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+    }
+}
+
+function Invoke-G04DCTestRunningLifecycleFailure {
+    param(
+        [Parameter(Mandatory = $true)] [ValidateSet('timeout', 'cancellation', 'collector')] [string]$Mode,
+        [switch]$FailTermination
+    )
+    $baselineJobHandles = [DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount
+    $lifecycle = New-G04DCTestLifecycleHooks -FailTermination:$FailTermination
+    $context = $null
+    $telemetryHook = $null
+    $expectedCode = if ($FailTermination) { 'MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED' } else { switch ($Mode) {
+        'timeout' { 'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED' }
+        'cancellation' { 'MACHINE_STATE_CAPTURE_CANCELLED' }
+        'collector' { 'MACHINE_STATE_CAPTURE_FAILED' }
+    } }
+    if ($Mode -in @('timeout', 'cancellation')) {
+        $phaseBudget = if ($Mode -ceq 'timeout') { 150 } else { 3000 }
+        $context = New-G04DCMachineStateCaptureContext -CaptureLabel ('p1a-' + $Mode) -ProgressPath $null -PerformancePath $null -CaptureTargetMilliseconds 100 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds $phaseBudget
+        Start-G04DCMachineStatePhase -Context $context -Phase 'class-registry-digest'
+    }
+    if ($Mode -ceq 'cancellation' -or $FailTermination) {
+        $telemetryHook = {
+            param([string]$EventName, $IgnoredContext)
+            if ($EventName -ceq 'read-progress') { throw '[MACHINE_STATE_CAPTURE_CANCELLED] Injected capture cancellation.' }
+        }
+    }
+    $code = if ($Mode -ceq 'collector') {
+        '$stream=[Console]::OpenStandardOutput();$bytes=[byte[]]@(0xC3,0x28);$stream.Write($bytes,0,$bytes.Length);$stream.Flush();Start-Sleep -Seconds 30'
+    }
+    else {
+        '$stream=[Console]::OpenStandardOutput();$bytes=[Text.Encoding]::ASCII.GetBytes("alpha`r`n");$stream.Write($bytes,0,$bytes.Length);$stream.Flush();Start-Sleep -Seconds 30'
+    }
+    $originalEncoding = [Console]::OutputEncoding
+    try {
+        if ($Mode -ceq 'collector') { [Console]::OutputEncoding = $utf8Strict }
+        try {
+            Invoke-G04DCTestNativeDigest -Code $code -CaptureContext $context -LifecycleTestHooks $lifecycle.hooks -TelemetryTestHook $telemetryHook -SubstageProgressIntervalMilliseconds 25 | Out-Null
+            throw "Running lifecycle case $Mode did not fail."
+        }
+        catch {
+            if ($_.Exception.Message -notmatch [regex]::Escape("[$expectedCode]")) {
+                throw "Running lifecycle case $Mode returned unexpected failure: $($_.Exception.Message)"
+            }
+        }
+    }
+    finally {
+        [Console]::OutputEncoding = $originalEncoding
+        if ($context -and $context.writer) { $context.writer.Dispose(); $context.writer = $null }
+    }
+    Assert-G04DCTestLifecycleClosed -Lifecycle $lifecycle -BaselineJobHandles $baselineJobHandles -CaseName $Mode
+    return $lifecycle
 }
 
 $syntheticOutputCode = '$bytes=[Text.UTF8Encoding]::new($false).GetBytes("alpha  `r`n`r`nbeta`t`r`n");$stream=[Console]::OpenStandardOutput();$stream.Write($bytes,0,$bytes.Length);$stream.Flush()'
@@ -1296,6 +1645,111 @@ if ($syntheticProcessDigest.sha256 -cne $legacyNormalization.sha256 -or $synthet
     throw 'Direct owned native helper process changed the streaming digest.'
 }
 $passed.Add('direct native process streaming digest')
+
+$p1aBaselineHandles = [DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount
+$p1aNormalLifecycle = New-G04DCTestLifecycleHooks
+Invoke-G04DCTestNativeDigest -Code $syntheticOutputCode -LifecycleTestHooks $p1aNormalLifecycle.hooks | Out-Null
+Assert-G04DCTestLifecycleClosed -Lifecycle $p1aNormalLifecycle -BaselineJobHandles $p1aBaselineHandles -CaseName 'normal-helper-success'
+if ($p1aNormalLifecycle.state.terminateCount -ne 0) { throw 'Normal helper success unexpectedly used forced termination.' }
+$passed.Add('P1-A normal helper success disposes Process and Job Object')
+
+$p1aTimeoutLifecycle = Invoke-G04DCTestRunningLifecycleFailure -Mode timeout
+if ($p1aTimeoutLifecycle.state.terminateCount -ne 1) { throw 'Timeout did not use bounded owned-Job termination exactly once.' }
+$passed.Add('P1-A timeout terminates and disposes helper')
+
+$p1aCancellationLifecycle = Invoke-G04DCTestRunningLifecycleFailure -Mode cancellation
+if ($p1aCancellationLifecycle.state.terminateCount -ne 1) { throw 'Cancellation did not use bounded owned-Job termination exactly once.' }
+$passed.Add('P1-A cancellation terminates and disposes helper')
+
+$p1aCollectorLifecycle = Invoke-G04DCTestRunningLifecycleFailure -Mode collector
+if ($p1aCollectorLifecycle.state.terminateCount -ne 1) { throw 'Native collector failure did not terminate the running helper.' }
+$passed.Add('P1-A native collector failure terminates and disposes helper')
+
+$p1aProgressFailure = Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'read-progress' -LongRunning
+if ($p1aProgressFailure.lifecycle.state.terminateCount -ne 1) { throw 'Progress telemetry failure did not terminate the running helper.' }
+$passed.Add('P1-A progress telemetry failure cannot bypass cleanup')
+
+$p1aStartFailure = Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'read-start' -LongRunning
+if ($p1aStartFailure.lifecycle.state.terminateCount -ne 1) { throw 'Substage-start telemetry failure did not terminate the running helper.' }
+$passed.Add('P1-A substage-start telemetry failure cannot bypass cleanup')
+
+Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'read-end' | Out-Null
+$passed.Add('P1-A substage-end telemetry failure cannot bypass disposal')
+
+Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'cleanup-start' | Out-Null
+$passed.Add('P1-A cleanup telemetry failure follows native cleanup')
+
+Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'cleanup-end' | Out-Null
+$passed.Add('P1-A durable flush failure follows native cleanup')
+
+Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'cleanup-start' -PersistentFailure | Out-Null
+$passed.Add('P1-A simulated evidence disk full remains cleanup-safe')
+
+$p1aTerminationFailure = Invoke-G04DCTestRunningLifecycleFailure -Mode cancellation -FailTermination
+if ($p1aTerminationFailure.state.processDisposeCount -ne 1 -or $p1aTerminationFailure.state.jobDisposeCount -ne 1) {
+    throw 'TerminateAndVerify failure skipped a mandatory disposal operation.'
+}
+$passed.Add('P1-A TerminateAndVerify failure cannot skip Process disposal')
+
+$p1aProcessDisposeBaseline = [DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount
+$p1aProcessDisposeFailure = New-G04DCTestLifecycleHooks -FailProcessDispose
+Assert-Throws 'P1-A Process Dispose failure cannot skip Job disposal' 'MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED' {
+    Invoke-G04DCTestNativeDigest -Code $syntheticOutputCode -LifecycleTestHooks $p1aProcessDisposeFailure.hooks | Out-Null
+}
+Assert-G04DCTestLifecycleClosed -Lifecycle $p1aProcessDisposeFailure -BaselineJobHandles $p1aProcessDisposeBaseline -CaseName 'process-dispose-failure'
+if ($p1aProcessDisposeFailure.state.jobDisposeCount -ne 1) { throw 'Process.Dispose failure skipped Job Object disposal.' }
+
+$p1aPrecedence = Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'cleanup-start' -LongRunning -PersistentFailure -PrimaryFailureEvent 'read-progress' -FailTermination -ExpectedCode 'MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED'
+if (!$p1aPrecedence.errorMessage.Contains('stage=termination') -or
+    !$p1aPrecedence.errorMessage.Contains('operationFailurePresent=True') -or
+    !$p1aPrecedence.errorMessage.Contains('telemetryFailurePresent=True')) {
+    throw 'Native cleanup, operation, and telemetry failure precedence is not deterministic.'
+}
+$p1aOperationPrecedence = Invoke-G04DCTestTelemetryLifecycleFailure -FailureEvent 'cleanup-start' -LongRunning -PersistentFailure -PrimaryFailureEvent 'read-progress' -ExpectedCode 'MACHINE_STATE_CAPTURE_CANCELLED'
+if (!$p1aOperationPrecedence.errorMessage.StartsWith('[MACHINE_STATE_CAPTURE_CANCELLED]', [StringComparison]::Ordinal) -or
+    !$p1aOperationPrecedence.secondaryTelemetryRecorded) {
+    throw 'Original operation failure did not retain precedence and sanitized secondary telemetry evidence.'
+}
+$passed.Add('P1-A cleanup error precedence preserves secondary evidence')
+
+if (@($p1aTimeoutLifecycle, $p1aCancellationLifecycle, $p1aCollectorLifecycle, $p1aProgressFailure.lifecycle, $p1aStartFailure.lifecycle | Where-Object {
+    $_.state.processId -gt 0 -and (Get-Process -Id $_.state.processId -ErrorAction SilentlyContinue)
+}).Count -ne 0) { throw 'A P1-A failure-injection case left its synthetic helper running.' }
+$passed.Add('P1-A failure matrix leaves no orphan synthetic helper')
+
+if ([DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount -ne $p1aBaselineHandles) { throw 'P1-A failure matrix leaked a Job Object handle.' }
+$passed.Add('P1-A failure matrix leaves no owned Job handle')
+
+$unrelatedStartInfo = [Diagnostics.ProcessStartInfo]::new()
+$unrelatedStartInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$unrelatedStartInfo.Arguments = New-G04DCTestNativeArguments -Code 'Start-Sleep -Seconds 30'
+$unrelatedStartInfo.UseShellExecute = $false
+$unrelatedStartInfo.CreateNoWindow = $true
+$unrelatedProcess = [Diagnostics.Process]::new()
+$unrelatedProcess.StartInfo = $unrelatedStartInfo
+try {
+    if (!$unrelatedProcess.Start()) { throw 'Unrelated-process survival fixture did not start.' }
+    Invoke-G04DCTestRunningLifecycleFailure -Mode cancellation | Out-Null
+    if ($unrelatedProcess.HasExited) { throw 'Owned helper cleanup terminated an unrelated process.' }
+}
+finally {
+    if (!$unrelatedProcess.HasExited) { $unrelatedProcess.Kill(); $unrelatedProcess.WaitForExit() }
+    $unrelatedProcess.Dispose()
+}
+$passed.Add('P1-A unrelated process survives owned helper cleanup')
+
+$p1aRecoveryBaseline = [DocumentStudio.G04DC.KillOnCloseJob]::ActiveHandleCount
+$p1aRecoveryLifecycle = New-G04DCTestLifecycleHooks
+Invoke-G04DCTestNativeDigest -Code $syntheticOutputCode -LifecycleTestHooks $p1aRecoveryLifecycle.hooks | Out-Null
+Assert-G04DCTestLifecycleClosed -Lifecycle $p1aRecoveryLifecycle -BaselineJobHandles $p1aRecoveryBaseline -CaseName 'post-failure-recovery'
+$passed.Add('P1-A next collector succeeds after injected failure')
+
+$registryDigestFunctionSource = & $g04dcModule { (Get-Command Get-G04DCRegistryTreeDigest).ScriptBlock.ToString() }
+if ($registryDigestFunctionSource -match '(?i)Stop-Process|taskkill|Get-Process|[.]Kill[(]') {
+    throw 'Registry digest cleanup introduced global or rediscovered process termination.'
+}
+$passed.Add('P1-A production cleanup uses no global process termination')
+
 Assert-Throws 'class registry native process nonzero exit' 'MACHINE_STATE_CAPTURE_FAILED' {
     Invoke-G04DCTestNativeDigest -Code 'exit 7' | Out-Null
 }
@@ -1868,5 +2322,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 280) { throw "Expected 280 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 314) { throw "Expected 314 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

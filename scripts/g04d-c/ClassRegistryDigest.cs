@@ -517,8 +517,9 @@ namespace DocumentStudio.G04DC
 
     public sealed class ClassRegistryDigestCollector
     {
+        private static readonly Encoding CanonicalUtf8 = new UTF8Encoding(false, true);
         private readonly Stream stream;
-        private readonly Encoding encoding;
+        private readonly Encoding nativeOutputEncoding;
         private readonly long maximumRawBytes;
         private readonly int maximumRows;
         private readonly int maximumRowCharacters;
@@ -539,7 +540,7 @@ namespace DocumentStudio.G04DC
 
         public ClassRegistryDigestCollector(
             Stream stream,
-            Encoding encoding,
+            Encoding nativeOutputEncoding,
             long maximumRawBytes,
             int maximumRows,
             int maximumRowCharacters,
@@ -548,7 +549,7 @@ namespace DocumentStudio.G04DC
             int readBufferBytes)
         {
             if (stream == null) throw new ArgumentNullException("stream");
-            if (encoding == null) throw new ArgumentNullException("encoding");
+            if (nativeOutputEncoding == null) throw new ArgumentNullException("nativeOutputEncoding");
             if (maximumRawBytes < 1) throw new ArgumentOutOfRangeException("maximumRawBytes");
             if (maximumRows < 1) throw new ArgumentOutOfRangeException("maximumRows");
             if (maximumRowCharacters < 1) throw new ArgumentOutOfRangeException("maximumRowCharacters");
@@ -557,7 +558,7 @@ namespace DocumentStudio.G04DC
             if (readBufferBytes < 1 || readBufferBytes > 1048576) throw new ArgumentOutOfRangeException("readBufferBytes");
 
             this.stream = stream;
-            this.encoding = encoding;
+            this.nativeOutputEncoding = nativeOutputEncoding;
             this.maximumRawBytes = maximumRawBytes;
             this.maximumRows = maximumRows;
             this.maximumRowCharacters = maximumRowCharacters;
@@ -619,8 +620,8 @@ namespace DocumentStudio.G04DC
         {
             Stopwatch stopwatch = Stopwatch.StartNew();
             byte[] byteBuffer = new byte[readBufferBytes];
-            char[] characterBuffer = new char[encoding.GetMaxCharCount(readBufferBytes)];
-            Decoder decoder = encoding.GetDecoder();
+            char[] characterBuffer = new char[nativeOutputEncoding.GetMaxCharCount(readBufferBytes)];
+            Decoder decoder = nativeOutputEncoding.GetDecoder();
             StringBuilder currentRow = new StringBuilder();
             bool firstCharacter = true;
             try
@@ -768,7 +769,7 @@ namespace DocumentStudio.G04DC
             {
                 CheckBudget(stopwatch, budgetMilliseconds, index);
                 string canonical = QuoteJsonString(rawRows[index].TrimEnd());
-                int rowBytes = encoding.GetByteCount(canonical);
+                int rowBytes = CanonicalUtf8.GetByteCount(canonical);
                 if (rowBytes > maximumCanonicalRowBytes)
                 {
                     throw new InvalidDataException("[REGISTRY_DIGEST_ROW_LENGTH_CEILING] Canonical row exceeded the byte ceiling.");
@@ -803,7 +804,7 @@ namespace DocumentStudio.G04DC
                 {
                     CheckBudget(stopwatch, budgetMilliseconds, index);
                     if (index != 0) hash.TransformBlock(newline, 0, newline.Length, newline, 0);
-                    byte[] rowBytes = encoding.GetBytes(canonicalRows[index]);
+                    byte[] rowBytes = CanonicalUtf8.GetBytes(canonicalRows[index]);
                     if (rowBytes.Length != 0) hash.TransformBlock(rowBytes, 0, rowBytes.Length, rowBytes, 0);
                 }
                 hash.TransformFinalBlock(new byte[0], 0, 0);

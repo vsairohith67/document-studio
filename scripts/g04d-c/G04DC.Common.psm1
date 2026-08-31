@@ -7,6 +7,7 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace DocumentStudio.G04DC {
     public sealed class KillOnCloseJob : IDisposable {
@@ -44,7 +45,11 @@ namespace DocumentStudio.G04DC {
         }
 
         private const uint KillOnJobClose = 0x00002000;
+        private static int activeHandleCount;
         private IntPtr handle;
+
+        public static int ActiveHandleCount { get { return Volatile.Read(ref activeHandleCount); } }
+        public bool IsDisposed { get { return handle == IntPtr.Zero; } }
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr CreateJobObject(IntPtr attributes, string name);
@@ -68,6 +73,7 @@ namespace DocumentStudio.G04DC {
                 if (!SetInformationJobObject(handle, 9, buffer, (uint)Marshal.SizeOf(typeof(ExtendedLimitInformation)))) {
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "SetInformationJobObject");
                 }
+                Interlocked.Increment(ref activeHandleCount);
             }
             catch {
                 CloseHandle(handle);
@@ -99,6 +105,7 @@ namespace DocumentStudio.G04DC {
             if (handle != IntPtr.Zero) {
                 if (!CloseHandle(handle)) throw new Win32Exception(Marshal.GetLastWin32Error(), "CloseHandle(job)");
                 handle = IntPtr.Zero;
+                Interlocked.Decrement(ref activeHandleCount);
             }
         }
     }
@@ -2797,7 +2804,10 @@ function Get-G04DCRegistryTreeDigest {
         [Parameter(DontShow = $true)] [ValidateRange(1, 16777216)] [int]$MaximumCanonicalRowBytes = 16777216,
         [Parameter(DontShow = $true)] [ValidateRange(1, 1073741824)] [long]$MaximumCanonicalBytes = 134217728,
         [Parameter(DontShow = $true)] [ValidateRange(1, 16777216)] [long]$MaximumStderrBytes = 1048576,
-        [Parameter(DontShow = $true)] [ValidateRange(1, 1048576)] [int]$ReadBufferBytes = 65536
+        [Parameter(DontShow = $true)] [ValidateRange(1, 1048576)] [int]$ReadBufferBytes = 65536,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$LifecycleTestHooks,
+        [Parameter(DontShow = $true)] [AllowNull()] [scriptblock]$TelemetryTestHook,
+        [Parameter(DontShow = $true)] [ValidateRange(1, 5000)] [int]$SubstageProgressIntervalMilliseconds = 5000
     )
     $allowedPattern = if ($AllowTestNativePath) { '^HKEY_(CURRENT_USER|LOCAL_MACHINE|CLASSES_ROOT)(\\|$)' } else { '^HKEY_(LOCAL_MACHINE|CLASSES_ROOT)(\\|$)' }
     if ($NativePath.Length -gt 2048 -or $NativePath -notmatch $allowedPattern) {
@@ -2811,13 +2821,22 @@ function Get-G04DCRegistryTreeDigest {
     if ($testOverride -and (!$AllowTestNativePath -or [string]::IsNullOrWhiteSpace($NativeExecutablePath) -or [string]::IsNullOrWhiteSpace($NativeArguments))) {
         throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Native registry test override is incomplete.'
     }
+    if (($LifecycleTestHooks -or $TelemetryTestHook -or $SubstageProgressIntervalMilliseconds -ne 5000) -and (!$AllowTestNativePath -or !$testOverride)) {
+        throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Native lifecycle injection is restricted to the synthetic test path.'
+    }
+    if ($LifecycleTestHooks) {
+        $unexpectedHooks = @($LifecycleTestHooks.Keys | Where-Object { [string]$_ -cnotin @('TerminateAndVerify', 'DisposeProcess', 'DisposeJob') })
+        if ($unexpectedHooks.Count -ne 0) {
+            throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Native lifecycle injection contains an unknown hook.'
+        }
+    }
     $executable = if ($testOverride) { [IO.Path]::GetFullPath($NativeExecutablePath) } else { [IO.Path]::GetFullPath($reg) }
     $arguments = if ($testOverride) { $NativeArguments } else { "query `"$NativePath`" /s" }
     $executableItem = Get-Item -LiteralPath $executable -Force -ErrorAction Stop
     if ($executableItem.PSIsContainer -or [bool]($executableItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry digest executable is not a regular non-reparse file.'
     }
-    $encoding = [Text.Encoding]::GetEncoding(
+    $nativeOutputEncoding = [Text.Encoding]::GetEncoding(
         [Console]::OutputEncoding.CodePage,
         [Text.EncoderFallback]::ExceptionFallback,
         [Text.DecoderFallback]::ExceptionFallback
@@ -2829,8 +2848,8 @@ function Get-G04DCRegistryTreeDigest {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    $startInfo.StandardOutputEncoding = $encoding
-    $startInfo.StandardErrorEncoding = $encoding
+    $startInfo.StandardOutputEncoding = $nativeOutputEncoding
+    $startInfo.StandardErrorEncoding = $nativeOutputEncoding
     $process = [Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $job = $null
@@ -2839,11 +2858,35 @@ function Get-G04DCRegistryTreeDigest {
     $started = $false
     $terminalExitObserved = $false
     $failure = $null
+    $nativeCleanupFailure = $null
+    $nativeCleanupFailureStage = $null
+    $secondaryNativeCleanupFailure = $false
+    $telemetryFailure = $null
     $result = $null
     $standalone = [Diagnostics.Stopwatch]::StartNew()
+    $invokeTelemetry = {
+        param([string]$EventName, [scriptblock]$Operation)
+        try {
+            if ($TelemetryTestHook) { & $TelemetryTestHook $EventName $CaptureContext }
+            & $Operation
+        }
+        catch {
+            if ($_.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal) -or
+                $_.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_CANCELLED]', [StringComparison]::Ordinal)) {
+                throw
+            }
+            throw '[MACHINE_STATE_CAPTURE_EVIDENCE_FAILED] Registry digest telemetry persistence failed.'
+        }
+    }
     $getRemainingMilliseconds = {
         if ($CaptureContext) {
-            return [long](Get-G04DCMachineStateRemainingBudgetMilliseconds -Context $CaptureContext -Phase $CapturePhase -ItemCount $(if ($collector) { [long]$collector.RowCount } else { 0L }))
+            try {
+                return [long](Get-G04DCMachineStateRemainingBudgetMilliseconds -Context $CaptureContext -Phase $CapturePhase -ItemCount $(if ($collector) { [long]$collector.RowCount } else { 0L }))
+            }
+            catch {
+                if ($_.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { throw }
+                throw '[MACHINE_STATE_CAPTURE_EVIDENCE_FAILED] Registry digest budget telemetry persistence failed.'
+            }
         }
         $remaining = 240000L - [long]$standalone.ElapsedMilliseconds
         if ($remaining -lt 1) {
@@ -2863,14 +2906,14 @@ function Get-G04DCRegistryTreeDigest {
         throw "[MACHINE_STATE_CAPTURE_FAILED] Registry digest collector rejected bounded native output (reason=$reason)."
     }
     try {
-        if ($CaptureContext) { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-startup' }
+        if ($CaptureContext) { & $invokeTelemetry 'startup-start' { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-startup' } }
         $job = [DocumentStudio.G04DC.KillOnCloseJob]::new()
         if (!$process.Start()) { throw '[MACHINE_STATE_CAPTURE_FAILED] reg.exe did not start.' }
         $started = $true
         $job.Assign($process)
         $collector = [DocumentStudio.G04DC.ClassRegistryDigestCollector]::new(
             $process.StandardOutput.BaseStream,
-            $encoding,
+            $nativeOutputEncoding,
             $MaximumRawBytes,
             $MaximumRows,
             $MaximumRowCharacters,
@@ -2878,30 +2921,29 @@ function Get-G04DCRegistryTreeDigest {
             $MaximumCanonicalBytes,
             $ReadBufferBytes
         )
-        $stderrCapture = [DocumentStudio.G04DC.BoundedTextCapture]::new($process.StandardError.BaseStream, $encoding, $MaximumStderrBytes, $ReadBufferBytes)
+        $stderrCapture = [DocumentStudio.G04DC.BoundedTextCapture]::new($process.StandardError.BaseStream, $nativeOutputEncoding, $MaximumStderrBytes, $ReadBufferBytes)
         $stdoutTask = $collector.BeginRead()
         $stderrTask = $stderrCapture.BeginRead()
         if ($CaptureContext) {
-            Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-startup' -Status 'success'
-            Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read'
+            & $invokeTelemetry 'startup-end' { Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-startup' -Status 'success' }
+            & $invokeTelemetry 'read-start' { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' }
         }
-        $nextSubstageProgress = [long]$standalone.ElapsedMilliseconds + 5000L
+        $nextSubstageProgress = [long]$standalone.ElapsedMilliseconds + [long]$SubstageProgressIntervalMilliseconds
         while (!$process.HasExited -or !$stdoutTask.IsCompleted -or !$stderrTask.IsCompleted) {
-            if ($stdoutTask.IsFaulted -or $stderrTask.IsFaulted) {
-                if (!$process.HasExited) {
-                    $job.TerminateAndVerify($process, 5000)
-                }
-                break
+            if ($stdoutTask.IsFaulted) {
+                try { $stdoutTask.GetAwaiter().GetResult() }
+                catch { & $throwCollectorFailure $_ }
+            }
+            if ($stderrTask.IsFaulted) {
+                try { $stderrTask.GetAwaiter().GetResult() }
+                catch { & $throwCollectorFailure $_ }
             }
             [void]$process.WaitForExit(250)
             [void](& $getRemainingMilliseconds)
             if ($CaptureContext -and [long]$standalone.ElapsedMilliseconds -ge $nextSubstageProgress) {
-                Write-G04DCMachineStateSubstageProgress -Context $CaptureContext -Substage 'native-query-read' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount)
-                $nextSubstageProgress = [long]$standalone.ElapsedMilliseconds + 5000L
+                & $invokeTelemetry 'read-progress' { Write-G04DCMachineStateSubstageProgress -Context $CaptureContext -Substage 'native-query-read' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) }
+                $nextSubstageProgress = [long]$standalone.ElapsedMilliseconds + [long]$SubstageProgressIntervalMilliseconds
             }
-        }
-        if (!$process.HasExited) {
-            $job.TerminateAndVerify($process, 5000)
         }
         $process.WaitForExit()
         $terminalExitObserved = $true
@@ -2913,22 +2955,22 @@ function Get-G04DCRegistryTreeDigest {
         try { $collector.AppendStderrText($stderrCapture.Text) }
         catch { & $throwCollectorFailure $_ }
         if ($CaptureContext) {
-            Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.ReadElapsedMilliseconds)
-            Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress
-            Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'row-normalization'
+            & $invokeTelemetry 'read-end' { Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.ReadElapsedMilliseconds) }
+            & $invokeTelemetry 'read-phase-progress' { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress }
+            & $invokeTelemetry 'normalization-start' { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'row-normalization' }
         }
         try { $collector.Normalize([long](& $getRemainingMilliseconds)) }
         catch { & $throwCollectorFailure $_ }
         if ($CaptureContext) {
-            Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'row-normalization' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.NormalizationElapsedMilliseconds)
-            Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress
-            Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'canonical-hash'
+            & $invokeTelemetry 'normalization-end' { Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'row-normalization' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.NormalizationElapsedMilliseconds) }
+            & $invokeTelemetry 'normalization-phase-progress' { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress }
+            & $invokeTelemetry 'hash-start' { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'canonical-hash' }
         }
         try { $digest = $collector.Hash([long](& $getRemainingMilliseconds)) }
         catch { & $throwCollectorFailure $_ }
         if ($CaptureContext) {
-            Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'canonical-hash' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.CanonicalHashElapsedMilliseconds)
-            Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress
+            & $invokeTelemetry 'hash-end' { Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'canonical-hash' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.CanonicalHashElapsedMilliseconds) }
+            & $invokeTelemetry 'hash-phase-progress' { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress }
         }
         $result = [pscustomobject][ordered]@{
             path = $NativePath
@@ -2938,36 +2980,117 @@ function Get-G04DCRegistryTreeDigest {
     }
     catch { $failure = $_ }
     finally {
-        $cleanupFailure = $null
+        # Native termination and disposal must finish before any cleanup telemetry is attempted.
         try {
-            if ($CaptureContext -and ![string]::IsNullOrWhiteSpace([string]$CaptureContext.activeSubstage)) {
-                $status = if ($failure -and $failure.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { 'budget-exceeded' } else { 'failed' }
-                Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage ([string]$CaptureContext.activeSubstage) -Status $status -RowCount $(if ($collector) { [long]$collector.RowCount } else { 0L }) -RawByteCount $(if ($collector) { [long]$collector.RawByteCount } else { 0L })
-            }
-            if ($CaptureContext) { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'helper-cleanup' }
-            if ($started -and !$process.HasExited) {
-                $job.TerminateAndVerify($process, 5000)
-            }
-            if ($started -and $process.HasExited) { $terminalExitObserved = $true }
-            $process.Dispose()
-            if ($job) { $job.Dispose() }
-            if ($CaptureContext) {
-                Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'helper-cleanup' -Status 'success' -RowCount $(if ($collector) { [long]$collector.RowCount } else { 0L }) -RawByteCount $(if ($collector) { [long]$collector.RawByteCount } else { 0L })
-                if (!$failure) {
-                    Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $(if ($collector) { [long]$collector.RowCount } else { 0L })
+            if ($started) {
+                if ($process.HasExited) {
+                    $terminalExitObserved = $true
+                }
+                else {
+                    if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('TerminateAndVerify')) {
+                        & $LifecycleTestHooks['TerminateAndVerify'] $job $process
+                    }
+                    else {
+                        $job.TerminateAndVerify($process, 5000)
+                    }
+                    if (!$process.HasExited) { throw 'Owned helper did not reach terminal exit.' }
+                    $terminalExitObserved = $true
                 }
             }
         }
-        catch { $cleanupFailure = $_ }
+        catch {
+            $nativeCleanupFailure = $_
+            $nativeCleanupFailureStage = 'termination'
+        }
+        finally {
+            try {
+                if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeProcess')) {
+                    & $LifecycleTestHooks['DisposeProcess'] $process
+                }
+                else {
+                    $process.Dispose()
+                }
+            }
+            catch {
+                if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'process-dispose' }
+            }
+            finally {
+                if ($job) {
+                    try {
+                        if ($LifecycleTestHooks -and $LifecycleTestHooks.ContainsKey('DisposeJob')) {
+                            & $LifecycleTestHooks['DisposeJob'] $job
+                        }
+                        else {
+                            $job.Dispose()
+                        }
+                        if (!$job.IsDisposed) { throw 'Owned Job Object handle remained open.' }
+                    }
+                    catch {
+                        if ($nativeCleanupFailure) { $secondaryNativeCleanupFailure = $true }
+                        else { $nativeCleanupFailure = $_; $nativeCleanupFailureStage = 'job-dispose' }
+                    }
+                }
+            }
+        }
+
+        $cleanupRowCount = if ($collector) { [long]$collector.RowCount } else { 0L }
+        $cleanupRawByteCount = if ($collector) { [long]$collector.RawByteCount } else { 0L }
+        if ($CaptureContext) {
+            if (![string]::IsNullOrWhiteSpace([string]$CaptureContext.activeSubstage)) {
+                $activeSubstage = [string]$CaptureContext.activeSubstage
+                $activeStatus = if ($failure -and $failure.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { 'budget-exceeded' } else { 'failed' }
+                try {
+                    & $invokeTelemetry 'active-substage-end' { Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage $activeSubstage -Status $activeStatus -RowCount $cleanupRowCount -RawByteCount $cleanupRawByteCount }
+                }
+                catch { if (!$telemetryFailure) { $telemetryFailure = $_ } }
+                if (![string]::IsNullOrWhiteSpace([string]$CaptureContext.activeSubstage)) {
+                    $CaptureContext.activeSubstage = $null
+                    $CaptureContext.activeSubstageStartMilliseconds = 0L
+                    $CaptureContext.activeSubstageRowCount = 0L
+                    $CaptureContext.activeSubstageRawByteCount = 0L
+                }
+            }
+            try {
+                & $invokeTelemetry 'cleanup-start' { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'helper-cleanup' }
+            }
+            catch { if (!$telemetryFailure) { $telemetryFailure = $_ } }
+            if ([string]$CaptureContext.activeSubstage -ceq 'helper-cleanup') {
+                try {
+                    $cleanupStatus = if ($nativeCleanupFailure) { 'failed' } else { 'success' }
+                    & $invokeTelemetry 'cleanup-end' { Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'helper-cleanup' -Status $cleanupStatus -RowCount $cleanupRowCount -RawByteCount $cleanupRawByteCount }
+                }
+                catch { if (!$telemetryFailure) { $telemetryFailure = $_ } }
+                if (![string]::IsNullOrWhiteSpace([string]$CaptureContext.activeSubstage)) {
+                    $CaptureContext.activeSubstage = $null
+                    $CaptureContext.activeSubstageStartMilliseconds = 0L
+                    $CaptureContext.activeSubstageRowCount = 0L
+                    $CaptureContext.activeSubstageRawByteCount = 0L
+                }
+            }
+            if (!$failure -and !$nativeCleanupFailure) {
+                try {
+                    & $invokeTelemetry 'cleanup-budget' { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $cleanupRowCount }
+                }
+                catch {
+                    if ($_.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { $failure = $_ }
+                    elseif (!$telemetryFailure) { $telemetryFailure = $_ }
+                }
+            }
+        }
         $standalone.Stop()
-        if ($cleanupFailure) { throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] reg.exe owned helper cleanup failed ($($cleanupFailure.Exception.GetType().FullName))." }
+    }
+    if ($nativeCleanupFailure) {
+        throw "[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Registry digest owned helper cleanup was not proven (stage=$nativeCleanupFailureStage; secondaryNativeCleanupFailure=$([bool]$secondaryNativeCleanupFailure); operationFailurePresent=$([bool]$failure); telemetryFailurePresent=$([bool]$telemetryFailure))."
     }
     if ($failure) {
         if ($failure.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal) -and $started -and !$terminalExitObserved) {
             throw '[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED] Registry digest timeout did not terminate the owned helper.'
         }
+        if ($telemetryFailure) { $failure.Exception.Data['G04DCSecondaryTelemetryFailure'] = $true }
         throw $failure
     }
+    if ($telemetryFailure) { throw '[MACHINE_STATE_CAPTURE_EVIDENCE_FAILED] Registry digest telemetry persistence failed after owned helper cleanup.' }
     return $result
 }
 

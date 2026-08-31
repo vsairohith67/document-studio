@@ -1072,6 +1072,8 @@ if re.search(r'(?i)CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Byte
 for boundary in [
     'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
     'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
+    'ActiveHandleCount', 'nativeCleanupFailureStage', 'secondaryNativeCleanupFailure',
+    'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED', 'LifecycleTestHooks',
 ]:
     if boundary not in g04dc_common:
         raise SystemExit(f'G04D-C class-registry process boundary is missing: {boundary}')
@@ -1097,10 +1099,20 @@ for regression in [
     'class registry digest schema change', 'class registry key-count change', 'class registry value-count change',
     'direct HKCR traversal timeout', 'direct HKCR handles disposed for owned cleanup',
     'shortcut catalog transient sharing retry preserves full entry',
-    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 280 fail-closed cases',
+    'shortcut catalog persistent sharing failure remains fail closed',
+    'P1-A cleanup error precedence preserves secondary evidence',
+    'P1-A production cleanup uses no global process termination',
+    'P1-B canonical hash independent of Console OutputEncoding',
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 314 fail-closed cases',
 ]:
     if regression not in g04dc_tests:
         raise SystemExit(f'G04D-C class-registry regression is missing: {regression}')
+for boundary in [
+    'CanonicalUtf8 = new UTF8Encoding(false, true)', 'nativeOutputEncoding',
+    'CanonicalUtf8.GetByteCount', 'CanonicalUtf8.GetBytes',
+]:
+    if boundary not in g04dc_registry_digest:
+        raise SystemExit(f'G04D-C canonical UTF-8 boundary is missing: {boundary}')
 for identity in [
     '372948992', 'f15ba07bfcb0186986cf3171063506f5d207c11f8cc051ba0d135209e9e915f9',
     '{3B467719-C25B-478C-8F4C-8E2EDA0E2093}', '{4B17E523-5D91-4E69-BD96-7FD81CFA81BB}',
