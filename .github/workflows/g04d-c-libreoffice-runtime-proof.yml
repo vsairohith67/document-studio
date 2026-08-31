@@ -2,12 +2,65 @@ name: G04D-C LibreOffice runtime admission proof
 
 on:
   workflow_dispatch:
+    inputs:
+      proofMode:
+        description: Bounded machine-state precheck or frozen full runtime proof
+        required: true
+        type: choice
+        options:
+          - precheck
+          - full
+        default: full
 
 permissions:
   contents: read
 
 jobs:
+  machine-state-precheck:
+    if: ${{ inputs.proofMode == 'precheck' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.19.0'
+          cache: npm
+      - name: Install locked PDF.js dependency tree
+        shell: powershell
+        run: npm ci --ignore-scripts
+      - name: Validate proof boundaries with Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\g04d-c\verify-g04d-c-boundaries.ps1
+      - name: Run bounded machine-state precheck
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-machine-state-precheck-evidence'
+          .\scripts\g04d-c\Invoke-G04DCMachineStatePrecheck.ps1 `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -EvidenceDirectory $evidence
+      - name: Seal bounded machine-state precheck artifact manifest
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-machine-state-precheck-evidence'
+          if ((Test-Path -LiteralPath $evidence) -and !(Test-Path -LiteralPath (Join-Path $evidence 'artifact-manifest.json'))) {
+            Import-Module .\scripts\g04d-c\G04DC.Common.psm1 -Force
+            New-G04DCArtifactManifest -EvidenceDirectory $evidence | Out-Null
+          }
+      - name: Upload bounded machine-state precheck evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: g04d-c-machine-state-precheck-evidence
+          path: ${{ runner.temp }}/g04d-c-machine-state-precheck-evidence
+          if-no-files-found: error
+          retention-days: 7
+
   admin-image:
+    if: ${{ inputs.proofMode == 'full' }}
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -50,6 +103,7 @@ jobs:
           retention-days: 7
 
   minimal-msi:
+    if: ${{ inputs.proofMode == 'full' }}
     runs-on: windows-2025
     timeout-minutes: 90
     steps:
@@ -93,7 +147,7 @@ jobs:
 
   decision:
     needs: [admin-image, minimal-msi]
-    if: ${{ always() }}
+    if: ${{ always() && inputs.proofMode == 'full' }}
     runs-on: windows-2025
     timeout-minutes: 15
     steps:
