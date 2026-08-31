@@ -261,14 +261,16 @@ $comAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandler
 $comEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $comAction -Index 0
 if ($comEvidence.actionKind -cne 'comHandler' -or $comEvidence.properties.PSObject.Properties['Execute']) { throw 'COM handler action incorrectly required Execute.' }
 $passed.Add('scheduled task COM handler without Execute')
-if ($comEvidence.properties.ClassId -cne '{11111111-2222-3333-4444-555555555555}' -or !$comEvidence.properties.PSObject.Properties['Data'] -or $null -ne $comEvidence.properties.Data) {
+if ($comEvidence.properties.ClassId -cne '{11111111-2222-3333-4444-555555555555}' -or !$comEvidence.properties.PSObject.Properties['Data'] -or
+    $comEvidence.properties.Data.valueShape -cne 'null' -or $comEvidence.properties.Data.sha256 -notmatch '^[0-9a-f]{64}$') {
     throw 'COM handler ClassId/Data evidence is invalid.'
 }
 $passed.Add('scheduled task COM ClassId and Data')
 
 $showMessageAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskShowMessageAction' -Properties ([ordered]@{ Id = 'message-1'; Title = 'Synthetic title'; Message = 'Synthetic message' })
 $showMessageEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $showMessageAction -Index 0
-if ($showMessageEvidence.actionKind -cne 'showMessage' -or $showMessageEvidence.properties.Title -cne 'Synthetic title' -or $showMessageEvidence.properties.Message -cne 'Synthetic message') {
+if ($showMessageEvidence.actionKind -cne 'showMessage' -or $showMessageEvidence.properties.Title.valueShape -cne 'string' -or
+    $showMessageEvidence.properties.Message.valueShape -cne 'string' -or ($showMessageEvidence | ConvertTo-Json -Compress -Depth 8) -match 'Synthetic (title|message)') {
     throw 'A valid non-Exec scheduled-task property set was not collected.'
 }
 $passed.Add('scheduled task different valid property set')
@@ -277,11 +279,37 @@ $emailAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskEmailAct
     Id = 'email-1'; Server = 'smtp.example.invalid'; To = @('one@example.invalid', 'two@example.invalid'); Cc = 'copy@example.invalid'; Subject = ''
 })
 $emailEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $emailAction -Index 0
-if ($emailEvidence.actionKind -cne 'email' -or $emailEvidence.properties.To -isnot [array] -or $emailEvidence.properties.To.Count -ne 2 -or
-    $emailEvidence.properties.To[0] -cne 'one@example.invalid' -or $emailEvidence.properties.Cc -isnot [string] -or $emailEvidence.properties.Subject -cne '') {
+if ($emailEvidence.actionKind -cne 'email' -or $emailEvidence.properties.To.valueShape -cne 'array' -or $emailEvidence.properties.To.memberCount -ne 2 -or
+    ($emailEvidence.properties.To.memberShapes -join '|') -cne 'string|string' -or $emailEvidence.properties.Cc.valueShape -cne 'string' -or
+    $emailEvidence.properties.Subject.valueShape -cne 'emptyString') {
     throw 'Scheduled-task scalar and array property shapes were not preserved.'
 }
 $passed.Add('scheduled task scalar and array shapes preserved')
+$emailJson = $emailEvidence | ConvertTo-Json -Compress -Depth 8
+if ($emailJson -match 'smtp\.example\.invalid|one@example\.invalid|two@example\.invalid|copy@example\.invalid') {
+    throw 'Sensitive scheduled-task email data was serialized in plaintext.'
+}
+$passed.Add('scheduled task sensitive email values are hash only')
+
+$nonEmptyComAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandlerAction' -Properties ([ordered]@{
+    Id = 'com-sensitive'; ClassId = '{11111111-2222-3333-4444-555555555555}'; Data = 'synthetic secret payload'
+})
+$nonEmptyComEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $nonEmptyComAction -Index 0
+$nonEmptyComJson = $nonEmptyComEvidence | ConvertTo-Json -Compress -Depth 8
+if ($nonEmptyComEvidence.properties.Data.valueShape -cne 'string' -or $nonEmptyComEvidence.properties.Data.sha256 -notmatch '^[0-9a-f]{64}$' -or
+    $nonEmptyComJson.Contains('synthetic secret payload')) {
+    throw 'Sensitive scheduled-task COM data was not retained as hash-only evidence.'
+}
+$passed.Add('scheduled task sensitive COM data is hash only')
+
+$changedNonEmptyComAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_TaskComHandlerAction' -Properties ([ordered]@{
+    Id = 'com-sensitive'; ClassId = '{11111111-2222-3333-4444-555555555555}'; Data = 'changed synthetic secret payload'
+})
+$changedNonEmptyComEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $changedNonEmptyComAction -Index 0
+if ($nonEmptyComEvidence.properties.Data.sha256 -ceq $changedNonEmptyComEvidence.properties.Data.sha256) {
+    throw 'Changed sensitive scheduled-task action data did not change its deterministic hash evidence.'
+}
+$passed.Add('changed sensitive scheduled task value changes hash evidence')
 
 $mixedTaskXml = '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Actions><Exec><Command>exec-one.exe</Command></Exec><ComHandler><ClassId>{11111111-2222-3333-4444-555555555555}</ClassId></ComHandler></Actions></Task>'
 $mixedTask = New-G04DCTestScheduledTask -TaskPath '\Synthetic\' -TaskName 'Mixed' -Actions @($execAction, $comAction) -DefinitionXml $mixedTaskXml
@@ -400,7 +428,8 @@ $runnerShapedComAction = New-G04DCTestScheduledTaskAction -CimClassName 'MSFT_Ta
 })
 $runnerShapedEvidence = ConvertTo-G04DCScheduledTaskActionEvidence -Action $runnerShapedComAction -Index 0
 $runnerShapedJson = $runnerShapedEvidence | ConvertTo-Json -Compress -Depth 8
-if ($runnerShapedEvidence.actionKind -cne 'comHandler' -or $runnerShapedJson.Contains('Execute') -or $runnerShapedJson.Contains('PSComputerName') -or $runnerShapedJson.Contains('RunspaceId') -or $runnerShapedJson.Contains('CimSystemProperties')) {
+if ($runnerShapedEvidence.actionKind -cne 'comHandler' -or $runnerShapedEvidence.properties.Data.valueShape -cne 'emptyString' -or
+    $runnerShapedJson.Contains('Execute') -or $runnerShapedJson.Contains('PSComputerName') -or $runnerShapedJson.Contains('RunspaceId') -or $runnerShapedJson.Contains('CimSystemProperties')) {
     throw 'GitHub-hosted runner-shaped non-Exec action was not safely serialized.'
 }
 $passed.Add('GitHub runner shaped non-Exec scheduled task action')
@@ -735,5 +764,5 @@ try {
 }
 finally { Remove-Item -LiteralPath $artifactRoot -Recurse -Force }
 
-if ($passed.Count -ne 131) { throw "Expected 131 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 134) { throw "Expected 134 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

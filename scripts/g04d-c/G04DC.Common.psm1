@@ -1837,6 +1837,46 @@ function ConvertTo-G04DCScheduledTaskActionValue {
     throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action property is not a bounded primitive, string, GUID, character, array, or null value.'
 }
 
+function Get-G04DCScheduledTaskActionValueShape {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [AllowNull()] $Value)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string]) {
+        if ($Value.Length -eq 0) { return 'emptyString' }
+        return 'string'
+    }
+    if ($Value -is [bool]) { return 'boolean' }
+    if ($Value -is [array]) { return 'array' }
+    return 'number'
+}
+
+function ConvertTo-G04DCScheduledTaskSensitiveActionValueEvidence {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [AllowNull()] $Value)
+
+    $converted = ConvertTo-G04DCScheduledTaskActionValue -Value $Value
+    $shape = Get-G04DCScheduledTaskActionValueShape -Value $converted
+    $hashRow = [pscustomobject][ordered]@{ value = $converted }
+    $hash = Get-G04DCCanonicalHash -Rows @($hashRow)
+    if ($shape -cne 'array') {
+        return [pscustomobject][ordered]@{
+            valueShape = $shape
+            sha256 = $hash
+        }
+    }
+
+    $memberShapes = [System.Collections.Generic.List[string]]::new()
+    foreach ($member in $converted) {
+        $memberShapes.Add((Get-G04DCScheduledTaskActionValueShape -Value $member))
+    }
+    return [pscustomobject][ordered]@{
+        valueShape = 'array'
+        memberCount = $converted.Count
+        memberShapes = $memberShapes.ToArray()
+        sha256 = $hash
+    }
+}
+
 function Get-G04DCScheduledTaskActionCimClassName {
     [CmdletBinding()]
     param(
@@ -1885,13 +1925,24 @@ function ConvertTo-G04DCScheduledTaskActionEvidence {
         'showMessage' { @('Id', 'Title', 'Message') }
         default { @('Id', 'Name') }
     }
+    $sensitiveProperties = switch ($actionKind) {
+        'comHandler' { @('Data') }
+        'email' { @('Server', 'Subject', 'To', 'Cc', 'Bcc', 'ReplyTo', 'From', 'Body') }
+        'showMessage' { @('Title', 'Message') }
+        default { @() }
+    }
     $properties = [ordered]@{}
     foreach ($name in $selectedProperties) {
         $safePropertyArguments = @{ InputObject = $Action; Name = $name; FailureCode = 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' }
         if ($PropertyAccessAdapter) { $safePropertyArguments.AccessAdapter = $PropertyAccessAdapter }
         $state = Get-G04DCSafePropertyState @safePropertyArguments
         if ($state.present) {
-            $properties[$name] = ConvertTo-G04DCScheduledTaskActionValue -Value $state.value
+            $properties[$name] = if ($name -cin $sensitiveProperties) {
+                ConvertTo-G04DCScheduledTaskSensitiveActionValueEvidence -Value $state.value
+            }
+            else {
+                ConvertTo-G04DCScheduledTaskActionValue -Value $state.value
+            }
         }
     }
     return [pscustomobject][ordered]@{

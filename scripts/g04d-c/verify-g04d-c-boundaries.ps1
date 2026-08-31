@@ -42,14 +42,15 @@ foreach ($registryRegression in @(
     if (!$tests.Contains($registryRegression)) { throw "G04D-C registry-state regression is missing: $registryRegression" }
 }
 foreach ($scheduledTaskBoundary in @(
-    'Get-G04DCSafePropertyState', 'ConvertTo-G04DCScheduledTaskActionEvidence',
+    'Get-G04DCSafePropertyState', 'ConvertTo-G04DCScheduledTaskSensitiveActionValueEvidence', 'ConvertTo-G04DCScheduledTaskActionEvidence',
     'ConvertTo-G04DCScheduledTaskEvidence', 'Get-G04DCScheduledTaskCatalogEvidence',
     'SCHEDULED_TASK_ACTION_CAPTURE_FAILED', 'SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED',
     'cimClass', 'actionKind', 'properties', 'definitionSha256',
     "'exec'", "'comHandler'", "'email'", "'showMessage'", "'other'",
     "@('Id', 'Execute', 'Arguments', 'WorkingDirectory')",
     "@('Id', 'ClassId', 'Data')", "Get-ScheduledTask -ErrorAction Stop",
-    'Export-ScheduledTask', 'maximumStringCharacters = 16384', 'maximumArrayMembers = 128'
+    'Export-ScheduledTask', 'maximumStringCharacters = 16384', 'maximumArrayMembers = 128',
+    "'comHandler' { @('Data') }", "'showMessage' { @('Title', 'Message') }"
 )) {
     if (!$commonProof.Contains($scheduledTaskBoundary)) { throw "G04D-C heterogeneous scheduled-task evidence boundary is missing: $scheduledTaskBoundary" }
 }
@@ -63,7 +64,8 @@ foreach ($scheduledTaskRegression in @(
     'normal scheduled task Exec action', 'scheduled task Exec empty Arguments',
     'scheduled task Exec absent WorkingDirectory', 'scheduled task COM handler without Execute',
     'scheduled task COM ClassId and Data', 'scheduled task different valid property set',
-    'scheduled task scalar and array shapes preserved',
+    'scheduled task scalar and array shapes preserved', 'scheduled task sensitive email values are hash only',
+    'scheduled task sensitive COM data is hash only', 'changed sensitive scheduled task value changes hash evidence',
     'mixed scheduled task Exec and COM actions', 'scheduled task original action order preserved',
     'scheduled task property absent versus present null', 'scheduled task property present empty string',
     'unknown identifiable scheduled task CIM class', 'unknown scheduled task action retains XML hash coverage',
@@ -74,7 +76,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 131 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 134 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
