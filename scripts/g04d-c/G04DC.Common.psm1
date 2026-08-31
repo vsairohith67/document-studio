@@ -1722,6 +1722,331 @@ function Get-G04DCDirectoryTreeDigest {
     return [pscustomobject][ordered]@{ rowCount = $canonicalRows.Count; sha256 = Get-G04DCCanonicalHash -Rows $canonicalRows }
 }
 
+function Get-G04DCSafePropertyState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowNull()] $InputObject,
+        [Parameter(Mandatory = $true)] [string]$Name,
+        [Parameter(Mandatory = $true)] [string]$FailureCode,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$AccessAdapter
+    )
+    if ($null -eq $InputObject -or [string]::IsNullOrWhiteSpace($Name) -or $Name.Length -gt 256) {
+        throw "[$FailureCode] Property metadata lookup received an invalid object or name."
+    }
+    if (!$AccessAdapter) {
+        $AccessAdapter = @{
+            GetProperty = { param($CandidateObject, [string]$PropertyName) $CandidateObject.PSObject.Properties[$PropertyName] }
+            GetValue = { param($Property, [string]$PropertyName) $Property.Value }
+        }
+    }
+    foreach ($operation in @('GetProperty', 'GetValue')) {
+        if (!$AccessAdapter.ContainsKey($operation) -or $AccessAdapter[$operation] -isnot [scriptblock]) {
+            throw "[$FailureCode] Property access adapter is incomplete."
+        }
+    }
+    try { $property = & $AccessAdapter.GetProperty $InputObject $Name }
+    catch { throw "[$FailureCode] Property metadata lookup failed ($($_.Exception.GetType().FullName))." }
+    if ($null -eq $property) {
+        return [pscustomobject][ordered]@{ present = $false }
+    }
+    try { $value = & $AccessAdapter.GetValue $property $Name }
+    catch { throw "[$FailureCode] Property retrieval failed for $Name ($($_.Exception.GetType().FullName))." }
+    return [pscustomobject][ordered]@{ present = $true; value = $value }
+}
+
+function ConvertTo-G04DCScheduledTaskActionValue {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [AllowNull()] $Value)
+    $maximumStringCharacters = 16384
+    $maximumArrayMembers = 128
+    $maximumArrayMemberCharacters = 4096
+    $maximumArrayCharacters = 65536
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) {
+        if ($Value.Length -gt $maximumStringCharacters) {
+            throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action string exceeds the bounded character ceiling.'
+        }
+        return [string]$Value
+    }
+    if ($Value -is [guid]) { return $Value.ToString('D') }
+    if ($Value -is [char]) { return [string]$Value }
+    if ($Value -is [array]) {
+        if ($Value.Rank -ne 1) {
+            throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action arrays must have exactly one dimension.'
+        }
+        if ($Value.Count -gt $maximumArrayMembers) {
+            throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action array exceeds the bounded member ceiling.'
+        }
+        $totalCharacters = 0
+        $converted = [System.Collections.Generic.List[object]]::new()
+        foreach ($member in $Value) {
+            if ($null -eq $member) { $converted.Add($null); continue }
+            if ($member -is [string]) {
+                if ($member.Length -gt $maximumArrayMemberCharacters) {
+                    throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action array member exceeds the bounded character ceiling.'
+                }
+                $totalCharacters += $member.Length
+                $converted.Add([string]$member)
+                continue
+            }
+            if ($member -is [guid]) {
+                $text = $member.ToString('D')
+                $totalCharacters += $text.Length
+                $converted.Add($text)
+                continue
+            }
+            if ($member -is [char]) {
+                $totalCharacters++
+                $converted.Add([string]$member)
+                continue
+            }
+            $typeCode = [Type]::GetTypeCode($member.GetType())
+            if ($typeCode -notin @(
+                [TypeCode]::Boolean, [TypeCode]::Byte, [TypeCode]::SByte,
+                [TypeCode]::Int16, [TypeCode]::UInt16, [TypeCode]::Int32, [TypeCode]::UInt32,
+                [TypeCode]::Int64, [TypeCode]::UInt64, [TypeCode]::Single, [TypeCode]::Double,
+                [TypeCode]::Decimal
+            )) {
+                throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action arrays may contain only bounded primitive, string, GUID, character, or null values.'
+            }
+            if ($typeCode -in @([TypeCode]::Single, [TypeCode]::Double) -and
+                ([double]::IsNaN([double]$member) -or [double]::IsInfinity([double]$member))) {
+                throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action floating-point values must be finite.'
+            }
+            $converted.Add($member)
+        }
+        if ($totalCharacters -gt $maximumArrayCharacters) {
+            throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action array exceeds the bounded aggregate character ceiling.'
+        }
+        return ,$converted.ToArray()
+    }
+    $scalarTypeCode = [Type]::GetTypeCode($Value.GetType())
+    if ($scalarTypeCode -in @(
+        [TypeCode]::Boolean, [TypeCode]::Byte, [TypeCode]::SByte,
+        [TypeCode]::Int16, [TypeCode]::UInt16, [TypeCode]::Int32, [TypeCode]::UInt32,
+        [TypeCode]::Int64, [TypeCode]::UInt64, [TypeCode]::Single, [TypeCode]::Double,
+        [TypeCode]::Decimal
+    )) {
+        if ($scalarTypeCode -in @([TypeCode]::Single, [TypeCode]::Double) -and
+            ([double]::IsNaN([double]$Value) -or [double]::IsInfinity([double]$Value))) {
+            throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action floating-point values must be finite.'
+        }
+        return $Value
+    }
+    throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action property is not a bounded primitive, string, GUID, character, array, or null value.'
+}
+
+function Get-G04DCScheduledTaskActionValueShape {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [AllowNull()] $Value)
+    if ($null -eq $Value) { return 'null' }
+    if ($Value -is [string]) {
+        if ($Value.Length -eq 0) { return 'emptyString' }
+        return 'string'
+    }
+    if ($Value -is [bool]) { return 'boolean' }
+    if ($Value -is [array]) { return 'array' }
+    return 'number'
+}
+
+function ConvertTo-G04DCScheduledTaskSensitiveActionValueEvidence {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] [AllowNull()] $Value)
+
+    $converted = ConvertTo-G04DCScheduledTaskActionValue -Value $Value
+    $shape = Get-G04DCScheduledTaskActionValueShape -Value $converted
+    $hashRow = [pscustomobject][ordered]@{ value = $converted }
+    $hash = Get-G04DCCanonicalHash -Rows @($hashRow)
+    if ($shape -cne 'array') {
+        return [pscustomobject][ordered]@{
+            valueShape = $shape
+            sha256 = $hash
+        }
+    }
+
+    $memberShapes = [System.Collections.Generic.List[string]]::new()
+    foreach ($member in $converted) {
+        $memberShapes.Add((Get-G04DCScheduledTaskActionValueShape -Value $member))
+    }
+    return [pscustomobject][ordered]@{
+        valueShape = 'array'
+        memberCount = $converted.Count
+        memberShapes = $memberShapes.ToArray()
+        sha256 = $hash
+    }
+}
+
+function Get-G04DCScheduledTaskActionCimClassName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowNull()] $Action,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$PropertyAccessAdapter
+    )
+    $failureCode = 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED'
+    $safePropertyArguments = @{ FailureCode = $failureCode }
+    if ($PropertyAccessAdapter) { $safePropertyArguments.AccessAdapter = $PropertyAccessAdapter }
+    $cimClassState = Get-G04DCSafePropertyState -InputObject $Action -Name 'CimClass' @safePropertyArguments
+    $classNameState = $null
+    if ($cimClassState.present -and $null -ne $cimClassState.value) {
+        $classNameState = Get-G04DCSafePropertyState -InputObject $cimClassState.value -Name 'CimClassName' @safePropertyArguments
+    }
+    if (!$classNameState -or !$classNameState.present) {
+        $classNameState = Get-G04DCSafePropertyState -InputObject $Action -Name 'CimClassName' @safePropertyArguments
+    }
+    if (!$classNameState.present -or $classNameState.value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string]$classNameState.value) -or ([string]$classNameState.value).Length -gt 256) {
+        throw '[SCHEDULED_TASK_ACTION_CAPTURE_FAILED] Scheduled-task action CIM class cannot be identified.'
+    }
+    return [string]$classNameState.value
+}
+
+function ConvertTo-G04DCScheduledTaskActionEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowNull()] $Action,
+        [Parameter(Mandatory = $true)] [ValidateRange(0, 4095)] [int]$Index,
+        [Parameter(DontShow = $true)] [AllowNull()] [hashtable]$PropertyAccessAdapter
+    )
+    $cimClassArguments = @{ Action = $Action }
+    if ($PropertyAccessAdapter) { $cimClassArguments.PropertyAccessAdapter = $PropertyAccessAdapter }
+    $cimClass = Get-G04DCScheduledTaskActionCimClassName @cimClassArguments
+    $actionKind = switch -Regex ($cimClass) {
+        '^(?i:MSFT_TaskExecAction)$' { 'exec'; break }
+        '^(?i:MSFT_TaskComHandlerAction)$' { 'comHandler'; break }
+        '^(?i:MSFT_TaskEmailAction)$' { 'email'; break }
+        '^(?i:MSFT_TaskShowMessageAction)$' { 'showMessage'; break }
+        default { 'other' }
+    }
+    $selectedProperties = switch ($actionKind) {
+        'exec' { @('Id', 'Execute', 'Arguments', 'WorkingDirectory') }
+        'comHandler' { @('Id', 'ClassId', 'Data') }
+        'email' { @('Id', 'Server', 'Subject', 'To', 'Cc', 'Bcc', 'ReplyTo', 'From', 'Body') }
+        'showMessage' { @('Id', 'Title', 'Message') }
+        default { @('Id', 'Name') }
+    }
+    $sensitiveProperties = switch ($actionKind) {
+        'comHandler' { @('Data') }
+        'email' { @('Server', 'Subject', 'To', 'Cc', 'Bcc', 'ReplyTo', 'From', 'Body') }
+        'showMessage' { @('Title', 'Message') }
+        default { @() }
+    }
+    $properties = [ordered]@{}
+    foreach ($name in $selectedProperties) {
+        $safePropertyArguments = @{ InputObject = $Action; Name = $name; FailureCode = 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED' }
+        if ($PropertyAccessAdapter) { $safePropertyArguments.AccessAdapter = $PropertyAccessAdapter }
+        $state = Get-G04DCSafePropertyState @safePropertyArguments
+        if ($state.present) {
+            $properties[$name] = if ($name -cin $sensitiveProperties) {
+                ConvertTo-G04DCScheduledTaskSensitiveActionValueEvidence -Value $state.value
+            }
+            else {
+                ConvertTo-G04DCScheduledTaskActionValue -Value $state.value
+            }
+        }
+    }
+    return [pscustomobject][ordered]@{
+        index = $Index
+        cimClass = $cimClass
+        actionKind = $actionKind
+        properties = [pscustomobject]$properties
+    }
+}
+
+function ConvertTo-G04DCScheduledTaskEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowNull()] $Task,
+        [Parameter(Mandatory = $true)] [scriptblock]$ExportTaskAdapter
+    )
+    $taskNameState = Get-G04DCSafePropertyState -InputObject $Task -Name 'TaskName' -FailureCode 'SCHEDULED_TASK_CAPTURE_FAILED'
+    $taskPathState = Get-G04DCSafePropertyState -InputObject $Task -Name 'TaskPath' -FailureCode 'SCHEDULED_TASK_CAPTURE_FAILED'
+    $stateState = Get-G04DCSafePropertyState -InputObject $Task -Name 'State' -FailureCode 'SCHEDULED_TASK_CAPTURE_FAILED'
+    $actionsState = Get-G04DCSafePropertyState -InputObject $Task -Name 'Actions' -FailureCode 'SCHEDULED_TASK_CAPTURE_FAILED'
+    if (!$taskNameState.present -or $taskNameState.value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$taskNameState.value) -or ([string]$taskNameState.value).Length -gt 1024 -or
+        !$taskPathState.present -or $taskPathState.value -isnot [string] -or ([string]$taskPathState.value).Length -gt 1024 -or
+        !$stateState.present -or $null -eq $stateState.value -or !$actionsState.present -or $null -eq $actionsState.value) {
+        throw '[SCHEDULED_TASK_CAPTURE_FAILED] Scheduled-task identity, state, or ordered action collection is unavailable.'
+    }
+    $taskName = [string]$taskNameState.value
+    $taskPath = [string]$taskPathState.value
+    $actions = @($actionsState.value)
+    if ($actions.Count -gt 4096) { throw '[SCHEDULED_TASK_CAPTURE_FAILED] Scheduled-task action count exceeds the bounded ceiling.' }
+    $actionEvidence = [System.Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $actions.Count; $index++) {
+        $actionEvidence.Add((ConvertTo-G04DCScheduledTaskActionEvidence -Action $actions[$index] -Index $index))
+    }
+
+    try { $taskXmlOutput = @(& $ExportTaskAdapter $Task $taskName $taskPath) }
+    catch { throw "[SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED] Export-ScheduledTask failed ($($_.Exception.GetType().FullName))." }
+    if ($taskXmlOutput.Count -ne 1 -or $taskXmlOutput[0] -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string]$taskXmlOutput[0]) -or ([string]$taskXmlOutput[0]).Length -gt 1048576) {
+        throw '[SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED] Export-ScheduledTask did not return one bounded task definition.'
+    }
+    $taskXml = [string]$taskXmlOutput[0]
+    $settings = [System.Xml.XmlReaderSettings]::new()
+    $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    $settings.XmlResolver = $null
+    $settings.MaxCharactersInDocument = 1048576
+    $stringReader = [System.IO.StringReader]::new($taskXml)
+    $xmlReader = $null
+    $taskElementObserved = $false
+    try {
+        $xmlReader = [System.Xml.XmlReader]::Create($stringReader, $settings)
+        while ($xmlReader.Read()) {
+            if ($xmlReader.NodeType -eq [System.Xml.XmlNodeType]::Element -and $xmlReader.Depth -eq 0 -and $xmlReader.LocalName -ceq 'Task') { $taskElementObserved = $true }
+        }
+    }
+    catch { throw "[SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED] Exported task XML is not a bounded parseable definition ($($_.Exception.GetType().FullName))." }
+    finally {
+        if ($xmlReader) { $xmlReader.Dispose() }
+        $stringReader.Dispose()
+    }
+    if (!$taskElementObserved) { throw '[SCHEDULED_TASK_DEFINITION_CAPTURE_FAILED] Exported task XML has no Task element.' }
+
+    return [pscustomobject][ordered]@{
+        taskPath = $taskPath
+        taskName = $taskName
+        state = [string]$stateState.value
+        actions = @($actionEvidence.ToArray())
+        definitionSha256 = Get-G04DCCanonicalHash -Rows @($taskXml)
+    }
+}
+
+function Get-G04DCScheduledTaskCatalogEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(DontShow = $true)] [AllowNull()] [object[]]$Tasks,
+        [Parameter(DontShow = $true)] [AllowNull()] [scriptblock]$ExportTaskAdapter
+    )
+    if (!$PSBoundParameters.ContainsKey('Tasks')) {
+        try { $Tasks = @(Get-ScheduledTask -ErrorAction Stop) }
+        catch { throw "[SCHEDULED_TASK_CAPTURE_FAILED] Get-ScheduledTask failed ($($_.Exception.GetType().FullName))." }
+    }
+    if (!$ExportTaskAdapter) {
+        $ExportTaskAdapter = {
+            param($Task, [string]$TaskName, [string]$TaskPath)
+            Export-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+        }
+    }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($task in @($Tasks)) {
+        $rows.Add((ConvertTo-G04DCScheduledTaskEvidence -Task $task -ExportTaskAdapter $ExportTaskAdapter))
+    }
+    return @($rows.ToArray() | Sort-Object taskPath, taskName)
+}
+
+function Test-G04DCScheduledTaskActionLibreOfficeReference {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $ActionEvidence)
+    if ([string]$ActionEvidence.actionKind -cne 'exec') { return $false }
+    foreach ($name in @('Execute', 'Arguments', 'WorkingDirectory')) {
+        $state = Get-G04DCSafePropertyState -InputObject $ActionEvidence.properties -Name $name -FailureCode 'SCHEDULED_TASK_ACTION_CAPTURE_FAILED'
+        if ($state.present -and $null -ne $state.value -and [string]$state.value -match '(?i)libreoffice|soffice') { return $true }
+    }
+    return $false
+}
+
 function Get-G04DCMachineState {
     [CmdletBinding()]
     param(
@@ -1878,16 +2203,7 @@ function Get-G04DCMachineState {
         })
         @($startupFileRows | Where-Object { $_.name -match '(?i)libreoffice|soffice' })
     )
-    $allTaskRows = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Sort-Object TaskPath, TaskName | ForEach-Object {
-        $taskXml = Export-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction Stop
-        [pscustomobject][ordered]@{
-            taskPath = $_.TaskPath
-            taskName = $_.TaskName
-            state = [string]$_.State
-            actions = @($_.Actions | ForEach-Object { [pscustomobject][ordered]@{ execute = $_.Execute; arguments = $_.Arguments; workingDirectory = $_.WorkingDirectory } })
-            definitionSha256 = Get-G04DCCanonicalHash -Rows @($taskXml)
-        }
-    })
+    $allTaskRows = @(Get-G04DCScheduledTaskCatalogEvidence)
     $shortcutCatalog = Get-G04DCDirectoryTreeDigest -Roots @(
         (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
         ([Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)),
@@ -1900,7 +2216,7 @@ function Get-G04DCMachineState {
     )
     $tasks = @($allTaskRows | Where-Object {
         $_.taskName -match '(?i)libreoffice|soffice' -or $_.taskPath -match '(?i)libreoffice|soffice' -or
-        (@($_.actions | Where-Object { $_.execute -match '(?i)libreoffice|soffice' -or $_.arguments -match '(?i)libreoffice|soffice' }).Count -ne 0)
+        (@($_.actions | Where-Object { Test-G04DCScheduledTaskActionLibreOfficeReference -ActionEvidence $_ }).Count -ne 0)
     })
     $allFirewallApplicationPrograms = @{}
     foreach ($filter in @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue)) {
@@ -2387,6 +2703,8 @@ Export-ModuleMember -Function @(
     'Assert-G04DCInstalledFileOwnership',
     'Get-G04DCExternalRuntimeTargetPaths',
     'Get-G04DCRegistryValueState', 'Get-G04DCRegistryDefaultValueState',
+    'Get-G04DCSafePropertyState', 'ConvertTo-G04DCScheduledTaskActionEvidence',
+    'ConvertTo-G04DCScheduledTaskEvidence', 'Get-G04DCScheduledTaskCatalogEvidence',
     'ConvertTo-G04DCPackedGuid', 'Get-G04DCMsiRegistrationState', 'Assert-G04DCMsiRegistrationAbsent', 'Assert-G04DCMsiRegistrationInstalled',
     'Get-G04DCMachineState', 'Compare-G04DCMachineState',
     'Assert-G04DCNonMutation', 'Assert-G04DCRunnerIsolation', 'Assert-G04DCExternalRuntimeDependencies',
