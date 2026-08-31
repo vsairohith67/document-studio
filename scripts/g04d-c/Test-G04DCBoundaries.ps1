@@ -1505,6 +1505,46 @@ finally {
     $c7RegistryBase.Dispose()
 }
 
+$shortcutRetryRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-shortcut-retry-' + [guid]::NewGuid().ToString('N'))
+$shortcutRetryMarker = $shortcutRetryRoot + '.ready'
+$shortcutRetryProcess = $null
+try {
+    [IO.Directory]::CreateDirectory($shortcutRetryRoot) | Out-Null
+    $shortcutRetryFile = Join-Path $shortcutRetryRoot 'locked.lnk'
+    [IO.File]::WriteAllBytes($shortcutRetryFile, [Text.Encoding]::ASCII.GetBytes('shortcut-evidence'))
+    $escapedRetryFile = $shortcutRetryFile.Replace("'", "''")
+    $escapedRetryMarker = $shortcutRetryMarker.Replace("'", "''")
+    $shortcutRetryCode = "`$stream=[IO.FileStream]::new('$escapedRetryFile',[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None);try{[IO.File]::WriteAllText('$escapedRetryMarker','ready');Start-Sleep -Milliseconds 500}finally{`$stream.Dispose()}"
+    $encodedRetryCode = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($shortcutRetryCode))
+    $shortcutRetryStartInfo = [Diagnostics.ProcessStartInfo]::new()
+    $shortcutRetryStartInfo.FileName = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $shortcutRetryStartInfo.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedRetryCode"
+    $shortcutRetryStartInfo.UseShellExecute = $false
+    $shortcutRetryStartInfo.CreateNoWindow = $true
+    $shortcutRetryProcess = [Diagnostics.Process]::Start($shortcutRetryStartInfo)
+    $retryWait = [Diagnostics.Stopwatch]::StartNew()
+    while (!(Test-Path -LiteralPath $shortcutRetryMarker -PathType Leaf) -and $retryWait.ElapsedMilliseconds -lt 5000) { Start-Sleep -Milliseconds 25 }
+    if (!(Test-Path -LiteralPath $shortcutRetryMarker -PathType Leaf)) { throw 'Synthetic shortcut lock did not become ready.' }
+    $retriedShortcutDigest = & $module { param([string]$Root) Get-G04DCDirectoryTreeDigest -Roots @($Root) } $shortcutRetryRoot
+    if ($retriedShortcutDigest.rowCount -ne 1 -or [string]$retriedShortcutDigest.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Transient shortcut sharing retry lost the complete entry.' }
+    $passed.Add('shortcut catalog transient sharing retry preserves full entry')
+    $shortcutRetryProcess.WaitForExit()
+
+    $exclusiveLock = [IO.FileStream]::new($shortcutRetryFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+        Assert-Throws 'shortcut catalog persistent sharing failure remains fail closed' 'DIRECTORY_TREE_CAPTURE_UNSTABLE' {
+            & $module { param([string]$Root) Get-G04DCDirectoryTreeDigest -Roots @($Root) } $shortcutRetryRoot | Out-Null
+        }
+    }
+    finally { $exclusiveLock.Dispose() }
+}
+finally {
+    if ($shortcutRetryProcess -and !$shortcutRetryProcess.HasExited) { $shortcutRetryProcess.Kill(); $shortcutRetryProcess.WaitForExit() }
+    if ($shortcutRetryProcess) { $shortcutRetryProcess.Dispose() }
+    if (Test-Path -LiteralPath $shortcutRetryRoot) { Remove-Item -LiteralPath $shortcutRetryRoot -Recurse -Force }
+    if (Test-Path -LiteralPath $shortcutRetryMarker) { Remove-Item -LiteralPath $shortcutRetryMarker -Force }
+}
+
 $classRegistryHelperSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ClassRegistryDigest.cs') -Raw
 if ($commonSource -match '(?i)UseShellExecute\s*=\s*\$true|cmd\.exe' -or $classRegistryHelperSource -match '(?i)Microsoft\.Win32|CreateSubKey|SetValue|DeleteValue|DeleteSubKey') {
     throw 'C7 streaming registry collector introduced a shell or registry mutation API.'
@@ -1694,5 +1734,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 263) { throw "Expected 263 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 265) { throw "Expected 265 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

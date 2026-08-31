@@ -1068,6 +1068,12 @@ for boundary in [
 for boundary in ['classRegistryDigestTargetMilliseconds = 180000L', 'CLASS_REGISTRY_DIGEST_TARGET_EXCEEDED']:
     if boundary not in g04dc_precheck:
         raise SystemExit(f'G04D-C PRECHECK class-registry target is missing: {boundary}')
+for boundary in [
+    '$maximumAttempts = 4', 'Start-Sleep -Milliseconds 250', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
+    '$afterItem.LastWriteTimeUtc', "'IOException', 'ItemNotFoundException'",
+]:
+    if boundary not in g04dc_common:
+        raise SystemExit(f'G04D-C bounded directory retry boundary is missing: {boundary}')
 for regression in [
     'current native-row normalization equivalence', 'incremental hash equality',
     '64236-row registry digest scale', 'explicit UTF-8 native output encoding',
@@ -1076,7 +1082,8 @@ for regression in [
     'registry key creation mutation equivalence', 'registry default absent-empty distinction',
     'registry value-kind mutation equivalence', 'registry Unicode mutation equivalence',
     'optimized class registry collector performs no mutation', 'C7 class registry target is 180000 ms',
-    'Expected 263 fail-closed cases',
+    'shortcut catalog transient sharing retry preserves full entry',
+    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 265 fail-closed cases',
 ]:
     if regression not in g04dc_tests:
         raise SystemExit(f'G04D-C class-registry regression is missing: {regression}')

@@ -2885,6 +2885,63 @@ function Get-G04DCDirectoryTreeDigest {
         [Parameter(DontShow = $true)] [string]$CapturePhase = 'directory-digest'
     )
     $rows = [System.Collections.Generic.List[object]]::new()
+
+    $getStableFileEvidence = {
+        param([Parameter(Mandatory = $true)] [string]$Path, [long]$ItemCount)
+        $maximumAttempts = 4
+        for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++) {
+            try {
+                $beforeItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+                if ($beforeItem.PSIsContainer -or [bool]($beforeItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                    throw '[DIRECTORY_TREE_CAPTURE_FAILED] Directory entry changed into a directory or reparse point before hashing.'
+                }
+                $sizeBefore = [long]$beforeItem.Length
+                $lastWriteBefore = $beforeItem.LastWriteTimeUtc.ToString('o')
+                $hash = if ($CaptureContext) {
+                    Get-G04DCBoundedFileSha256 -Path $Path -CaptureContext $CaptureContext -CapturePhase $CapturePhase -ItemCount $ItemCount
+                }
+                else { Get-G04DCSha256 -Path $Path }
+                $afterItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+                if ($afterItem.PSIsContainer -or [bool]($afterItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                    [long]$afterItem.Length -ne $sizeBefore -or $afterItem.LastWriteTimeUtc.ToString('o') -cne $lastWriteBefore) {
+                    if ($attempt -eq $maximumAttempts) {
+                        throw '[DIRECTORY_TREE_CAPTURE_UNSTABLE] Directory entry changed during every bounded hash attempt.'
+                    }
+                    if ($CaptureContext) { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $ItemCount }
+                    Start-Sleep -Milliseconds 250
+                    continue
+                }
+                return [pscustomobject][ordered]@{ sha256 = $hash; sizeBytes = $sizeBefore; lastWriteUtc = $lastWriteBefore }
+            }
+            catch {
+                $message = [string]$_.Exception.Message
+                if ($message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal) -or
+                    $message.StartsWith('[MACHINE_STATE_CAPTURE_HELPER_CLEANUP_FAILED]', [StringComparison]::Ordinal) -or
+                    $message.StartsWith('[DIRECTORY_TREE_CAPTURE_FAILED]', [StringComparison]::Ordinal) -or
+                    $message.StartsWith('[DIRECTORY_TREE_CAPTURE_UNSTABLE]', [StringComparison]::Ordinal)) {
+                    throw
+                }
+                $exception = $_.Exception
+                $exceptionType = $exception.GetType().FullName
+                $retryable = [string]$_.CategoryInfo.Reason -in @('IOException', 'ItemNotFoundException', 'FileNotFoundException', 'DirectoryNotFoundException') -or
+                    [string]$_.FullyQualifiedErrorId -match '^(File(Read|Open)Error|PathNotFound)'
+                for ($depth = 0; $exception -and $depth -lt 8; $depth++) {
+                    if ($exception -is [IO.IOException]) { $retryable = $true; break }
+                    $exception = $exception.InnerException
+                }
+                if (!$retryable) {
+                    throw "[DIRECTORY_TREE_CAPTURE_FAILED] Directory entry hashing failed closed (exceptionType=$exceptionType)."
+                }
+                if ($attempt -eq $maximumAttempts) {
+                    throw "[DIRECTORY_TREE_CAPTURE_UNSTABLE] Directory entry could not be read after $maximumAttempts bounded attempts (exceptionType=$exceptionType)."
+                }
+                if ($CaptureContext) { Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $ItemCount }
+                Start-Sleep -Milliseconds 250
+            }
+        }
+        throw '[DIRECTORY_TREE_CAPTURE_UNSTABLE] Directory entry retry state was invalid.'
+    }
+
     foreach ($candidateRoot in @($Roots | Sort-Object -Unique)) {
         if ([string]::IsNullOrWhiteSpace($candidateRoot)) { throw '[MACHINE_STATE_CAPTURE_FAILED] A shortcut boundary root was unresolved.' }
         $root = [IO.Path]::GetFullPath($candidateRoot).TrimEnd('\')
@@ -2930,22 +2987,18 @@ function Get-G04DCDirectoryTreeDigest {
         }
         foreach ($entry in $inventory) {
             $rowNumber = $rows.Count + 1
-            $hash = if ([bool]$entry.present -and ![bool]$entry.directory -and ![bool]$entry.reparsePoint) {
-                if ($CaptureContext) {
-                    Get-G04DCBoundedFileSha256 -Path ([string]$entry.fullPath) -CaptureContext $CaptureContext -CapturePhase $CapturePhase -ItemCount $rowNumber
-                }
-                else { Get-G04DCSha256 -Path ([string]$entry.fullPath) }
-            }
-            else { $null }
+            $fileEvidence = if ([bool]$entry.present -and ![bool]$entry.directory -and ![bool]$entry.reparsePoint) {
+                & $getStableFileEvidence -Path ([string]$entry.fullPath) -ItemCount $rowNumber
+            } else { $null }
             $rows.Add([pscustomobject][ordered]@{
                 root = $root
                 path = [string]$entry.path
                 present = [bool]$entry.present
                 directory = [bool]$entry.directory
                 reparsePoint = [bool]$entry.reparsePoint
-                sizeBytes = [long]$entry.sizeBytes
-                sha256 = $hash
-                lastWriteUtc = if ($null -eq $entry.lastWriteUtc) { $null } else { [string]$entry.lastWriteUtc }
+                sizeBytes = if ($fileEvidence) { [long]$fileEvidence.sizeBytes } else { [long]$entry.sizeBytes }
+                sha256 = if ($fileEvidence) { [string]$fileEvidence.sha256 } else { $null }
+                lastWriteUtc = if ($fileEvidence) { [string]$fileEvidence.lastWriteUtc } elseif ($null -eq $entry.lastWriteUtc) { $null } else { [string]$entry.lastWriteUtc }
             })
             if ($rows.Count -gt 100000) { throw '[MACHINE_STATE_CAPTURE_FAILED] Directory boundary exceeded 100000 entries.' }
             if ($CaptureContext -and ($rows.Count % 128 -eq 0 -or $rows.Count -eq $inventory.Count)) {

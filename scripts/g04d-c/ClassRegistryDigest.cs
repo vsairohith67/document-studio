@@ -71,7 +71,7 @@ namespace DocumentStudio.G04DC
 
         public int RowCount
         {
-            get { return Thread.VolatileRead(ref observedRowCount); }
+            get { return Volatile.Read(ref observedRowCount); }
         }
 
         public long ReadElapsedMilliseconds
@@ -216,7 +216,7 @@ namespace DocumentStudio.G04DC
                 throw new InvalidDataException("[REGISTRY_DIGEST_ROW_CEILING] Native query exceeded the row ceiling.");
             }
             rawRows.Add(row.ToString());
-            Thread.VolatileWrite(ref observedRowCount, rawRows.Count);
+            Volatile.Write(ref observedRowCount, rawRows.Count);
         }
 
         public void AppendStderrText(string stderr)

@@ -68,12 +68,19 @@ foreach ($classRegistryRegression in @(
     'registry key creation mutation equivalence', 'registry default absent-empty distinction',
     'registry value-kind mutation equivalence', 'registry Unicode mutation equivalence',
     'optimized class registry collector performs no mutation', 'C7 class registry target is 180000 ms',
-    'Expected 263 fail-closed cases'
+    'shortcut catalog transient sharing retry preserves full entry',
+    'shortcut catalog persistent sharing failure remains fail closed', 'Expected 265 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
 if (!$precheckProof.Contains('classRegistryDigestTargetMilliseconds = 180000L') -or !$precheckProof.Contains('CLASS_REGISTRY_DIGEST_TARGET_EXCEEDED')) {
     throw 'G04D-C PRECHECK class-registry target is not fixed at 180000 ms.'
+}
+foreach ($directoryRetryBoundary in @(
+    '$maximumAttempts = 4', 'Start-Sleep -Milliseconds 250', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
+    '$afterItem.LastWriteTimeUtc', "'IOException', 'ItemNotFoundException'"
+)) {
+    if (!$commonProof.Contains($directoryRetryBoundary)) { throw "G04D-C bounded directory retry boundary is missing: $directoryRetryBoundary" }
 }
 foreach ($phase in @(
     'associations', 'font-registry-catalog', 'protected-font-files', 'external-runtime-targets',
@@ -153,7 +160,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 263 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 265 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
