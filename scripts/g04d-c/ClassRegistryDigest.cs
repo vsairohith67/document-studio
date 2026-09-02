@@ -13,6 +13,119 @@ using Microsoft.Win32;
 
 namespace DocumentStudio.G04DC
 {
+    public enum RegistryTraversalFailureCode
+    {
+        REGISTRY_TRAVERSAL_ACCESS_DENIED,
+        REGISTRY_TRAVERSAL_KEY_DISAPPEARED,
+        REGISTRY_TRAVERSAL_VALUE_DISAPPEARED,
+        REGISTRY_TRAVERSAL_VALUE_READ_FAILED,
+        REGISTRY_TRAVERSAL_UNSTABLE,
+        REGISTRY_TRAVERSAL_DEPTH_CEILING,
+        REGISTRY_TRAVERSAL_KEY_CEILING,
+        REGISTRY_TRAVERSAL_VALUE_CEILING,
+        REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING,
+        REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING,
+        REGISTRY_TRAVERSAL_TIMEOUT,
+        REGISTRY_TRAVERSAL_INTERNAL_FAILURE,
+        REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED
+    }
+
+    public sealed class RegistryTraversalException : Exception
+    {
+        public RegistryTraversalException(
+            RegistryTraversalFailureCode failureCode,
+            int? nativeStatus,
+            int attemptIndex,
+            int passIndex,
+            int rowCount,
+            int keyCount,
+            int valueCount,
+            long rawByteCount,
+            long elapsedMilliseconds,
+            Exception innerException)
+            : base("[" + failureCode.ToString() + "] Registry traversal failed.", innerException)
+        {
+            if (!Enum.IsDefined(typeof(RegistryTraversalFailureCode), failureCode)) throw new ArgumentOutOfRangeException("failureCode");
+            if (attemptIndex < 1 || attemptIndex > 3) throw new ArgumentOutOfRangeException("attemptIndex");
+            if (passIndex < 1 || passIndex > 2) throw new ArgumentOutOfRangeException("passIndex");
+            if (rowCount < 0) throw new ArgumentOutOfRangeException("rowCount");
+            if (keyCount < 0) throw new ArgumentOutOfRangeException("keyCount");
+            if (valueCount < 0) throw new ArgumentOutOfRangeException("valueCount");
+            if (rowCount != keyCount + valueCount) throw new ArgumentException("Registry traversal row count is inconsistent.");
+            if (rawByteCount < 0) throw new ArgumentOutOfRangeException("rawByteCount");
+            if (elapsedMilliseconds < 0) throw new ArgumentOutOfRangeException("elapsedMilliseconds");
+
+            FailureCode = failureCode;
+            NativeStatus = nativeStatus;
+            AttemptIndex = attemptIndex;
+            PassIndex = passIndex;
+            RowCount = rowCount;
+            KeyCount = keyCount;
+            ValueCount = valueCount;
+            RawByteCount = rawByteCount;
+            ElapsedMilliseconds = elapsedMilliseconds;
+        }
+
+        public RegistryTraversalFailureCode FailureCode { get; private set; }
+        public int? NativeStatus { get; private set; }
+        public int AttemptIndex { get; private set; }
+        public int PassIndex { get; private set; }
+        public int RowCount { get; private set; }
+        public int KeyCount { get; private set; }
+        public int ValueCount { get; private set; }
+        public long RawByteCount { get; private set; }
+        public long ElapsedMilliseconds { get; private set; }
+    }
+
+    public sealed class RegistryTraversalProgress
+    {
+        public RegistryTraversalProgress(
+            string eventCode,
+            int attemptIndex,
+            int passIndex,
+            int rowCount,
+            int keyCount,
+            int valueCount,
+            long rawByteCount,
+            long aggregateElapsedMilliseconds)
+        {
+            if (eventCode != "attempt-start" &&
+                eventCode != "pass-start" &&
+                eventCode != "pass-progress" &&
+                eventCode != "pass-end" &&
+                eventCode != "attempt-success")
+            {
+                throw new ArgumentOutOfRangeException("eventCode");
+            }
+            if (attemptIndex != 1) throw new ArgumentOutOfRangeException("attemptIndex");
+            if (passIndex < 0 || passIndex > 2) throw new ArgumentOutOfRangeException("passIndex");
+            if (rowCount < 0 || keyCount < 0 || valueCount < 0 || rowCount != keyCount + valueCount)
+            {
+                throw new ArgumentOutOfRangeException("rowCount");
+            }
+            if (rawByteCount < 0) throw new ArgumentOutOfRangeException("rawByteCount");
+            if (aggregateElapsedMilliseconds < 0) throw new ArgumentOutOfRangeException("aggregateElapsedMilliseconds");
+
+            EventCode = eventCode;
+            AttemptIndex = attemptIndex;
+            PassIndex = passIndex;
+            RowCount = rowCount;
+            KeyCount = keyCount;
+            ValueCount = valueCount;
+            RawByteCount = rawByteCount;
+            AggregateElapsedMilliseconds = aggregateElapsedMilliseconds;
+        }
+
+        public string EventCode { get; private set; }
+        public int AttemptIndex { get; private set; }
+        public int PassIndex { get; private set; }
+        public int RowCount { get; private set; }
+        public int KeyCount { get; private set; }
+        public int ValueCount { get; private set; }
+        public long RawByteCount { get; private set; }
+        public long AggregateElapsedMilliseconds { get; private set; }
+    }
+
     public sealed class DirectClassRegistryDigestCollector
     {
         private const int ErrorSuccess = 0;
@@ -28,7 +141,11 @@ namespace DocumentStudio.G04DC
         private readonly long maximumCanonicalBytes;
         private readonly RegistryNameComparer nameComparer = new RegistryNameComparer();
         private int observedRowCount;
+        private int observedKeyCount;
+        private int observedValueCount;
         private long observedRawByteCount;
+        private int currentAttemptIndex;
+        private int currentPassIndex;
 
         public DirectClassRegistryDigestCollector(
             int maximumKeys,
@@ -51,21 +168,26 @@ namespace DocumentStudio.G04DC
 
         public int SchemaVersion { get { return 2; } }
         public int RowCount { get { return Volatile.Read(ref observedRowCount); } }
+        public int ObservedKeyCount { get { return Volatile.Read(ref observedKeyCount); } }
+        public int ObservedValueCount { get { return Volatile.Read(ref observedValueCount); } }
         public long RawByteCount { get { return Interlocked.Read(ref observedRawByteCount); } }
+        public int AttemptIndex { get { return Volatile.Read(ref currentAttemptIndex); } }
+        public int PassIndex { get { return Volatile.Read(ref currentPassIndex); } }
         public int KeyCount { get; private set; }
         public int ValueCount { get; private set; }
         public long CanonicalByteCount { get; private set; }
         public long ReadElapsedMilliseconds { get; private set; }
         public long NormalizationElapsedMilliseconds { get; private set; }
         public long CanonicalHashElapsedMilliseconds { get; private set; }
+        public long TraversalElapsedMilliseconds { get; private set; }
         public string Sha256 { get; private set; }
 
-        public void CollectClassesRoot64(long budgetMilliseconds, Action<long, long> progress)
+        public void CollectClassesRoot64(long budgetMilliseconds, Action<RegistryTraversalProgress> progress)
         {
             Collect(RegistryHive.ClassesRoot, null, budgetMilliseconds, progress);
         }
 
-        public void CollectTestClassesRoot64(string testSubKey, long budgetMilliseconds, Action<long, long> progress)
+        public void CollectTestClassesRoot64(string testSubKey, long budgetMilliseconds, Action<RegistryTraversalProgress> progress)
         {
             if (String.IsNullOrWhiteSpace(testSubKey) ||
                 testSubKey.Length > 512 ||
@@ -78,21 +200,34 @@ namespace DocumentStudio.G04DC
             Collect(RegistryHive.ClassesRoot, testSubKey, budgetMilliseconds, progress);
         }
 
-        private void Collect(RegistryHive hive, string subKey, long budgetMilliseconds, Action<long, long> progress)
+        private void Collect(RegistryHive hive, string subKey, long budgetMilliseconds, Action<RegistryTraversalProgress> progress)
         {
-            if (budgetMilliseconds < 1) throw new TimeoutException("[REGISTRY_TRAVERSAL_TIMEOUT] No registry traversal budget remained.");
             Stopwatch total = Stopwatch.StartNew();
+            Volatile.Write(ref currentAttemptIndex, 1);
+            Volatile.Write(ref currentPassIndex, 1);
+            ResetObservedCounts();
             try
             {
+                if (budgetMilliseconds < 1)
+                {
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_TIMEOUT, null, total, null, null);
+                }
+                PublishTraversalEvent("attempt-start", total, progress);
+                PublishTraversalEvent("pass-start", total, progress);
                 PassResult first = CapturePass(hive, subKey, budgetMilliseconds, total, progress);
+                PublishTraversalEvent("pass-end", total, progress);
+                Volatile.Write(ref currentPassIndex, 2);
+                ResetObservedCounts();
+                PublishTraversalEvent("pass-start", total, progress);
                 PassResult second = CapturePass(hive, subKey, budgetMilliseconds, total, progress);
+                PublishTraversalEvent("pass-end", total, progress);
                 if (first.KeyCount != second.KeyCount ||
                     first.ValueCount != second.ValueCount ||
                     first.RawByteCount != second.RawByteCount ||
                     first.CanonicalByteCount != second.CanonicalByteCount ||
                     !String.Equals(first.Sha256, second.Sha256, StringComparison.Ordinal))
                 {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_UNSTABLE] Consecutive complete registry traversals did not match.");
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE, null, total, null, null);
                 }
                 KeyCount = first.KeyCount;
                 ValueCount = first.ValueCount;
@@ -100,18 +235,28 @@ namespace DocumentStudio.G04DC
                 Interlocked.Exchange(ref observedRawByteCount, first.RawByteCount);
                 CanonicalByteCount = first.CanonicalByteCount;
                 Sha256 = first.Sha256;
+                PublishTraversalEvent("attempt-success", total, progress);
+            }
+            catch (RegistryTraversalException)
+            {
+                throw;
             }
             catch (UnauthorizedAccessException exception)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_ACCESS_DENIED] Registry traversal was denied.", exception);
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, null, total, null, exception);
             }
             catch (SecurityException exception)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_ACCESS_DENIED] Registry traversal security validation failed.", exception);
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, null, total, null, exception);
+            }
+            catch (Exception exception)
+            {
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_INTERNAL_FAILURE, null, total, null, exception);
             }
             finally
             {
                 total.Stop();
+                TraversalElapsedMilliseconds = total.ElapsedMilliseconds;
             }
         }
 
@@ -120,7 +265,7 @@ namespace DocumentStudio.G04DC
             string subKey,
             long budgetMilliseconds,
             Stopwatch total,
-            Action<long, long> progress)
+            Action<RegistryTraversalProgress> progress)
         {
             CheckBudget(total, budgetMilliseconds, RowCount);
             using (RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, RegistryView.Registry64))
@@ -133,7 +278,7 @@ namespace DocumentStudio.G04DC
                     disposeRoot = true;
                     if (root == null)
                     {
-                        throw new InvalidDataException("[REGISTRY_TRAVERSAL_KEY_DISAPPEARED] The bounded registry root was unavailable.");
+                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED, null, total, null, null);
                     }
                 }
                 try
@@ -160,6 +305,10 @@ namespace DocumentStudio.G04DC
                             capture.Stream.Length,
                             digest);
                     }
+                    catch (CanonicalByteCeilingException exception)
+                    {
+                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING, null, total, capture, exception);
+                    }
                     finally
                     {
                         NormalizationElapsedMilliseconds += capture.NormalizationElapsedMilliseconds;
@@ -181,11 +330,11 @@ namespace DocumentStudio.G04DC
             CaptureBuffer capture,
             Stopwatch total,
             long budgetMilliseconds,
-            Action<long, long> progress)
+            Action<RegistryTraversalProgress> progress)
         {
             if (depth > maximumDepth)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_DEPTH_CEILING] Registry traversal exceeded the depth ceiling.");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_DEPTH_CEILING, null, total, capture, null);
             }
             CheckBudget(total, budgetMilliseconds, capture.RowCount);
             long readStarted = Stopwatch.GetTimestamp();
@@ -196,18 +345,26 @@ namespace DocumentStudio.G04DC
             SortNames(valueNames);
             SortNames(subKeyNames);
             capture.AddNormalizationTicks(Stopwatch.GetTimestamp() - sortStarted);
-            capture.AddKey(relativePath, maximumKeys);
-            PublishProgress(capture, progress);
+            if (capture.KeyCount >= maximumKeys)
+            {
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_CEILING, null, total, capture, null);
+            }
+            capture.AddKey(relativePath);
+            PublishProgress(capture, total, progress);
 
             for (int valueIndex = 0; valueIndex < valueNames.Length; valueIndex++)
             {
                 CheckBudget(total, budgetMilliseconds, capture.RowCount);
                 string valueName = valueNames[valueIndex];
                 long valueReadStarted = Stopwatch.GetTimestamp();
-                RawRegistryValue rawValue = ReadRawValue(key, valueName);
+                RawRegistryValue rawValue = ReadRawValue(key, valueName, capture, total);
                 capture.AddReadTicks(Stopwatch.GetTimestamp() - valueReadStarted);
-                capture.AddValue(relativePath, valueName, rawValue.Type, rawValue.Bytes, maximumValues);
-                PublishProgress(capture, progress);
+                if (capture.ValueCount >= maximumValues)
+                {
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_CEILING, null, total, capture, null);
+                }
+                capture.AddValue(relativePath, valueName, rawValue.Type, rawValue.Bytes);
+                PublishProgress(capture, total, progress);
             }
 
             for (int subKeyIndex = 0; subKeyIndex < subKeyNames.Length; subKeyIndex++)
@@ -232,9 +389,9 @@ namespace DocumentStudio.G04DC
                     }
                     if (stillListed)
                     {
-                        throw new InvalidDataException("[REGISTRY_TRAVERSAL_ACCESS_DENIED] A listed registry key could not be opened read-only.");
+                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, null, total, capture, null);
                     }
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_KEY_DISAPPEARED] A listed registry key disappeared before it could be read.");
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED, null, total, capture, null);
                 }
                 using (child)
                 {
@@ -253,12 +410,12 @@ namespace DocumentStudio.G04DC
             capture.AddNormalizationTicks(Stopwatch.GetTimestamp() - verifySortStarted);
             if (!NamesEqual(valueNames, valueNamesAfter) || !NamesEqual(subKeyNames, subKeyNamesAfter))
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_UNSTABLE] Registry membership changed during traversal.");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE, null, total, capture, null);
             }
             CheckBudget(total, budgetMilliseconds, capture.RowCount);
         }
 
-        private RawRegistryValue ReadRawValue(RegistryKey key, string valueName)
+        private RawRegistryValue ReadRawValue(RegistryKey key, string valueName, CaptureBuffer capture, Stopwatch total)
         {
             int valueType;
             int size = 0;
@@ -266,19 +423,19 @@ namespace DocumentStudio.G04DC
             int result = RegQueryValueEx(nativeHandle, valueName, IntPtr.Zero, out valueType, null, ref size);
             if (result == ErrorFileNotFound)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_DISAPPEARED] A listed registry value disappeared before it could be read.");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_DISAPPEARED, result, total, capture, null);
             }
             if (result == ErrorAccessDenied)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_ACCESS_DENIED] Registry value access was denied.");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, result, total, capture, null);
             }
             if (result != ErrorSuccess && result != ErrorMoreData)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_READ_FAILED] Registry value size query failed with a bounded native status.");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_READ_FAILED, result, total, capture, null);
             }
             if (size < 0 || size > maximumValueBytes)
             {
-                throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING] Registry value exceeded the byte ceiling.");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING, result, total, capture, null);
             }
 
             for (int attempt = 0; attempt < 4; attempt++)
@@ -291,36 +448,60 @@ namespace DocumentStudio.G04DC
                 {
                     if (actualSize < 0 || actualSize > bytes.Length)
                     {
-                        throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_READ_FAILED] Registry value returned an invalid byte count.");
+                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_READ_FAILED, result, total, capture, null);
                     }
                     if (actualSize != bytes.Length) Array.Resize(ref bytes, actualSize);
                     return new RawRegistryValue(actualType, bytes);
                 }
                 if (result == ErrorFileNotFound)
                 {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_DISAPPEARED] A listed registry value disappeared while being read.");
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_DISAPPEARED, result, total, capture, null);
                 }
                 if (result == ErrorAccessDenied)
                 {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_ACCESS_DENIED] Registry value access was denied.");
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, result, total, capture, null);
                 }
                 if (result != ErrorMoreData || actualSize < 0 || actualSize > maximumValueBytes)
                 {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_READ_FAILED] Registry value read failed with a bounded native status.");
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_READ_FAILED, result, total, capture, null);
                 }
                 size = actualSize;
             }
-            throw new InvalidDataException("[REGISTRY_TRAVERSAL_UNSTABLE] Registry value changed during every bounded read attempt.");
+            throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE, ErrorMoreData, total, capture, null);
         }
 
-        private void PublishProgress(CaptureBuffer capture, Action<long, long> progress)
+        private void ResetObservedCounts()
+        {
+            Volatile.Write(ref observedRowCount, 0);
+            Volatile.Write(ref observedKeyCount, 0);
+            Volatile.Write(ref observedValueCount, 0);
+            Interlocked.Exchange(ref observedRawByteCount, 0);
+        }
+
+        private void PublishProgress(CaptureBuffer capture, Stopwatch total, Action<RegistryTraversalProgress> progress)
         {
             Volatile.Write(ref observedRowCount, capture.RowCount);
+            Volatile.Write(ref observedKeyCount, capture.KeyCount);
+            Volatile.Write(ref observedValueCount, capture.ValueCount);
             Interlocked.Exchange(ref observedRawByteCount, capture.RawByteCount);
             if (progress != null && (capture.RowCount == 1 || (capture.RowCount & 4095) == 0))
             {
-                progress(capture.RowCount, capture.RawByteCount);
+                PublishTraversalEvent("pass-progress", total, progress);
             }
+        }
+
+        private void PublishTraversalEvent(string eventCode, Stopwatch total, Action<RegistryTraversalProgress> progress)
+        {
+            if (progress == null) return;
+            progress(new RegistryTraversalProgress(
+                eventCode,
+                AttemptIndex,
+                eventCode == "attempt-start" ? 0 : PassIndex,
+                RowCount,
+                ObservedKeyCount,
+                ObservedValueCount,
+                RawByteCount,
+                total.ElapsedMilliseconds));
         }
 
         private void SortNames(string[] names)
@@ -338,12 +519,35 @@ namespace DocumentStudio.G04DC
             return true;
         }
 
-        private static void CheckBudget(Stopwatch stopwatch, long budgetMilliseconds, int itemCount)
+        private void CheckBudget(Stopwatch stopwatch, long budgetMilliseconds, int itemCount)
         {
             if (stopwatch.ElapsedMilliseconds > budgetMilliseconds)
             {
-                throw new TimeoutException("[REGISTRY_TRAVERSAL_TIMEOUT] Registry traversal exceeded its remaining phase budget; itemCount=" + itemCount.ToString(CultureInfo.InvariantCulture) + ".");
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_TIMEOUT, null, stopwatch, null, null);
             }
+        }
+
+        private RegistryTraversalException CreateFailure(
+            RegistryTraversalFailureCode failureCode,
+            int? nativeStatus,
+            Stopwatch total,
+            CaptureBuffer capture,
+            Exception innerException)
+        {
+            int keyCount = capture == null ? ObservedKeyCount : capture.KeyCount;
+            int valueCount = capture == null ? ObservedValueCount : capture.ValueCount;
+            long rawByteCount = capture == null ? RawByteCount : capture.RawByteCount;
+            return new RegistryTraversalException(
+                failureCode,
+                nativeStatus,
+                AttemptIndex < 1 ? 1 : AttemptIndex,
+                PassIndex < 1 ? 1 : PassIndex,
+                keyCount + valueCount,
+                keyCount,
+                valueCount,
+                rawByteCount,
+                total == null ? 0L : total.ElapsedMilliseconds,
+                innerException);
         }
 
         private static string ToLowerHex(byte[] bytes)
@@ -437,12 +641,8 @@ namespace DocumentStudio.G04DC
                 normalizationElapsedTicks += ticks;
             }
 
-            public void AddKey(string path, int maximumKeys)
+            public void AddKey(string path)
             {
-                if (KeyCount >= maximumKeys)
-                {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_KEY_CEILING] Registry traversal exceeded the key ceiling.");
-                }
                 long started = Stopwatch.GetTimestamp();
                 WriteByte(1);
                 WriteString(path);
@@ -450,12 +650,8 @@ namespace DocumentStudio.G04DC
                 KeyCount++;
             }
 
-            public void AddValue(string path, string name, int type, byte[] bytes, int maximumValues)
+            public void AddValue(string path, string name, int type, byte[] bytes)
             {
-                if (ValueCount >= maximumValues)
-                {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_VALUE_CEILING] Registry traversal exceeded the value ceiling.");
-                }
                 long started = Stopwatch.GetTimestamp();
                 WriteByte(2);
                 WriteString(path);
@@ -498,7 +694,7 @@ namespace DocumentStudio.G04DC
             {
                 if (additionalBytes < 0 || Stream.Length > maximumBytes - additionalBytes)
                 {
-                    throw new InvalidDataException("[REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING] Registry traversal exceeded the canonical-byte ceiling.");
+                    throw new CanonicalByteCeilingException();
                 }
             }
 
@@ -512,6 +708,10 @@ namespace DocumentStudio.G04DC
             {
                 Stream.Dispose();
             }
+        }
+
+        private sealed class CanonicalByteCeilingException : Exception
+        {
         }
     }
 

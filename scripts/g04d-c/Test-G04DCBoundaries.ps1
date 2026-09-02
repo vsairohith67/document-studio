@@ -1922,7 +1922,7 @@ function Get-G04DCTestDirectClassRegistryDigest {
         [int]$MaximumValueBytes = 16777216,
         [long]$MaximumCanonicalBytes = 134217728,
         [long]$BudgetMilliseconds = 30000,
-        [AllowNull()] [Action[long,long]]$Progress = $null
+        [AllowNull()] [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]$Progress = $null
     )
     $collector = [DocumentStudio.G04DC.DirectClassRegistryDigestCollector]::new(
         $MaximumKeys,
@@ -1973,13 +1973,25 @@ try {
     }
     $passed.Add('direct HKCR Registry64 merged-view fixture')
     $passed.Add('direct HKCR versioned key-value counts')
+    $directTraversalEvents = [Collections.Generic.List[object]]::new()
+    $directTraversalProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param([DocumentStudio.G04DC.RegistryTraversalProgress]$ProgressRecord)
+        $directTraversalEvents.Add($ProgressRecord)
+    }
+    Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -Progress $directTraversalProgress | Out-Null
+    $directEventNames = @($directTraversalEvents | ForEach-Object { [string]$_.EventCode })
+    if (($directEventNames -join '|') -cne 'attempt-start|pass-start|pass-progress|pass-end|pass-start|pass-progress|pass-end|attempt-success' -or
+        @($directTraversalEvents | Where-Object { $_.AttemptIndex -ne 1 -or $_.PassIndex -lt 0 -or $_.PassIndex -gt 2 -or $_.RowCount -ne $_.KeyCount + $_.ValueCount -or $_.AggregateElapsedMilliseconds -lt 0 }).Count -ne 0) {
+        throw 'Direct HKCR attempt/pass telemetry is incomplete or nondeterministic.'
+    }
+    $passed.Add('direct HKCR attempt pass telemetry is deterministic and content free')
 
     $raceKey = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\RaceKey\Child")
     $raceKey.Dispose()
     $raceKeyState = [pscustomobject]@{ triggered = $false }
-    $raceKeyProgress = [Action[long,long]]{
-        param([long]$RowCount, [long]$RawByteCount)
-        if (!$raceKeyState.triggered -and $RowCount -eq 1) {
+    $raceKeyProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param([DocumentStudio.G04DC.RegistryTraversalProgress]$ProgressRecord)
+        if (!$raceKeyState.triggered -and [string]$ProgressRecord.EventCode -ceq 'pass-progress' -and [long]$ProgressRecord.RowCount -eq 1) {
             $raceKeyState.triggered = $true
             $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\RaceKey", $false)
         }
@@ -1993,9 +2005,9 @@ try {
     try {
         $raceValueRoot.SetValue('RaceValue', 'present', [Microsoft.Win32.RegistryValueKind]::String)
         $raceValueState = [pscustomobject]@{ triggered = $false }
-        $raceValueProgress = [Action[long,long]]{
-            param([long]$RowCount, [long]$RawByteCount)
-            if (!$raceValueState.triggered -and $RowCount -eq 1) {
+        $raceValueProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+            param([DocumentStudio.G04DC.RegistryTraversalProgress]$ProgressRecord)
+            if (!$raceValueState.triggered -and [string]$ProgressRecord.EventCode -ceq 'pass-progress' -and [long]$ProgressRecord.RowCount -eq 1) {
                 $raceValueState.triggered = $true
                 $raceValueRoot.DeleteValue('RaceValue', $false)
             }
@@ -2037,6 +2049,17 @@ try {
         Assert-Throws 'direct HKCR key-count ceiling' 'REGISTRY_TRAVERSAL_KEY_CEILING' {
             Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumKeys 1 | Out-Null
         }
+        try {
+            Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -MaximumKeys 1 | Out-Null
+            throw 'Direct typed failure bridge did not throw.'
+        }
+        catch {
+            $methodInvocationFailure = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord $_
+            if ([string]$methodInvocationFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_KEY_CEILING' -or ![bool]$methodInvocationFailure.typedFailureFound) {
+                throw 'Direct C# MethodInvocationException did not retain its typed failure object.'
+            }
+        }
+        $passed.Add('direct C# MethodInvocationException retains typed HKCR failure')
     }
     finally { $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\CeilingChild", $false) }
     Assert-Throws 'direct HKCR canonical-byte ceiling' 'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING' {
@@ -2151,6 +2174,186 @@ finally {
     $c7RegistryBase.DeleteSubKeyTree($c7RegistryNativeRoot, $false)
     $c7RegistryBase.Dispose()
     $script:c7DirectTestSubKey = $null
+}
+
+function New-G04DCTestRegistryTraversalErrorRecord {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Code,
+        [int]$WrapperDepth = 1,
+        [string]$InnerMessage = 'bounded inner failure'
+    )
+    $failureCode = [DocumentStudio.G04DC.RegistryTraversalFailureCode][Enum]::Parse(
+        [DocumentStudio.G04DC.RegistryTraversalFailureCode],
+        $Code,
+        $false
+    )
+    $nativeStatus = if ($Code -ceq 'REGISTRY_TRAVERSAL_VALUE_READ_FAILED') { 234 } else { $null }
+    $inner = [InvalidOperationException]::new($InnerMessage)
+    $typed = [DocumentStudio.G04DC.RegistryTraversalException]::new(
+        $failureCode,
+        $nativeStatus,
+        1,
+        2,
+        9,
+        4,
+        5,
+        1234L,
+        5678L,
+        $inner
+    )
+    [Exception]$wrapped = $typed
+    for ($index = 0; $index -lt $WrapperDepth; $index++) {
+        $wrapped = [Reflection.TargetInvocationException]::new($wrapped)
+    }
+    $top = [InvalidOperationException]::new('[MACHINE_STATE_CAPTURE_FAILED] Direct HKCR collector failed closed.', $wrapped)
+    return [Management.Automation.ErrorRecord]::new($top, 'G04DCTestRegistryTraversal', [Management.Automation.ErrorCategory]::InvalidData, $null)
+}
+
+$typedFailureCodes = @(
+    'REGISTRY_TRAVERSAL_ACCESS_DENIED',
+    'REGISTRY_TRAVERSAL_KEY_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_VALUE_READ_FAILED',
+    'REGISTRY_TRAVERSAL_UNSTABLE',
+    'REGISTRY_TRAVERSAL_DEPTH_CEILING',
+    'REGISTRY_TRAVERSAL_KEY_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING',
+    'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING',
+    'REGISTRY_TRAVERSAL_TIMEOUT',
+    'REGISTRY_TRAVERSAL_INTERNAL_FAILURE',
+    'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED'
+)
+foreach ($typedFailureCode in $typedFailureCodes) {
+    $typedError = New-G04DCTestRegistryTraversalErrorRecord -Code $typedFailureCode
+    $precheckEvidence = New-G04DCMachineStatePrecheckBlockedResult `
+        -Phase 'class-registry-digest' `
+        -ReasonCode 'MACHINE_STATE_CAPTURE_FAILED' `
+        -ErrorRecord $typedError `
+        -MachinePreProduced $false
+    if ([string]$precheckEvidence.reasonCode -cne 'MACHINE_STATE_CAPTURE_FAILED' -or
+        [string]$precheckEvidence.detailReasonCode -cne $typedFailureCode) {
+        throw "Typed traversal code did not survive into PRECHECK evidence: $typedFailureCode"
+    }
+}
+$passed.Add('every typed HKCR failure code survives into PRECHECK evidence')
+
+$wrappedFailure = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord (New-G04DCTestRegistryTraversalErrorRecord -Code 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' -WrapperDepth 3)
+if ([string]$wrappedFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' -or ![bool]$wrappedFailure.typedFailureFound) {
+    throw 'Bounded typed traversal extraction did not walk wrapper exceptions.'
+}
+$passed.Add('wrapped typed HKCR inner exception extraction')
+
+$withinDepth = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord (New-G04DCTestRegistryTraversalErrorRecord -Code 'REGISTRY_TRAVERSAL_UNSTABLE' -WrapperDepth 6) -MaximumDepth 8
+$beyondDepth = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord (New-G04DCTestRegistryTraversalErrorRecord -Code 'REGISTRY_TRAVERSAL_UNSTABLE' -WrapperDepth 7) -MaximumDepth 8
+if ([string]$withinDepth.detailReasonCode -cne 'REGISTRY_TRAVERSAL_UNSTABLE' -or
+    [string]$beyondDepth.detailReasonCode -cne 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE' -or [bool]$beyondDepth.typedFailureFound) {
+    throw 'Typed traversal extraction did not enforce its exact inner-exception depth.'
+}
+$passed.Add('typed HKCR extraction has a maximum inner-exception depth')
+
+$unknownError = [Management.Automation.ErrorRecord]::new(
+    [InvalidOperationException]::new('HKEY_CLASSES_ROOT\SecretValue=private-data'),
+    'G04DCTestUnknownTraversal',
+    [Management.Automation.ErrorCategory]::InvalidData,
+    $null
+)
+$unknownFailure = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord $unknownError
+if ([string]$unknownFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE' -or [bool]$unknownFailure.typedFailureFound) {
+    throw 'Unknown traversal exception did not map to the internal failure code.'
+}
+$passed.Add('unknown HKCR exception maps to internal failure')
+
+$privateMessage = 'HKEY_CLASSES_ROOT\Private.Path SecretValue=private-data user=runneradmin'
+$privateEvidence = New-G04DCMachineStatePrecheckBlockedResult `
+    -Phase 'class-registry-digest' `
+    -ReasonCode 'MACHINE_STATE_CAPTURE_FAILED' `
+    -ErrorRecord (New-G04DCTestRegistryTraversalErrorRecord -Code 'REGISTRY_TRAVERSAL_VALUE_READ_FAILED' -InnerMessage $privateMessage) `
+    -MachinePreProduced $false
+$privateEvidenceJson = $privateEvidence | ConvertTo-Json -Compress
+if ($privateEvidenceJson.Contains($privateMessage) -or $privateEvidenceJson.Contains('runneradmin')) {
+    throw 'Typed traversal evidence retained a raw exception message or username.'
+}
+$passed.Add('typed HKCR evidence omits raw exception messages')
+if ($privateEvidenceJson.Contains('HKEY_CLASSES_ROOT') -or $privateEvidenceJson.Contains('Private.Path') -or $privateEvidenceJson.Contains('SecretValue') -or $privateEvidenceJson.Contains('private-data')) {
+    throw 'Typed traversal evidence retained a registry path, value name, or value data.'
+}
+$passed.Add('typed HKCR evidence omits registry names and data')
+if ($privateEvidence.attemptIndex -ne 1 -or $privateEvidence.passIndex -ne 2 -or
+    $privateEvidence.rowCount -ne 9 -or $privateEvidence.keyCount -ne 4 -or
+    $privateEvidence.valueCount -ne 5 -or $privateEvidence.rawByteCount -ne 1234 -or
+    $privateEvidence.failureElapsedMilliseconds -ne 5678 -or $privateEvidence.nativeStatus -ne 234) {
+    throw 'Typed traversal PRECHECK evidence lost bounded attempt, pass, count, status, or elapsed fields.'
+}
+$passed.Add('typed HKCR attempt pass and count evidence is present')
+if ([string]$privateEvidence.reasonCode -cne 'MACHINE_STATE_CAPTURE_FAILED' -or [string]$privateEvidence.status -cne 'MACHINE_STATE_PRECHECK_BLOCKED') {
+    throw 'Typed traversal evidence replaced the generic compatibility result.'
+}
+$passed.Add('generic HKCR compatibility failure code remains present')
+
+$typedFlushRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-c9-failure-flush-' + [guid]::NewGuid().ToString('N'))
+$typedFlushEvidence = Join-Path $typedFlushRoot 'evidence'
+$typedFlushOwned = Join-Path $typedFlushRoot 'owned'
+$typedFlushMarker = Join-Path $typedFlushOwned '.g04d-c-owned-root'
+$typedFlushMarkerContent = "DOCUMENT-STUDIO-G04DC-C9-TEST-OWNED`n"
+$typedFlushContext = $null
+New-Item -ItemType Directory -Path $typedFlushEvidence, $typedFlushOwned | Out-Null
+[IO.File]::WriteAllText($typedFlushMarker, $typedFlushMarkerContent, [Text.UTF8Encoding]::new($false))
+try {
+    $typedFlushProgress = Join-Path $typedFlushEvidence 'progress.ndjson'
+    $typedFlushPerformance = Join-Path $typedFlushEvidence 'performance.json'
+    $typedFlushContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'c9-failure-flush' -ProgressPath $typedFlushProgress -PerformancePath $typedFlushPerformance -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+    Start-G04DCMachineStatePhase -Context $typedFlushContext -Phase 'class-registry-digest'
+    Start-G04DCMachineStateSubstage -Context $typedFlushContext -Substage 'native-query-read' -RegistryTraversal -AttemptIndex 1 -PassIndex 2
+    Complete-G04DCMachineStateSubstage -Context $typedFlushContext -Substage 'native-query-read' -Status 'failed' -RowCount 9 -RawByteCount 1234 -RegistryTraversal -AttemptIndex 1 -PassIndex 2 -AggregateElapsedMilliseconds 5678
+    $typedFlushDetail = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord (New-G04DCTestRegistryTraversalErrorRecord -Code 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED')
+    $typedFlushSafe = [ordered]@{}
+    foreach ($name in @('detailReasonCode', 'attemptIndex', 'passIndex', 'rowCount', 'keyCount', 'valueCount', 'rawByteCount')) { $typedFlushSafe[$name] = $typedFlushDetail.$name }
+    $typedFlushSafe.failureElapsedMilliseconds = [long]$typedFlushDetail.elapsedMilliseconds
+    Complete-G04DCMachineStateCapture -Context $typedFlushContext -Passed $false -FailureMessage '[MACHINE_STATE_CAPTURE_FAILED] bounded' -FailureDetail ([pscustomobject]$typedFlushSafe)
+    $typedCleanup = Remove-G04DCOwnedRoot -OwnedRoot $typedFlushOwned -MarkerPath $typedFlushMarker -MarkerContent $typedFlushMarkerContent -RequiredParent $typedFlushRoot
+    if (!$typedCleanup.removed -or !(Test-Path -LiteralPath $typedFlushProgress -PathType Leaf) -or !(Test-Path -LiteralPath $typedFlushPerformance -PathType Leaf)) {
+        throw 'Typed traversal failure evidence did not survive normal owned cleanup.'
+    }
+    $typedFlushedPerformance = Get-Content -LiteralPath $typedFlushPerformance -Raw | ConvertFrom-Json
+    $typedFlushedTerminal = @(Get-Content -LiteralPath $typedFlushProgress | ForEach-Object { $_ | ConvertFrom-Json })[-1]
+    if ([string]$typedFlushedPerformance.registryTraversalFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' -or
+        [string]$typedFlushedTerminal.detailReasonCode -cne 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED') {
+        throw 'Durably flushed traversal failure evidence lost its typed reason.'
+    }
+    $passed.Add('typed HKCR failure evidence is durable before cleanup')
+}
+finally {
+    if ($typedFlushContext -and $typedFlushContext.writer) {
+        try { $typedFlushContext.writer.Dispose() } catch {}
+        $typedFlushContext.writer = $null
+    }
+    if (Test-Path -LiteralPath $typedFlushRoot) { Remove-Item -LiteralPath $typedFlushRoot -Recurse -Force }
+}
+
+$scaleRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-c9-scale-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $scaleRoot | Out-Null
+try {
+    $scaleProgressPath = Join-Path $scaleRoot 'progress.ndjson'
+    $scaleContext = New-G04DCMachineStateCaptureContext -CaptureLabel 'c9-scale' -ProgressPath $scaleProgressPath -CaptureTargetMilliseconds 1000 -OverallBudgetMilliseconds 5000 -PhaseBudgetMilliseconds 3000
+    Start-G04DCMachineStatePhase -Context $scaleContext -Phase 'class-registry-digest'
+    Start-G04DCMachineStateSubstage -Context $scaleContext -Substage 'native-query-read' -RegistryTraversal -AttemptIndex 1 -PassIndex 1
+    foreach ($row in @(1) + @(4096..208663 | Where-Object { $_ % 4096 -eq 0 }) + @(208663)) {
+        Write-G04DCMachineStateSubstageProgress -Context $scaleContext -Substage 'native-query-read' -RowCount $row -RawByteCount ([long]$row * 32L) -RegistryTraversal -AttemptIndex 1 -PassIndex 1 -TraversalEvent 'pass-progress' -AggregateElapsedMilliseconds $row
+    }
+    Complete-G04DCMachineStateSubstage -Context $scaleContext -Substage 'native-query-read' -Status 'success' -RowCount 208663 -RawByteCount 6677216 -RegistryTraversal -AttemptIndex 1 -PassIndex 1 -AggregateElapsedMilliseconds 208663
+    Complete-G04DCMachineStatePhase -Context $scaleContext -Phase 'class-registry-digest' -ItemCount 208663
+    Complete-G04DCMachineStateCapture -Context $scaleContext -Passed $true -FailureMessage $null
+    $scaleRows = @(Get-Content -LiteralPath $scaleProgressPath | ForEach-Object { $_ | ConvertFrom-Json })
+    $scaleTraversalRows = @($scaleRows | Where-Object { $_.PSObject.Properties['substage'] -and $_.substage -ceq 'native-query-read' })
+    if ($scaleRows.Count -gt 60 -or $scaleTraversalRows[-1].passLocalRowCount -ne 208663 -or
+        @($scaleTraversalRows | Where-Object { !$_.PSObject.Properties['attemptIndex'] -or !$_.PSObject.Properties['passIndex'] -or !$_.PSObject.Properties['passLocalRowCount'] -or !$_.PSObject.Properties['aggregateElapsedMilliseconds'] }).Count -ne 0) {
+        throw 'At-scale traversal telemetry is unbounded or missing deterministic attempt/pass fields.'
+    }
+    $passed.Add('typed HKCR telemetry scales past 208663 rows without unbounded evidence')
+}
+finally {
+    if (Test-Path -LiteralPath $scaleRoot) { Remove-Item -LiteralPath $scaleRoot -Recurse -Force }
 }
 
 $shortcutRetryRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-shortcut-retry-' + [guid]::NewGuid().ToString('N'))
@@ -2382,5 +2585,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 315) { throw "Expected 315 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 327) { throw "Expected 327 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

@@ -55,7 +55,12 @@ foreach ($classRegistryBoundary in @(
 }
 foreach ($directRegistryBoundary in @(
     'DirectClassRegistryDigestCollector', 'RegistryHive.ClassesRoot', 'RegistryView.Registry64',
+    'sealed class RegistryTraversalException', 'enum RegistryTraversalFailureCode',
+    'RegistryTraversalProgress',
     'RegQueryValueExW', 'CollectClassesRoot64', 'REGISTRY_TRAVERSAL_ACCESS_DENIED',
+    'REGISTRY_TRAVERSAL_KEY_DISAPPEARED', 'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_VALUE_READ_FAILED', 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE',
+    'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED',
     'REGISTRY_TRAVERSAL_UNSTABLE', 'REGISTRY_TRAVERSAL_KEY_CEILING',
     'REGISTRY_TRAVERSAL_VALUE_CEILING', 'REGISTRY_TRAVERSAL_DEPTH_CEILING',
     'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING', 'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING',
@@ -63,8 +68,22 @@ foreach ($directRegistryBoundary in @(
 )) {
     if (!$classRegistryDigestProof.Contains($directRegistryBoundary)) { throw "G04D-C direct HKCR boundary is missing: $directRegistryBoundary" }
 }
+foreach ($typedRegistryBoundary in @(
+    'Get-G04DCSafeRegistryTraversalFailure', 'New-G04DCMachineStatePrecheckBlockedResult',
+    'Write-G04DCDurableJson', 'detailReasonCode', 'attemptIndex', 'passIndex',
+    'passLocalRowCount', 'aggregateElapsedMilliseconds', 'failureElapsedMilliseconds'
+)) {
+    if (!$allProof.Contains($typedRegistryBoundary)) { throw "G04D-C typed HKCR evidence boundary is missing: $typedRegistryBoundary" }
+}
 if ($classRegistryDigestProof -match '(?i)CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create|RegistryKey\.OpenRemoteBaseKey') {
     throw 'G04D-C class-registry helper may not mutate registry, use remote registry, or create raw-output artifacts.'
+}
+$directCollectorStart = $commonProof.IndexOf('function Get-G04DCDirectClassRegistryDigest', [StringComparison]::Ordinal)
+$registryTreeStart = $commonProof.IndexOf('function Get-G04DCRegistryTreeDigest', [StringComparison]::Ordinal)
+if ($directCollectorStart -lt 0 -or $registryTreeStart -le $directCollectorStart) { throw 'G04D-C direct HKCR PowerShell boundary is missing.' }
+$directCollectorProof = $commonProof.Substring($directCollectorStart, $registryTreeStart - $directCollectorStart)
+if ($directCollectorProof.Contains('.Exception.ToString()') -or $directCollectorProof.Contains('-match')) {
+    throw 'G04D-C direct HKCR failure provenance may not parse unrestricted exception text.'
 }
 foreach ($classRegistryProcessBoundary in @(
     'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
@@ -94,7 +113,15 @@ foreach ($classRegistryRegression in @(
     'P1-A redirected readers streams and tasks are disposed',
     'P1-A production cleanup uses no global process termination',
     'P1-B canonical hash independent of Console OutputEncoding',
-    'P1-B accepted canonical fixture remains byte-identical', 'Expected 315 fail-closed cases'
+    'P1-B accepted canonical fixture remains byte-identical',
+    'every typed HKCR failure code survives into PRECHECK evidence',
+    'direct C# MethodInvocationException retains typed HKCR failure',
+    'typed HKCR extraction has a maximum inner-exception depth',
+    'typed HKCR evidence omits raw exception messages',
+    'typed HKCR failure evidence is durable before cleanup',
+    'direct HKCR attempt pass telemetry is deterministic and content free',
+    'typed HKCR telemetry scales past 208663 rows without unbounded evidence',
+    'Expected 327 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
@@ -185,7 +212,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 315 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 327 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }

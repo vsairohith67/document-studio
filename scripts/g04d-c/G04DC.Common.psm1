@@ -142,6 +142,22 @@ $script:G04DCTables = @(
     'AdminExecuteSequence', 'AdminUISequence', 'Media'
 )
 
+$script:G04DCRegistryTraversalFailureCodes = @(
+    'REGISTRY_TRAVERSAL_ACCESS_DENIED',
+    'REGISTRY_TRAVERSAL_KEY_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_VALUE_READ_FAILED',
+    'REGISTRY_TRAVERSAL_UNSTABLE',
+    'REGISTRY_TRAVERSAL_DEPTH_CEILING',
+    'REGISTRY_TRAVERSAL_KEY_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING',
+    'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING',
+    'REGISTRY_TRAVERSAL_TIMEOUT',
+    'REGISTRY_TRAVERSAL_INTERNAL_FAILURE',
+    'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED'
+)
+
 function Get-G04DCExpectedMsi {
     [CmdletBinding()]
     param()
@@ -161,6 +177,161 @@ function Write-G04DCJson {
     }
     $json = $Value | ConvertTo-Json -Depth $Depth
     [System.IO.File]::WriteAllText($Path, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Write-G04DCDurableJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [AllowNull()] $Value,
+        [int]$Depth = 20
+    )
+    $parent = Split-Path -Parent $Path
+    if ($parent -and !(Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Path $parent | Out-Null
+    }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($Value | ConvertTo-Json -Depth $Depth) + [Environment]::NewLine)
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-G04DCSafeRegistryTraversalFailure {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowNull()] $ErrorRecord,
+        [ValidateRange(1, 16)] [int]$MaximumDepth = 8,
+        [ValidateRange(1, 3)] [int]$FallbackAttemptIndex = 1,
+        [ValidateRange(1, 2)] [int]$FallbackPassIndex = 1,
+        [ValidateRange(0, 1000000)] [int]$FallbackKeyCount = 0,
+        [ValidateRange(0, 1000000)] [int]$FallbackValueCount = 0,
+        [ValidateRange(0, 1073741824)] [long]$FallbackRawByteCount = 0,
+        [ValidateRange(0, 3600000)] [long]$FallbackElapsedMilliseconds = 0
+    )
+    function New-G04DCInternalTraversalFailure([bool]$TypedFailureFound) {
+        return [pscustomobject][ordered]@{
+            detailReasonCode = 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE'
+            attemptIndex = $FallbackAttemptIndex
+            passIndex = $FallbackPassIndex
+            rowCount = $FallbackKeyCount + $FallbackValueCount
+            keyCount = $FallbackKeyCount
+            valueCount = $FallbackValueCount
+            rawByteCount = $FallbackRawByteCount
+            elapsedMilliseconds = $FallbackElapsedMilliseconds
+            typedFailureFound = $TypedFailureFound
+        }
+    }
+
+    $current = if ($ErrorRecord -is [Exception]) {
+        $ErrorRecord
+    }
+    elseif ($ErrorRecord -and $ErrorRecord.PSObject.Properties['Exception']) {
+        $ErrorRecord.Exception
+    }
+    else { $null }
+    for ($depth = 0; $depth -lt $MaximumDepth -and $null -ne $current; $depth++) {
+        if ($current -is [DocumentStudio.G04DC.RegistryTraversalException]) {
+            $code = [string]$current.FailureCode
+            $attemptIndex = [int]$current.AttemptIndex
+            $passIndex = [int]$current.PassIndex
+            $rowCount = [long]$current.RowCount
+            $keyCount = [long]$current.KeyCount
+            $valueCount = [long]$current.ValueCount
+            $rawByteCount = [long]$current.RawByteCount
+            $elapsedMilliseconds = [long]$current.ElapsedMilliseconds
+            if ($code -cnotin $script:G04DCRegistryTraversalFailureCodes -or
+                $attemptIndex -lt 1 -or $attemptIndex -gt 3 -or
+                $passIndex -lt 1 -or $passIndex -gt 2 -or
+                $keyCount -lt 0 -or $keyCount -gt 1000000 -or
+                $valueCount -lt 0 -or $valueCount -gt 1000000 -or
+                $rowCount -ne $keyCount + $valueCount -or $rowCount -gt 2000000 -or
+                $rawByteCount -lt 0 -or $rawByteCount -gt 1073741824 -or
+                $elapsedMilliseconds -lt 0 -or $elapsedMilliseconds -gt 3600000) {
+                return New-G04DCInternalTraversalFailure -TypedFailureFound $false
+            }
+            $safe = [ordered]@{
+                detailReasonCode = $code
+                attemptIndex = $attemptIndex
+                passIndex = $passIndex
+                rowCount = $rowCount
+                keyCount = $keyCount
+                valueCount = $valueCount
+                rawByteCount = $rawByteCount
+                elapsedMilliseconds = $elapsedMilliseconds
+                typedFailureFound = $true
+            }
+            if ($null -ne $current.NativeStatus) { $safe.nativeStatus = [int]$current.NativeStatus }
+            return [pscustomobject]$safe
+        }
+        $current = $current.InnerException
+    }
+    return New-G04DCInternalTraversalFailure -TypedFailureFound $false
+}
+
+function Add-G04DCRegistryTraversalFailureFields {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [Collections.IDictionary]$Target,
+        [Parameter(Mandatory = $true)] $Failure
+    )
+    $code = [string]$Failure.detailReasonCode
+    $attemptIndex = [int]$Failure.attemptIndex
+    $passIndex = [int]$Failure.passIndex
+    $rowCount = [long]$Failure.rowCount
+    $keyCount = [long]$Failure.keyCount
+    $valueCount = [long]$Failure.valueCount
+    $rawByteCount = [long]$Failure.rawByteCount
+    $elapsedMilliseconds = if ($Failure.PSObject.Properties['elapsedMilliseconds']) {
+        [long]$Failure.elapsedMilliseconds
+    }
+    elseif ($Failure.PSObject.Properties['failureElapsedMilliseconds']) { [long]$Failure.failureElapsedMilliseconds }
+    else { 0L }
+    if ($code -cnotin $script:G04DCRegistryTraversalFailureCodes -or
+        $attemptIndex -lt 1 -or $attemptIndex -gt 3 -or
+        $passIndex -lt 1 -or $passIndex -gt 2 -or
+        $keyCount -lt 0 -or $keyCount -gt 1000000 -or
+        $valueCount -lt 0 -or $valueCount -gt 1000000 -or
+        $rowCount -ne $keyCount + $valueCount -or $rowCount -gt 2000000 -or
+        $rawByteCount -lt 0 -or $rawByteCount -gt 1073741824 -or
+        $elapsedMilliseconds -lt 0 -or $elapsedMilliseconds -gt 3600000) {
+        throw '[MACHINE_STATE_CAPTURE_TELEMETRY_FAILED] Registry traversal failure evidence is malformed.'
+    }
+    $Target['detailReasonCode'] = $code
+    $Target['attemptIndex'] = $attemptIndex
+    $Target['passIndex'] = $passIndex
+    $Target['rowCount'] = $rowCount
+    $Target['keyCount'] = $keyCount
+    $Target['valueCount'] = $valueCount
+    $Target['rawByteCount'] = $rawByteCount
+    $Target['failureElapsedMilliseconds'] = $elapsedMilliseconds
+    if ($Failure.PSObject.Properties['nativeStatus']) { $Target['nativeStatus'] = [int]$Failure.nativeStatus }
+}
+
+function New-G04DCMachineStatePrecheckBlockedResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')] [string]$Phase,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[A-Z0-9_]{1,64}$')] [string]$ReasonCode,
+        [Parameter(Mandatory = $true)] [AllowNull()] $ErrorRecord,
+        [Parameter(Mandatory = $true)] [bool]$MachinePreProduced
+    )
+    $result = [ordered]@{
+        schemaVersion = 1
+        status = 'MACHINE_STATE_PRECHECK_BLOCKED'
+        displayStatus = "MACHINE_STATE_PRECHECK_BLOCKED - $Phase"
+        phase = $Phase
+        reasonCode = $ReasonCode
+        candidateClassificationProduced = $false
+        machinePreProduced = $MachinePreProduced
+    }
+    if ($Phase -ceq 'class-registry-digest') {
+        $detail = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord $ErrorRecord
+        Add-G04DCRegistryTraversalFailureFields -Target $result -Failure $detail
+    }
+    return [pscustomobject]$result
 }
 
 function Get-G04DCSha256 {
@@ -1798,7 +1969,8 @@ function Write-G04DCMachineStateProgressRecord {
         [Parameter(Mandatory = $true)] [ValidateSet('phase-start', 'phase-progress', 'phase-end', 'capture-end', 'capture-failure')] [string]$Event,
         [AllowNull()] [string]$Phase,
         [Parameter(Mandatory = $true)] [ValidateSet('running', 'success', 'failed', 'budget-exceeded')] [string]$Status,
-        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0
+        [ValidateRange(0, [long]::MaxValue)] [long]$ItemCount = 0,
+        [AllowNull()] $FailureDetail
     )
     if (!$Context.writer) { return }
     $Context.sequence = [long]$Context.sequence + 1
@@ -1813,6 +1985,7 @@ function Write-G04DCMachineStateProgressRecord {
         itemCount = $ItemCount
         status = $Status
     }
+    if ($FailureDetail) { Add-G04DCRegistryTraversalFailureFields -Target $record -Failure $FailureDetail }
     $line = $record | ConvertTo-Json -Compress -Depth 4
     $Context.writer.WriteLine($line)
     $Context.writer.Flush()
@@ -1828,7 +2001,12 @@ function Write-G04DCMachineStateSubstageRecord {
         [Parameter(Mandatory = $true)] [ValidateSet('running', 'success', 'failed', 'budget-exceeded')] [string]$Status,
         [ValidateRange(0, [long]::MaxValue)] [long]$SubstageElapsedMilliseconds = 0,
         [ValidateRange(0, [long]::MaxValue)] [long]$RowCount = 0,
-        [ValidateRange(0, [long]::MaxValue)] [long]$RawByteCount = 0
+        [ValidateRange(0, [long]::MaxValue)] [long]$RawByteCount = 0,
+        [switch]$RegistryTraversal,
+        [ValidateRange(0, 3)] [int]$AttemptIndex = 0,
+        [ValidateRange(0, 2)] [int]$PassIndex = 0,
+        [AllowNull()] [ValidateSet('attempt-start', 'pass-start', 'pass-progress', 'pass-end', 'attempt-success')] [string]$TraversalEvent,
+        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0
     )
     if (!$Context.writer) { return }
     $Context.sequence = [long]$Context.sequence + 1
@@ -1846,6 +2024,14 @@ function Write-G04DCMachineStateSubstageRecord {
         rawByteCount = $RawByteCount
         status = $Status
     }
+    if ($RegistryTraversal) {
+        if ($AttemptIndex -lt 1) { throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry traversal attempt index is missing.' }
+        $record.attemptIndex = $AttemptIndex
+        $record.passIndex = $PassIndex
+        $record.passLocalRowCount = $RowCount
+        $record.aggregateElapsedMilliseconds = $AggregateElapsedMilliseconds
+        if (![string]::IsNullOrWhiteSpace($TraversalEvent)) { $record.traversalEvent = $TraversalEvent }
+    }
     $line = $record | ConvertTo-Json -Compress -Depth 4
     $Context.writer.WriteLine($line)
     $Context.writer.Flush()
@@ -1856,7 +2042,10 @@ function Start-G04DCMachineStateSubstage {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] $Context,
-        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')] [string]$Substage
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[a-z0-9][a-z0-9-]{0,63}$')] [string]$Substage,
+        [switch]$RegistryTraversal,
+        [ValidateRange(0, 3)] [int]$AttemptIndex = 0,
+        [ValidateRange(0, 2)] [int]$PassIndex = 0
     )
     if ([string]::IsNullOrWhiteSpace([string]$Context.activePhase) -or
         ![string]::IsNullOrWhiteSpace([string]$Context.activeSubstage)) {
@@ -1866,7 +2055,7 @@ function Start-G04DCMachineStateSubstage {
     $Context.activeSubstageStartMilliseconds = [long]$Context.stopwatch.ElapsedMilliseconds
     $Context.activeSubstageRowCount = 0L
     $Context.activeSubstageRawByteCount = 0L
-    Write-G04DCMachineStateSubstageRecord -Context $Context -Event 'substage-start' -Substage $Substage -Status 'running'
+    Write-G04DCMachineStateSubstageRecord -Context $Context -Event 'substage-start' -Substage $Substage -Status 'running' -RegistryTraversal:$RegistryTraversal -AttemptIndex $AttemptIndex -PassIndex $PassIndex
 }
 
 function Write-G04DCMachineStateSubstageProgress {
@@ -1875,7 +2064,12 @@ function Write-G04DCMachineStateSubstageProgress {
         [Parameter(Mandatory = $true)] $Context,
         [Parameter(Mandatory = $true)] [string]$Substage,
         [ValidateRange(0, [long]::MaxValue)] [long]$RowCount = 0,
-        [ValidateRange(0, [long]::MaxValue)] [long]$RawByteCount = 0
+        [ValidateRange(0, [long]::MaxValue)] [long]$RawByteCount = 0,
+        [switch]$RegistryTraversal,
+        [ValidateRange(0, 3)] [int]$AttemptIndex = 0,
+        [ValidateRange(0, 2)] [int]$PassIndex = 0,
+        [AllowNull()] [ValidateSet('attempt-start', 'pass-start', 'pass-progress', 'pass-end', 'attempt-success')] [string]$TraversalEvent,
+        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0
     )
     if ([string]$Context.activeSubstage -cne $Substage) {
         throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Substage progress does not match the active substage.'
@@ -1883,7 +2077,23 @@ function Write-G04DCMachineStateSubstageProgress {
     $Context.activeSubstageRowCount = $RowCount
     $Context.activeSubstageRawByteCount = $RawByteCount
     $substageElapsed = [long]$Context.stopwatch.ElapsedMilliseconds - [long]$Context.activeSubstageStartMilliseconds
-    Write-G04DCMachineStateSubstageRecord -Context $Context -Event 'substage-progress' -Substage $Substage -Status 'running' -SubstageElapsedMilliseconds $substageElapsed -RowCount $RowCount -RawByteCount $RawByteCount
+    $recordArguments = @{
+        Context = $Context
+        Event = 'substage-progress'
+        Substage = $Substage
+        Status = 'running'
+        SubstageElapsedMilliseconds = $substageElapsed
+        RowCount = $RowCount
+        RawByteCount = $RawByteCount
+    }
+    if ($RegistryTraversal) {
+        $recordArguments.RegistryTraversal = $true
+        $recordArguments.AttemptIndex = $AttemptIndex
+        $recordArguments.PassIndex = $PassIndex
+        $recordArguments.TraversalEvent = $TraversalEvent
+        $recordArguments.AggregateElapsedMilliseconds = $AggregateElapsedMilliseconds
+    }
+    Write-G04DCMachineStateSubstageRecord @recordArguments
 }
 
 function Complete-G04DCMachineStateSubstage {
@@ -1894,22 +2104,34 @@ function Complete-G04DCMachineStateSubstage {
         [Parameter(Mandatory = $true)] [ValidateSet('success', 'failed', 'budget-exceeded')] [string]$Status,
         [ValidateRange(0, [long]::MaxValue)] [long]$RowCount = 0,
         [ValidateRange(0, [long]::MaxValue)] [long]$RawByteCount = 0,
-        [ValidateRange(0, [long]::MaxValue)] [long]$MeasuredElapsedMilliseconds = 0
+        [ValidateRange(0, [long]::MaxValue)] [long]$MeasuredElapsedMilliseconds = 0,
+        [switch]$RegistryTraversal,
+        [ValidateRange(0, 3)] [int]$AttemptIndex = 0,
+        [ValidateRange(0, 2)] [int]$PassIndex = 0,
+        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0
     )
     if ([string]$Context.activeSubstage -cne $Substage) {
         throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Substage completion does not match the active substage.'
     }
     $wallElapsed = [long]$Context.stopwatch.ElapsedMilliseconds - [long]$Context.activeSubstageStartMilliseconds
     $substageElapsed = if ($MeasuredElapsedMilliseconds -gt 0) { $MeasuredElapsedMilliseconds } else { $wallElapsed }
-    $Context.activeSubstages.Add([pscustomobject][ordered]@{
+    $substageEvidence = [ordered]@{
         substage = $Substage
         elapsedMilliseconds = $substageElapsed
         wallElapsedMilliseconds = $wallElapsed
         rowCount = $RowCount
         rawByteCount = $RawByteCount
         status = $Status
-    })
-    Write-G04DCMachineStateSubstageRecord -Context $Context -Event 'substage-end' -Substage $Substage -Status $Status -SubstageElapsedMilliseconds $substageElapsed -RowCount $RowCount -RawByteCount $RawByteCount
+    }
+    if ($RegistryTraversal) {
+        if ($AttemptIndex -lt 1) { throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry traversal attempt index is missing.' }
+        $substageEvidence.attemptIndex = $AttemptIndex
+        $substageEvidence.passIndex = $PassIndex
+        $substageEvidence.passLocalRowCount = $RowCount
+        $substageEvidence.aggregateElapsedMilliseconds = $AggregateElapsedMilliseconds
+    }
+    $Context.activeSubstages.Add([pscustomobject]$substageEvidence)
+    Write-G04DCMachineStateSubstageRecord -Context $Context -Event 'substage-end' -Substage $Substage -Status $Status -SubstageElapsedMilliseconds $substageElapsed -RowCount $RowCount -RawByteCount $RawByteCount -RegistryTraversal:$RegistryTraversal -AttemptIndex $AttemptIndex -PassIndex $PassIndex -AggregateElapsedMilliseconds $AggregateElapsedMilliseconds
     $Context.activeSubstage = $null
     $Context.activeSubstageStartMilliseconds = 0L
     $Context.activeSubstageRowCount = 0L
@@ -2325,7 +2547,8 @@ function Complete-G04DCMachineStateCapture {
     param(
         [Parameter(Mandatory = $true)] $Context,
         [Parameter(Mandatory = $true)] [bool]$Passed,
-        [AllowNull()] [string]$FailureMessage
+        [AllowNull()] [string]$FailureMessage,
+        [AllowNull()] $FailureDetail
     )
     if ($Context.completed) { return }
     if ($Passed -and [long]$Context.stopwatch.ElapsedMilliseconds -gt [long]$Context.overallBudgetMilliseconds) {
@@ -2357,7 +2580,7 @@ function Complete-G04DCMachineStateCapture {
     }
     elseif ($FailureMessage -match 'phase=([a-z0-9-]+)') { $Matches[1] }
     else { $null }
-    Write-G04DCMachineStateProgressRecord -Context $Context -Event $(if ($Passed) { 'capture-end' } else { 'capture-failure' }) -Phase $terminalPhase -Status $(if ($Passed) { 'success' } else { $status }) -ItemCount ([long]$Context.activeItemCount)
+    Write-G04DCMachineStateProgressRecord -Context $Context -Event $(if ($Passed) { 'capture-end' } else { 'capture-failure' }) -Phase $terminalPhase -Status $(if ($Passed) { 'success' } else { $status }) -ItemCount ([long]$Context.activeItemCount) -FailureDetail $FailureDetail
     if (![string]::IsNullOrWhiteSpace([string]$Context.performancePath)) {
         $performance = [ordered]@{
             schemaVersion = 1
@@ -2372,7 +2595,9 @@ function Complete-G04DCMachineStateCapture {
             passed = $Passed
             failurePhase = if ($Passed) { $null } else { $terminalPhase }
         }
-        Write-G04DCJson -Path ([string]$Context.performancePath) -Value $performance
+        if ($FailureDetail) { $performance['registryTraversalFailure'] = $FailureDetail }
+        if ($Passed) { Write-G04DCJson -Path ([string]$Context.performancePath) -Value $performance }
+        else { Write-G04DCDurableJson -Path ([string]$Context.performancePath) -Value $performance }
     }
     $Context.completed = $true
     if ($Context.writer) {
@@ -2691,31 +2916,86 @@ function Get-G04DCDirectClassRegistryDigest {
     $standalone = [Diagnostics.Stopwatch]::StartNew()
     $getRemainingMilliseconds = {
         if ($CaptureContext) {
-            return [long](Get-G04DCMachineStateRemainingBudgetMilliseconds -Context $CaptureContext -Phase $CapturePhase -ItemCount $(if ($collector) { [long]$collector.RowCount } else { 0L }))
+            try {
+                return [long](Get-G04DCMachineStateRemainingBudgetMilliseconds -Context $CaptureContext -Phase $CapturePhase -ItemCount $(if ($collector) { [long]$collector.RowCount } else { 0L }))
+            }
+            catch {
+                $keyCount = if ($collector) { [int]$collector.ObservedKeyCount } else { 0 }
+                $valueCount = if ($collector) { [int]$collector.ObservedValueCount } else { 0 }
+                throw [DocumentStudio.G04DC.RegistryTraversalException]::new(
+                    [DocumentStudio.G04DC.RegistryTraversalFailureCode]::REGISTRY_TRAVERSAL_TIMEOUT,
+                    $null,
+                    $(if ($collector -and [int]$collector.AttemptIndex -ge 1) { [int]$collector.AttemptIndex } else { 1 }),
+                    $(if ($collector -and [int]$collector.PassIndex -ge 1) { [int]$collector.PassIndex } else { 1 }),
+                    $keyCount + $valueCount,
+                    $keyCount,
+                    $valueCount,
+                    $(if ($collector) { [long]$collector.RawByteCount } else { 0L }),
+                    $([long]$CaptureContext.stopwatch.ElapsedMilliseconds - [long]$CaptureContext.activePhaseStartMilliseconds),
+                    $_.Exception
+                )
+            }
         }
         $remaining = 240000L - [long]$standalone.ElapsedMilliseconds
         if ($remaining -lt 1) {
-            throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=$CapturePhase elapsedMilliseconds=$($standalone.ElapsedMilliseconds) phaseElapsedMilliseconds=$($standalone.ElapsedMilliseconds) itemCount=$(if ($collector) { [long]$collector.RowCount } else { 0L })"
+            $keyCount = if ($collector) { [int]$collector.ObservedKeyCount } else { 0 }
+            $valueCount = if ($collector) { [int]$collector.ObservedValueCount } else { 0 }
+            throw [DocumentStudio.G04DC.RegistryTraversalException]::new(
+                [DocumentStudio.G04DC.RegistryTraversalFailureCode]::REGISTRY_TRAVERSAL_TIMEOUT,
+                $null,
+                $(if ($collector -and [int]$collector.AttemptIndex -ge 1) { [int]$collector.AttemptIndex } else { 1 }),
+                $(if ($collector -and [int]$collector.PassIndex -ge 1) { [int]$collector.PassIndex } else { 1 }),
+                $keyCount + $valueCount,
+                $keyCount,
+                $valueCount,
+                $(if ($collector) { [long]$collector.RawByteCount } else { 0L }),
+                [long]$standalone.ElapsedMilliseconds,
+                $null
+            )
         }
         return $remaining
     }
     $throwCollectorFailure = {
         param($ErrorRecord)
-        $message = [string]$ErrorRecord.Exception.Message
-        if ($message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { throw $ErrorRecord }
-        $errorText = $ErrorRecord.Exception.ToString()
-        if ($errorText -match '\[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED\]') {
-            $elapsed = if ($CaptureContext) { [long]$CaptureContext.stopwatch.ElapsedMilliseconds } else { [long]$standalone.ElapsedMilliseconds }
-            $phaseElapsed = if ($CaptureContext) { $elapsed - [long]$CaptureContext.activePhaseStartMilliseconds } else { $elapsed }
-            throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=$CapturePhase elapsedMilliseconds=$elapsed phaseElapsedMilliseconds=$phaseElapsed itemCount=$(if ($collector) { [long]$collector.RowCount } else { 0L })"
+        $attemptIndex = if ($collector -and [int]$collector.AttemptIndex -ge 1) { [int]$collector.AttemptIndex } else { 1 }
+        $passIndex = if ($collector -and [int]$collector.PassIndex -ge 1) { [int]$collector.PassIndex } else { 1 }
+        $keyCount = if ($collector) { [int]$collector.ObservedKeyCount } else { 0 }
+        $valueCount = if ($collector) { [int]$collector.ObservedValueCount } else { 0 }
+        $rawByteCount = if ($collector) { [long]$collector.RawByteCount } else { 0L }
+        $elapsed = if ($collector -and [long]$collector.TraversalElapsedMilliseconds -gt 0) {
+            [long]$collector.TraversalElapsedMilliseconds
         }
-        $reason = if ($errorText -match '\[(REGISTRY_TRAVERSAL_[A-Z0-9_]+)\]') { $Matches[1] } else { 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE' }
-        if ($reason -ceq 'REGISTRY_TRAVERSAL_TIMEOUT') {
-            $elapsed = if ($CaptureContext) { [long]$CaptureContext.stopwatch.ElapsedMilliseconds } else { [long]$standalone.ElapsedMilliseconds }
-            $phaseElapsed = if ($CaptureContext) { $elapsed - [long]$CaptureContext.activePhaseStartMilliseconds } else { $elapsed }
-            throw "[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED] phase=$CapturePhase elapsedMilliseconds=$elapsed phaseElapsedMilliseconds=$phaseElapsed itemCount=$(if ($collector) { [long]$collector.RowCount } else { 0L })"
+        elseif ($CaptureContext) { [long]$CaptureContext.stopwatch.ElapsedMilliseconds - [long]$CaptureContext.activePhaseStartMilliseconds }
+        else { [long]$standalone.ElapsedMilliseconds }
+        $detail = Get-G04DCSafeRegistryTraversalFailure `
+            -ErrorRecord $ErrorRecord `
+            -FallbackAttemptIndex $attemptIndex `
+            -FallbackPassIndex $passIndex `
+            -FallbackKeyCount $keyCount `
+            -FallbackValueCount $valueCount `
+            -FallbackRawByteCount $rawByteCount `
+            -FallbackElapsedMilliseconds $elapsed
+        $inner = $ErrorRecord.Exception
+        if (![bool]$detail.typedFailureFound) {
+            $inner = [DocumentStudio.G04DC.RegistryTraversalException]::new(
+                [DocumentStudio.G04DC.RegistryTraversalFailureCode]::REGISTRY_TRAVERSAL_INTERNAL_FAILURE,
+                $null,
+                $attemptIndex,
+                $passIndex,
+                $keyCount + $valueCount,
+                $keyCount,
+                $valueCount,
+                $rawByteCount,
+                $elapsed,
+                $ErrorRecord.Exception
+            )
+            $detail = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord $inner
         }
-        throw "[MACHINE_STATE_CAPTURE_FAILED] Direct HKCR collector failed closed (reason=$reason)."
+        $topLevelCode = if ([string]$detail.detailReasonCode -ceq 'REGISTRY_TRAVERSAL_TIMEOUT') {
+            'MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED'
+        }
+        else { 'MACHINE_STATE_CAPTURE_FAILED' }
+        throw [InvalidOperationException]::new("[$topLevelCode] Direct HKCR collector failed closed.", $inner)
     }
     try {
         if ($CaptureContext) { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-startup' }
@@ -2728,20 +3008,28 @@ function Get-G04DCDirectClassRegistryDigest {
         )
         if ($CaptureContext) {
             Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-startup' -Status 'success'
-            Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read'
+            Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' -RegistryTraversal -AttemptIndex 1 -PassIndex 0
         }
         $progress = if ($CaptureContext) {
-            [Action[long,long]]{
-                param([long]$RowCount, [long]$RawByteCount)
-                Write-G04DCMachineStateSubstageProgress -Context $CaptureContext -Substage 'native-query-read' -RowCount $RowCount -RawByteCount $RawByteCount
-                Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount $RowCount
+            [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+                param([DocumentStudio.G04DC.RegistryTraversalProgress]$TraversalProgress)
+                Write-G04DCMachineStateSubstageProgress `
+                    -Context $CaptureContext `
+                    -Substage 'native-query-read' `
+                    -RowCount ([long]$TraversalProgress.RowCount) `
+                    -RawByteCount ([long]$TraversalProgress.RawByteCount) `
+                    -RegistryTraversal `
+                    -AttemptIndex ([int]$TraversalProgress.AttemptIndex) `
+                    -PassIndex ([int]$TraversalProgress.PassIndex) `
+                    -TraversalEvent ([string]$TraversalProgress.EventCode) `
+                    -AggregateElapsedMilliseconds ([long]$TraversalProgress.AggregateElapsedMilliseconds)
             }
         }
         else { $null }
         try { $collector.CollectClassesRoot64([long](& $getRemainingMilliseconds), $progress) }
         catch { & $throwCollectorFailure $_ }
         if ($CaptureContext) {
-            Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.ReadElapsedMilliseconds)
+            Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.ReadElapsedMilliseconds) -RegistryTraversal -AttemptIndex ([int]$collector.AttemptIndex) -PassIndex ([int]$collector.PassIndex) -AggregateElapsedMilliseconds ([long]$collector.TraversalElapsedMilliseconds)
             Assert-G04DCMachineStateCaptureBudget -Context $CaptureContext -Phase $CapturePhase -ItemCount ([long]$collector.RowCount) -WriteProgress
             Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'row-normalization'
             Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'row-normalization' -Status 'success' -RowCount ([long]$collector.RowCount) -RawByteCount ([long]$collector.RawByteCount) -MeasuredElapsedMilliseconds ([long]$collector.NormalizationElapsedMilliseconds)
@@ -2767,7 +3055,20 @@ function Get-G04DCDirectClassRegistryDigest {
         try {
             if ($CaptureContext -and ![string]::IsNullOrWhiteSpace([string]$CaptureContext.activeSubstage)) {
                 $status = if ($failure -and $failure.Exception.Message.StartsWith('[MACHINE_STATE_CAPTURE_BUDGET_EXCEEDED]', [StringComparison]::Ordinal)) { 'budget-exceeded' } else { 'failed' }
-                Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage ([string]$CaptureContext.activeSubstage) -Status $status -RowCount $(if ($collector) { [long]$collector.RowCount } else { 0L }) -RawByteCount $(if ($collector) { [long]$collector.RawByteCount } else { 0L })
+                if ([string]$CaptureContext.activeSubstage -ceq 'native-query-read') {
+                    $failureDetail = Get-G04DCSafeRegistryTraversalFailure `
+                        -ErrorRecord $failure `
+                        -FallbackAttemptIndex $(if ($collector -and [int]$collector.AttemptIndex -ge 1) { [int]$collector.AttemptIndex } else { 1 }) `
+                        -FallbackPassIndex $(if ($collector -and [int]$collector.PassIndex -ge 1) { [int]$collector.PassIndex } else { 1 }) `
+                        -FallbackKeyCount $(if ($collector) { [int]$collector.ObservedKeyCount } else { 0 }) `
+                        -FallbackValueCount $(if ($collector) { [int]$collector.ObservedValueCount } else { 0 }) `
+                        -FallbackRawByteCount $(if ($collector) { [long]$collector.RawByteCount } else { 0L }) `
+                        -FallbackElapsedMilliseconds $(if ($collector) { [long]$collector.TraversalElapsedMilliseconds } else { 0L })
+                    Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'native-query-read' -Status $status -RowCount ([long]$failureDetail.rowCount) -RawByteCount ([long]$failureDetail.rawByteCount) -RegistryTraversal -AttemptIndex ([int]$failureDetail.attemptIndex) -PassIndex ([int]$failureDetail.passIndex) -AggregateElapsedMilliseconds ([long]$failureDetail.elapsedMilliseconds)
+                }
+                else {
+                    Complete-G04DCMachineStateSubstage -Context $CaptureContext -Substage ([string]$CaptureContext.activeSubstage) -Status $status -RowCount $(if ($collector) { [long]$collector.RowCount } else { 0L }) -RawByteCount $(if ($collector) { [long]$collector.RawByteCount } else { 0L })
+                }
             }
             if ($CaptureContext) { Start-G04DCMachineStateSubstage -Context $CaptureContext -Substage 'helper-cleanup' }
             $collector = $null
@@ -4203,8 +4504,15 @@ function Get-G04DCMachineState {
     }
     catch {
         $original = $_
-        try { Complete-G04DCMachineStateCapture -Context $captureContext -Passed $false -FailureMessage $original.Exception.Message }
-        catch { throw "[MACHINE_STATE_CAPTURE_TELEMETRY_FAILED] $($_.Exception.Message) Original: $($original.Exception.Message)" }
+        $failureDetail = $null
+        if ([string]$captureContext.activePhase -ceq 'class-registry-digest') {
+            $extractedFailure = Get-G04DCSafeRegistryTraversalFailure -ErrorRecord $original
+            $safeFailure = [ordered]@{}
+            Add-G04DCRegistryTraversalFailureFields -Target $safeFailure -Failure $extractedFailure
+            $failureDetail = [pscustomobject]$safeFailure
+        }
+        try { Complete-G04DCMachineStateCapture -Context $captureContext -Passed $false -FailureMessage $original.Exception.Message -FailureDetail $failureDetail }
+        catch { throw [InvalidOperationException]::new('[MACHINE_STATE_CAPTURE_TELEMETRY_FAILED] Machine-state failure telemetry could not be sealed.', $original.Exception) }
         throw $original
     }
     finally {
@@ -4552,7 +4860,7 @@ function Assert-G04DCArtifactManifest {
 }
 
 Export-ModuleMember -Function @(
-    'Get-G04DCExpectedMsi', 'Write-G04DCJson', 'Get-G04DCSha256', 'Get-G04DCAuthenticodeEvidence',
+    'Get-G04DCExpectedMsi', 'Write-G04DCJson', 'Write-G04DCDurableJson', 'Get-G04DCSha256', 'Get-G04DCAuthenticodeEvidence',
     'Test-G04DCRestrictedIpAddress', 'Assert-G04DCAcquisitionUri', 'Assert-G04DCPinnedRemoteEndpoint',
     'Resolve-G04DCRedirectTransition', 'Assert-G04DCRedirectChainEvidence',
     'Assert-G04DCBoundedDownloadLength', 'Copy-G04DCBoundedHttpsBody', 'Assert-G04DCFailedDownloadCleanup',
@@ -4564,7 +4872,9 @@ Export-ModuleMember -Function @(
     'Assert-G04DCInstalledFileOwnership',
     'Get-G04DCExternalRuntimeTargetPaths',
     'Get-G04DCRegistryValueState', 'Get-G04DCRegistryDefaultValueState',
+    'Get-G04DCSafeRegistryTraversalFailure', 'New-G04DCMachineStatePrecheckBlockedResult',
     'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
+    'Start-G04DCMachineStateSubstage', 'Write-G04DCMachineStateSubstageProgress', 'Complete-G04DCMachineStateSubstage',
     'Start-G04DCMachineStatePhase', 'Assert-G04DCMachineStateCaptureBudget',
     'Complete-G04DCMachineStatePhase', 'Complete-G04DCMachineStateCapture', 'Assert-G04DCMachineStatePerformanceEvidence',
     'Get-G04DCSafePropertyState', 'ConvertTo-G04DCScheduledTaskActionEvidence',

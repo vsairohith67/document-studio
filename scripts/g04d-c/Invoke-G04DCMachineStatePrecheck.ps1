@@ -109,20 +109,17 @@ catch {
         catch {}
     }
     $reasonCode = if ($original.Exception.Message -match '^\[([A-Z0-9_]+)\]') { $Matches[1] } else { 'PRECHECK_INFRASTRUCTURE_FAILURE' }
+    $blockedResult = New-G04DCMachineStatePrecheckBlockedResult `
+        -Phase $phase `
+        -ReasonCode $reasonCode `
+        -ErrorRecord $original `
+        -MachinePreProduced (Test-Path -LiteralPath (Join-Path $evidence 'machine-pre.json'))
+    Write-G04DCDurableJson -Path (Join-Path $evidence 'machine-state-precheck-result.json') -Value $blockedResult
     $cleanup = if (Test-Path -LiteralPath $ownedRoot) {
         Remove-G04DCOwnedRoot -OwnedRoot $ownedRoot -MarkerPath $ownedMarker -MarkerContent $ownedMarkerContent -RequiredParent $env:RUNNER_TEMP
     }
     else { [pscustomobject][ordered]@{ markerOwnedPathsOnly = $true; removed = $true } }
     Write-G04DCJson -Path (Join-Path $evidence 'cleanup.json') -Value $cleanup
-    Write-G04DCJson -Path (Join-Path $evidence 'machine-state-precheck-result.json') -Value ([ordered]@{
-        schemaVersion = 1
-        status = 'MACHINE_STATE_PRECHECK_BLOCKED'
-        displayStatus = "MACHINE_STATE_PRECHECK_BLOCKED - $phase"
-        phase = $phase
-        reasonCode = $reasonCode
-        candidateClassificationProduced = $false
-        machinePreProduced = Test-Path -LiteralPath (Join-Path $evidence 'machine-pre.json')
-    })
     New-G04DCArtifactManifest -EvidenceDirectory $evidence | Out-Null
     Write-Output "MACHINE_STATE_PRECHECK_BLOCKED - $phase"
     throw "[MACHINE_STATE_PRECHECK_BLOCKED] phase=$phase reasonCode=$reasonCode"
