@@ -23,12 +23,15 @@ $adminProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCAdm
 $minimalProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMinimalMsiProof.ps1') -Raw
 $sandboxProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCSandboxSmoke.ps1') -Raw
 $commonProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'G04DC.Common.psm1') -Raw
+$classRegistryDigestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ClassRegistryDigest.cs') -Raw
 $runtimeManifestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCRuntimeManifest.ps1') -Raw
 $decisionProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCCandidateDecision.ps1') -Raw
 $precheckProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMachineStatePrecheck.ps1') -Raw
 $tests = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCBoundaries.ps1') -Raw
 foreach ($telemetryBoundary in @(
     'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
+    'Write-G04DCMachineStateSubstageRecord', 'Start-G04DCMachineStateSubstage',
+    'Complete-G04DCMachineStateSubstage',
     'Start-G04DCMachineStatePhase', 'Assert-G04DCMachineStateCaptureBudget',
     'Complete-G04DCMachineStatePhase', 'Complete-G04DCMachineStateCapture',
     'machine-state-progress.ndjson', 'machine-state-performance',
@@ -39,6 +42,70 @@ foreach ($telemetryBoundary in @(
     'KillOnCloseJob', 'TerminateAndVerify', 'Assert-G04DCMachineStatePerformanceEvidence'
 )) {
     if (!$commonProof.Contains($telemetryBoundary) -and !$allProof.Contains($telemetryBoundary)) { throw "G04D-C machine-state telemetry boundary is missing: $telemetryBoundary" }
+}
+foreach ($classRegistryBoundary in @(
+    'ClassRegistryDigestCollector', 'BoundedTextCapture', 'BeginRead', 'AppendStderrText',
+    'StringComparer.CurrentCultureIgnoreCase', 'SHA256.Create()', 'REGISTRY_DIGEST_TIMEOUT',
+    'REGISTRY_DIGEST_RAW_BYTE_CEILING', 'REGISTRY_DIGEST_ROW_CEILING',
+    'REGISTRY_DIGEST_CANONICAL_BYTE_CEILING', 'REGISTRY_DIGEST_STDERR_CEILING',
+    'CanonicalUtf8 = new UTF8Encoding(false, true)', 'nativeOutputEncoding',
+    'CanonicalUtf8.GetByteCount', 'CanonicalUtf8.GetBytes'
+)) {
+    if (!$classRegistryDigestProof.Contains($classRegistryBoundary)) { throw "G04D-C class-registry streaming boundary is missing: $classRegistryBoundary" }
+}
+foreach ($directRegistryBoundary in @(
+    'DirectClassRegistryDigestCollector', 'RegistryHive.ClassesRoot', 'RegistryView.Registry64',
+    'RegQueryValueExW', 'CollectClassesRoot64', 'REGISTRY_TRAVERSAL_ACCESS_DENIED',
+    'REGISTRY_TRAVERSAL_UNSTABLE', 'REGISTRY_TRAVERSAL_KEY_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_CEILING', 'REGISTRY_TRAVERSAL_DEPTH_CEILING',
+    'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING', 'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING',
+    'public int SchemaVersion { get { return 2; } }'
+)) {
+    if (!$classRegistryDigestProof.Contains($directRegistryBoundary)) { throw "G04D-C direct HKCR boundary is missing: $directRegistryBoundary" }
+}
+if ($classRegistryDigestProof -match '(?i)CreateSubKey|SetValue|Delete(SubKey|Value)|WriteAll(Text|Bytes)|FileMode\.Create|RegistryKey\.OpenRemoteBaseKey') {
+    throw 'G04D-C class-registry helper may not mutate registry, use remote registry, or create raw-output artifacts.'
+}
+foreach ($classRegistryProcessBoundary in @(
+    'native-query-startup', 'native-query-read', 'row-normalization', 'canonical-hash', 'helper-cleanup',
+    'MaximumRawBytes = 134217728', 'MaximumRows = 1000000', 'StandardOutputEncoding',
+    'ActiveHandleCount', 'nativeCleanupFailureStage', 'secondaryNativeCleanupFailure',
+    'MACHINE_STATE_CAPTURE_EVIDENCE_FAILED', 'LifecycleTestHooks',
+    'DisposeStdoutReader', 'DisposeStdoutStream', 'DisposeStderrReader', 'DisposeStderrStream',
+    'DisposeStdoutTask', 'DisposeStderrTask'
+)) {
+    if (!$commonProof.Contains($classRegistryProcessBoundary)) { throw "G04D-C class-registry process boundary is missing: $classRegistryProcessBoundary" }
+}
+foreach ($classRegistryRegression in @(
+    'current native-row normalization equivalence', 'incremental hash equality',
+    '64236-row registry digest scale', 'explicit UTF-8 native output encoding',
+    'split multibyte character across stream buffers', 'truncated multibyte native output rejected',
+    'class registry substage ordering', 'class registry helper termination',
+    'registry key creation mutation equivalence', 'registry default absent-empty distinction',
+    'registry value-kind mutation equivalence', 'registry Unicode mutation equivalence',
+    'optimized class registry collector performs no mutation', 'C7 class registry target is 180000 ms',
+    'direct HKCR Registry64 merged-view fixture', 'direct HKCR access denial fails closed',
+    'direct HKCR disappearing key fails closed', 'direct HKCR disappearing value fails closed',
+    'class registry digest schema change', 'class registry key-count change', 'class registry value-count change',
+    'direct HKCR traversal timeout', 'direct HKCR handles disposed for owned cleanup',
+    'shortcut catalog transient sharing retry preserves full entry',
+    'shortcut catalog persistent sharing failure remains fail closed',
+    'P1-A cleanup error precedence preserves secondary evidence',
+    'P1-A redirected readers streams and tasks are disposed',
+    'P1-A production cleanup uses no global process termination',
+    'P1-B canonical hash independent of Console OutputEncoding',
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 315 fail-closed cases'
+)) {
+    if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
+}
+if (!$precheckProof.Contains('classRegistryDigestTargetMilliseconds = 180000L') -or !$precheckProof.Contains('CLASS_REGISTRY_DIGEST_TARGET_EXCEEDED')) {
+    throw 'G04D-C PRECHECK class-registry target is not fixed at 180000 ms.'
+}
+foreach ($directoryRetryBoundary in @(
+    '$maximumAttempts = 20', 'Start-Sleep -Milliseconds 500', 'DIRECTORY_TREE_CAPTURE_UNSTABLE',
+    '$afterItem.LastWriteTimeUtc', "'IOException', 'ItemNotFoundException'"
+)) {
+    if (!$commonProof.Contains($directoryRetryBoundary)) { throw "G04D-C bounded directory retry boundary is missing: $directoryRetryBoundary" }
 }
 foreach ($phase in @(
     'associations', 'font-registry-catalog', 'protected-font-files', 'external-runtime-targets',
@@ -118,7 +185,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 206 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 315 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
@@ -140,7 +207,7 @@ foreach ($runtimeBoundary in @('--version', '--convert-to', 'Invoke-G04DCZeroCap
         throw "G04D-C sandbox-only runtime boundary is missing: $runtimeBoundary"
     }
 }
-foreach ($machineSeal in @('serviceCatalogSha256', 'serviceRegistryCatalogSha256', 'scheduledTaskCatalogSha256', 'firewallCatalogSha256', 'installedProductCatalogSha256', 'otherInstalledProductCatalogSha256', 'installerCacheCatalogSha256', 'classRegistryCatalogSha256', 'shortcutCatalogSha256', 'environmentCatalogSha256', 'pendingReboot')) {
+foreach ($machineSeal in @('serviceCatalogSha256', 'serviceRegistryCatalogSha256', 'scheduledTaskCatalogSha256', 'firewallCatalogSha256', 'installedProductCatalogSha256', 'otherInstalledProductCatalogSha256', 'installerCacheCatalogSha256', 'classRegistryCatalogSchemaVersion', 'classRegistryKeyCount', 'classRegistryValueCount', 'classRegistryCatalogSha256', 'shortcutCatalogSha256', 'environmentCatalogSha256', 'pendingReboot')) {
     if (!$commonProof.Contains($machineSeal)) { throw "G04D-C full machine-state digest is missing: $machineSeal" }
 }
 foreach ($startupSeal in @('RunOnce', 'WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'SpecialFolder]::Startup', 'ProgramData')) {

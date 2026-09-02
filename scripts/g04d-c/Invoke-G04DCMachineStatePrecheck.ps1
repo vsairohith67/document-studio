@@ -71,6 +71,12 @@ try {
     Assert-G04DCMsiRegistrationAbsent -State $before.msiRegistration | Out-Null
 
     $performance = Assert-G04DCMachineStatePerformanceEvidence -Path $performancePath -RequiredPhase 'state-serialization'
+    $classRegistryDigestTargetMilliseconds = 180000L
+    $classRegistryDigestPhase = @($performance.phases | Where-Object { [string]$_.phase -ceq 'class-registry-digest' })
+    if ($classRegistryDigestPhase.Count -ne 1 -or [long]$classRegistryDigestPhase[0].elapsedMilliseconds -gt $classRegistryDigestTargetMilliseconds) {
+        $observed = if ($classRegistryDigestPhase.Count -eq 1) { [long]$classRegistryDigestPhase[0].elapsedMilliseconds } else { 0L }
+        throw "[CLASS_REGISTRY_DIGEST_TARGET_EXCEEDED] phase=class-registry-digest elapsedMilliseconds=$observed targetMilliseconds=$classRegistryDigestTargetMilliseconds"
+    }
     $cleanup = Remove-G04DCOwnedRoot -OwnedRoot $ownedRoot -MarkerPath $ownedMarker -MarkerContent $ownedMarkerContent -RequiredParent $env:RUNNER_TEMP
     Write-G04DCJson -Path (Join-Path $evidence 'cleanup.json') -Value $cleanup
     if (!$cleanup.removed) { throw '[CLEANUP_OWNERSHIP_MISMATCH] Precheck owned root was not removed.' }
@@ -82,6 +88,8 @@ try {
         totalElapsedMilliseconds = [long]$performance.totalElapsedMilliseconds
         captureHardCeilingMilliseconds = 720000
         phaseCeilingMilliseconds = 240000
+        classRegistryDigestTargetMilliseconds = $classRegistryDigestTargetMilliseconds
+        classRegistryDigestElapsedMilliseconds = [long]$classRegistryDigestPhase[0].elapsedMilliseconds
         runnerIsolationPassed = $true
         msiRegistrationAbsent = $true
     }
