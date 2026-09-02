@@ -157,6 +157,11 @@ $script:G04DCRegistryTraversalFailureCodes = @(
     'REGISTRY_TRAVERSAL_INTERNAL_FAILURE',
     'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED'
 )
+$script:G04DCTransientRegistryTraversalFailureCodes = @(
+    'REGISTRY_TRAVERSAL_KEY_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED',
+    'REGISTRY_TRAVERSAL_UNSTABLE'
+)
 
 function Get-G04DCExpectedMsi {
     [CmdletBinding()]
@@ -242,6 +247,10 @@ function Get-G04DCSafeRegistryTraversalFailure {
             $valueCount = [long]$current.ValueCount
             $rawByteCount = [long]$current.RawByteCount
             $elapsedMilliseconds = [long]$current.ElapsedMilliseconds
+            $lastTransientReasonCode = if ($null -ne $current.LastTransientFailureCode) {
+                [string]$current.LastTransientFailureCode
+            }
+            else { $null }
             if ($code -cnotin $script:G04DCRegistryTraversalFailureCodes -or
                 $attemptIndex -lt 1 -or $attemptIndex -gt 3 -or
                 $passIndex -lt 1 -or $passIndex -gt 2 -or
@@ -249,7 +258,9 @@ function Get-G04DCSafeRegistryTraversalFailure {
                 $valueCount -lt 0 -or $valueCount -gt 1000000 -or
                 $rowCount -ne $keyCount + $valueCount -or $rowCount -gt 2000000 -or
                 $rawByteCount -lt 0 -or $rawByteCount -gt 1073741824 -or
-                $elapsedMilliseconds -lt 0 -or $elapsedMilliseconds -gt 3600000) {
+                $elapsedMilliseconds -lt 0 -or $elapsedMilliseconds -gt 3600000 -or
+                ($code -ceq 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -and $lastTransientReasonCode -cnotin $script:G04DCTransientRegistryTraversalFailureCodes) -or
+                ($code -cne 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -and $null -ne $lastTransientReasonCode)) {
                 return New-G04DCInternalTraversalFailure -TypedFailureFound $false
             }
             $safe = [ordered]@{
@@ -264,6 +275,7 @@ function Get-G04DCSafeRegistryTraversalFailure {
                 typedFailureFound = $true
             }
             if ($null -ne $current.NativeStatus) { $safe.nativeStatus = [int]$current.NativeStatus }
+            if ($null -ne $lastTransientReasonCode) { $safe.lastTransientReasonCode = $lastTransientReasonCode }
             return [pscustomobject]$safe
         }
         $current = $current.InnerException
@@ -289,6 +301,10 @@ function Add-G04DCRegistryTraversalFailureFields {
     }
     elseif ($Failure.PSObject.Properties['failureElapsedMilliseconds']) { [long]$Failure.failureElapsedMilliseconds }
     else { 0L }
+    $lastTransientReasonCode = if ($Failure.PSObject.Properties['lastTransientReasonCode']) {
+        [string]$Failure.lastTransientReasonCode
+    }
+    else { $null }
     if ($code -cnotin $script:G04DCRegistryTraversalFailureCodes -or
         $attemptIndex -lt 1 -or $attemptIndex -gt 3 -or
         $passIndex -lt 1 -or $passIndex -gt 2 -or
@@ -296,7 +312,9 @@ function Add-G04DCRegistryTraversalFailureFields {
         $valueCount -lt 0 -or $valueCount -gt 1000000 -or
         $rowCount -ne $keyCount + $valueCount -or $rowCount -gt 2000000 -or
         $rawByteCount -lt 0 -or $rawByteCount -gt 1073741824 -or
-        $elapsedMilliseconds -lt 0 -or $elapsedMilliseconds -gt 3600000) {
+        $elapsedMilliseconds -lt 0 -or $elapsedMilliseconds -gt 3600000 -or
+        ($code -ceq 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -and $lastTransientReasonCode -cnotin $script:G04DCTransientRegistryTraversalFailureCodes) -or
+        ($code -cne 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -and $null -ne $lastTransientReasonCode)) {
         throw '[MACHINE_STATE_CAPTURE_TELEMETRY_FAILED] Registry traversal failure evidence is malformed.'
     }
     $Target['detailReasonCode'] = $code
@@ -308,6 +326,7 @@ function Add-G04DCRegistryTraversalFailureFields {
     $Target['rawByteCount'] = $rawByteCount
     $Target['failureElapsedMilliseconds'] = $elapsedMilliseconds
     if ($Failure.PSObject.Properties['nativeStatus']) { $Target['nativeStatus'] = [int]$Failure.nativeStatus }
+    if ($null -ne $lastTransientReasonCode) { $Target['lastTransientReasonCode'] = $lastTransientReasonCode }
 }
 
 function New-G04DCMachineStatePrecheckBlockedResult {
@@ -2005,8 +2024,11 @@ function Write-G04DCMachineStateSubstageRecord {
         [switch]$RegistryTraversal,
         [ValidateRange(0, 3)] [int]$AttemptIndex = 0,
         [ValidateRange(0, 2)] [int]$PassIndex = 0,
-        [AllowNull()] [ValidateSet('attempt-start', 'pass-start', 'pass-progress', 'pass-end', 'attempt-success')] [string]$TraversalEvent,
-        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0
+        [AllowNull()] [ValidateSet('attempt-start', 'pass-start', 'pass-progress', 'pass-end', 'attempt-retry', 'stability-exhausted', 'attempt-success')] [string]$TraversalEvent,
+        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0,
+        [AllowNull()] [string]$DetailReasonCode,
+        [AllowNull()] [string]$LastTransientReasonCode,
+        [ValidateSet(0, 250, 500)] [int]$StabilizationDelayMilliseconds = 0
     )
     if (!$Context.writer) { return }
     $Context.sequence = [long]$Context.sequence + 1
@@ -2026,11 +2048,41 @@ function Write-G04DCMachineStateSubstageRecord {
     }
     if ($RegistryTraversal) {
         if ($AttemptIndex -lt 1) { throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry traversal attempt index is missing.' }
+        $hasDetailReason = ![string]::IsNullOrWhiteSpace($DetailReasonCode)
+        $hasLastTransient = ![string]::IsNullOrWhiteSpace($LastTransientReasonCode)
+        if (($TraversalEvent -ceq 'attempt-start' -and $PassIndex -ne 0) -or
+            (![string]::IsNullOrWhiteSpace($TraversalEvent) -and $TraversalEvent -cne 'attempt-start' -and $PassIndex -eq 0) -or
+            ($TraversalEvent -ceq 'attempt-success' -and $PassIndex -ne 2) -or
+            ($TraversalEvent -ceq 'attempt-retry' -and
+                ($DetailReasonCode -cnotin $script:G04DCTransientRegistryTraversalFailureCodes -or $hasLastTransient -or
+                    ($AttemptIndex -eq 1 -and $StabilizationDelayMilliseconds -ne 250) -or
+                    ($AttemptIndex -eq 2 -and $StabilizationDelayMilliseconds -ne 500) -or $AttemptIndex -eq 3)) -or
+            ($TraversalEvent -ceq 'stability-exhausted' -and
+                ($DetailReasonCode -cne 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -or
+                    $LastTransientReasonCode -cnotin $script:G04DCTransientRegistryTraversalFailureCodes -or
+                    $AttemptIndex -ne 3 -or $StabilizationDelayMilliseconds -ne 0)) -or
+            ($TraversalEvent -cnotin @('attempt-retry', 'stability-exhausted') -and
+                ($hasDetailReason -or $hasLastTransient -or $StabilizationDelayMilliseconds -ne 0))) {
+            throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry traversal telemetry event is malformed.'
+        }
         $record.attemptIndex = $AttemptIndex
         $record.passIndex = $PassIndex
         $record.passLocalRowCount = $RowCount
         $record.aggregateElapsedMilliseconds = $AggregateElapsedMilliseconds
         if (![string]::IsNullOrWhiteSpace($TraversalEvent)) { $record.traversalEvent = $TraversalEvent }
+        if (![string]::IsNullOrWhiteSpace($DetailReasonCode)) {
+            if ($DetailReasonCode -cnotin $script:G04DCRegistryTraversalFailureCodes) {
+                throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry traversal telemetry reason is invalid.'
+            }
+            $record.detailReasonCode = $DetailReasonCode
+        }
+        if (![string]::IsNullOrWhiteSpace($LastTransientReasonCode)) {
+            if ($LastTransientReasonCode -cnotin $script:G04DCTransientRegistryTraversalFailureCodes) {
+                throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Registry traversal telemetry transient reason is invalid.'
+            }
+            $record.lastTransientReasonCode = $LastTransientReasonCode
+        }
+        if ($StabilizationDelayMilliseconds -ne 0) { $record.stabilizationDelayMilliseconds = $StabilizationDelayMilliseconds }
     }
     $line = $record | ConvertTo-Json -Compress -Depth 4
     $Context.writer.WriteLine($line)
@@ -2068,8 +2120,11 @@ function Write-G04DCMachineStateSubstageProgress {
         [switch]$RegistryTraversal,
         [ValidateRange(0, 3)] [int]$AttemptIndex = 0,
         [ValidateRange(0, 2)] [int]$PassIndex = 0,
-        [AllowNull()] [ValidateSet('attempt-start', 'pass-start', 'pass-progress', 'pass-end', 'attempt-success')] [string]$TraversalEvent,
-        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0
+        [AllowNull()] [ValidateSet('attempt-start', 'pass-start', 'pass-progress', 'pass-end', 'attempt-retry', 'stability-exhausted', 'attempt-success')] [string]$TraversalEvent,
+        [ValidateRange(0, [long]::MaxValue)] [long]$AggregateElapsedMilliseconds = 0,
+        [AllowNull()] [string]$DetailReasonCode,
+        [AllowNull()] [string]$LastTransientReasonCode,
+        [ValidateSet(0, 250, 500)] [int]$StabilizationDelayMilliseconds = 0
     )
     if ([string]$Context.activeSubstage -cne $Substage) {
         throw '[MACHINE_STATE_CAPTURE_CONFIGURATION_INVALID] Substage progress does not match the active substage.'
@@ -2092,6 +2147,9 @@ function Write-G04DCMachineStateSubstageProgress {
         $recordArguments.PassIndex = $PassIndex
         $recordArguments.TraversalEvent = $TraversalEvent
         $recordArguments.AggregateElapsedMilliseconds = $AggregateElapsedMilliseconds
+        $recordArguments.DetailReasonCode = $DetailReasonCode
+        $recordArguments.LastTransientReasonCode = $LastTransientReasonCode
+        $recordArguments.StabilizationDelayMilliseconds = $StabilizationDelayMilliseconds
     }
     Write-G04DCMachineStateSubstageRecord @recordArguments
 }
@@ -3013,16 +3071,25 @@ function Get-G04DCDirectClassRegistryDigest {
         $progress = if ($CaptureContext) {
             [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
                 param([DocumentStudio.G04DC.RegistryTraversalProgress]$TraversalProgress)
-                Write-G04DCMachineStateSubstageProgress `
-                    -Context $CaptureContext `
-                    -Substage 'native-query-read' `
-                    -RowCount ([long]$TraversalProgress.RowCount) `
-                    -RawByteCount ([long]$TraversalProgress.RawByteCount) `
-                    -RegistryTraversal `
-                    -AttemptIndex ([int]$TraversalProgress.AttemptIndex) `
-                    -PassIndex ([int]$TraversalProgress.PassIndex) `
-                    -TraversalEvent ([string]$TraversalProgress.EventCode) `
-                    -AggregateElapsedMilliseconds ([long]$TraversalProgress.AggregateElapsedMilliseconds)
+                $traversalArguments = @{
+                    Context = $CaptureContext
+                    Substage = 'native-query-read'
+                    RowCount = [long]$TraversalProgress.RowCount
+                    RawByteCount = [long]$TraversalProgress.RawByteCount
+                    RegistryTraversal = $true
+                    AttemptIndex = [int]$TraversalProgress.AttemptIndex
+                    PassIndex = [int]$TraversalProgress.PassIndex
+                    TraversalEvent = [string]$TraversalProgress.EventCode
+                    AggregateElapsedMilliseconds = [long]$TraversalProgress.AggregateElapsedMilliseconds
+                    StabilizationDelayMilliseconds = [int]$TraversalProgress.StabilizationDelayMilliseconds
+                }
+                if ($null -ne $TraversalProgress.FailureCode) {
+                    $traversalArguments.DetailReasonCode = [string]$TraversalProgress.FailureCode
+                }
+                if ($null -ne $TraversalProgress.LastTransientFailureCode) {
+                    $traversalArguments.LastTransientReasonCode = [string]$TraversalProgress.LastTransientFailureCode
+                }
+                Write-G04DCMachineStateSubstageProgress @traversalArguments
             }
         }
         else { $null }

@@ -1988,34 +1988,41 @@ try {
 
     $raceKey = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\RaceKey\Child")
     $raceKey.Dispose()
-    $raceKeyState = [pscustomobject]@{ triggered = $false }
+    $raceKeyState = [pscustomobject]@{ triggerCount = 0 }
     $raceKeyProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
         param([DocumentStudio.G04DC.RegistryTraversalProgress]$ProgressRecord)
-        if (!$raceKeyState.triggered -and [string]$ProgressRecord.EventCode -ceq 'pass-progress' -and [long]$ProgressRecord.RowCount -eq 1) {
-            $raceKeyState.triggered = $true
+        if ([string]$ProgressRecord.EventCode -ceq 'pass-progress' -and [int]$ProgressRecord.PassIndex -eq 1 -and [long]$ProgressRecord.RowCount -eq 1) {
+            $raceKeyState.triggerCount++
             $c7RegistryBase.DeleteSubKeyTree("$c7RegistryNativeRoot\RaceKey", $false)
         }
+        elseif ([string]$ProgressRecord.EventCode -ceq 'attempt-retry') {
+            $replacement = $c7RegistryBase.CreateSubKey("$c7RegistryNativeRoot\RaceKey\Child")
+            $replacement.Dispose()
+        }
     }
-    Assert-Throws 'direct HKCR disappearing key fails closed' 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' {
+    Assert-Throws 'direct HKCR disappearing key fails closed' 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' {
         Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -Progress $raceKeyProgress | Out-Null
     }
-    if (!$raceKeyState.triggered) { throw 'Direct HKCR disappearing-key fixture did not execute.' }
+    if ($raceKeyState.triggerCount -ne 3) { throw 'Direct HKCR disappearing-key fixture did not exhaust its bounded attempts.' }
 
     $raceValueRoot = $c7RegistryBase.OpenSubKey($c7RegistryNativeRoot, $true)
     try {
         $raceValueRoot.SetValue('RaceValue', 'present', [Microsoft.Win32.RegistryValueKind]::String)
-        $raceValueState = [pscustomobject]@{ triggered = $false }
+        $raceValueState = [pscustomobject]@{ triggerCount = 0 }
         $raceValueProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
             param([DocumentStudio.G04DC.RegistryTraversalProgress]$ProgressRecord)
-            if (!$raceValueState.triggered -and [string]$ProgressRecord.EventCode -ceq 'pass-progress' -and [long]$ProgressRecord.RowCount -eq 1) {
-                $raceValueState.triggered = $true
+            if ([string]$ProgressRecord.EventCode -ceq 'pass-progress' -and [int]$ProgressRecord.PassIndex -eq 1 -and [long]$ProgressRecord.RowCount -eq 1) {
+                $raceValueState.triggerCount++
                 $raceValueRoot.DeleteValue('RaceValue', $false)
             }
+            elseif ([string]$ProgressRecord.EventCode -ceq 'attempt-retry') {
+                $raceValueRoot.SetValue('RaceValue', 'present', [Microsoft.Win32.RegistryValueKind]::String)
+            }
         }
-        Assert-Throws 'direct HKCR disappearing value fails closed' 'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED' {
+        Assert-Throws 'direct HKCR disappearing value fails closed' 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' {
             Get-G04DCTestDirectClassRegistryDigest -TestSubKey $script:c7DirectTestSubKey -Progress $raceValueProgress | Out-Null
         }
-        if (!$raceValueState.triggered) { throw 'Direct HKCR disappearing-value fixture did not execute.' }
+        if ($raceValueState.triggerCount -ne 3) { throw 'Direct HKCR disappearing-value fixture did not exhaust its bounded attempts.' }
     }
     finally { $raceValueRoot.Dispose() }
 
@@ -2176,11 +2183,17 @@ finally {
     $script:c7DirectTestSubKey = $null
 }
 
-function New-G04DCTestRegistryTraversalErrorRecord {
+function New-G04DCTestRegistryTraversalException {
     param(
         [Parameter(Mandatory = $true)] [string]$Code,
-        [int]$WrapperDepth = 1,
-        [string]$InnerMessage = 'bounded inner failure'
+        [int]$AttemptIndex = 1,
+        [int]$PassIndex = 2,
+        [int]$KeyCount = 4,
+        [int]$ValueCount = 5,
+        [long]$RawByteCount = 1234L,
+        [long]$ElapsedMilliseconds = 5678L,
+        [string]$InnerMessage = 'bounded inner failure',
+        [AllowNull()] [string]$LastTransientReasonCode = $null
     )
     $failureCode = [DocumentStudio.G04DC.RegistryTraversalFailureCode][Enum]::Parse(
         [DocumentStudio.G04DC.RegistryTraversalFailureCode],
@@ -2189,18 +2202,42 @@ function New-G04DCTestRegistryTraversalErrorRecord {
     )
     $nativeStatus = if ($Code -ceq 'REGISTRY_TRAVERSAL_VALUE_READ_FAILED') { 234 } else { $null }
     $inner = [InvalidOperationException]::new($InnerMessage)
-    $typed = [DocumentStudio.G04DC.RegistryTraversalException]::new(
+    if ($Code -ceq 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -and [string]::IsNullOrWhiteSpace($LastTransientReasonCode)) {
+        $LastTransientReasonCode = 'REGISTRY_TRAVERSAL_UNSTABLE'
+    }
+    $lastTransient = if ([string]::IsNullOrWhiteSpace($LastTransientReasonCode)) {
+        $null
+    }
+    else {
+        [DocumentStudio.G04DC.RegistryTraversalFailureCode][Enum]::Parse(
+            [DocumentStudio.G04DC.RegistryTraversalFailureCode],
+            $LastTransientReasonCode,
+            $false
+        )
+    }
+    return [DocumentStudio.G04DC.RegistryTraversalException]::new(
         $failureCode,
         $nativeStatus,
-        1,
-        2,
-        9,
-        4,
-        5,
-        1234L,
-        5678L,
-        $inner
+        $AttemptIndex,
+        $PassIndex,
+        $KeyCount + $ValueCount,
+        $KeyCount,
+        $ValueCount,
+        $RawByteCount,
+        $ElapsedMilliseconds,
+        $inner,
+        $lastTransient
     )
+}
+
+function New-G04DCTestRegistryTraversalErrorRecord {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Code,
+        [int]$WrapperDepth = 1,
+        [string]$InnerMessage = 'bounded inner failure',
+        [AllowNull()] [string]$LastTransientReasonCode = $null
+    )
+    $typed = New-G04DCTestRegistryTraversalException -Code $Code -InnerMessage $InnerMessage -LastTransientReasonCode $LastTransientReasonCode
     [Exception]$wrapped = $typed
     for ($index = 0; $index -lt $WrapperDepth; $index++) {
         $wrapped = [Reflection.TargetInvocationException]::new($wrapped)
@@ -2354,6 +2391,341 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $scaleRoot) { Remove-Item -LiteralPath $scaleRoot -Recurse -Force }
+}
+
+function New-G04DCTestStabilityCollector {
+    return [DocumentStudio.G04DC.DirectClassRegistryDigestCollector]::new(1000, 1000, 32, 1048576, 16777216)
+}
+
+function Get-G04DCTestTraversalFailureFromAction {
+    param([Parameter(Mandatory = $true)] [scriptblock]$Action)
+    try {
+        & $Action
+        throw 'Expected stabilized collector action to fail.'
+    }
+    catch {
+        return Get-G04DCSafeRegistryTraversalFailure -ErrorRecord $_
+    }
+}
+
+$c9StabilityId = [guid]::NewGuid().ToString('N')
+$c9StabilitySubKey = "DocumentStudioG04DCTest_$c9StabilityId"
+$c9StabilityNativeRoot = "Software\Classes\$c9StabilitySubKey"
+$c9UnrelatedSubKey = "DocumentStudioG04DCTest_Unrelated_$c9StabilityId"
+$c9UnrelatedNativeRoot = "Software\Classes\$c9UnrelatedSubKey"
+$c9StabilityBase = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryView]::Registry64)
+$resetC9StabilityFixture = {
+    param([AllowNull()] [scriptblock]$Initializer)
+    $c9StabilityBase.DeleteSubKeyTree($c9StabilityNativeRoot, $false)
+    $fixture = $c9StabilityBase.CreateSubKey($c9StabilityNativeRoot)
+    try { if ($Initializer) { & $Initializer $fixture } }
+    finally { $fixture.Dispose() }
+}
+try {
+    & $resetC9StabilityFixture {
+        param($Root)
+        $Root.SetValue('Stable', 'one', [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $stableEvents = [Collections.Generic.List[object]]::new()
+    $stableProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{ param($Record) [void]$stableEvents.Add($Record) }
+    $stableCollector = New-G04DCTestStabilityCollector
+    $stableCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $stableProgress)
+    if ($stableCollector.AttemptIndex -ne 1 -or $stableCollector.PassIndex -ne 2 -or
+        @($stableEvents | Where-Object { $_.EventCode -ceq 'pass-end' }).Count -ne 2 -or
+        @($stableEvents | Where-Object { $_.EventCode -ceq 'attempt-success' }).Count -ne 1) {
+        throw 'Stable capture did not require exactly two complete passes in attempt 1.'
+    }
+    $passed.Add('stable two-pass capture succeeds on attempt 1')
+
+    & $resetC9StabilityFixture {
+        param($Root)
+        $child = $Root.CreateSubKey('TransientKey\Child')
+        $child.Dispose()
+    }
+    $keyRetryState = [pscustomobject]@{ failed = $false }
+    $keyRetryEvents = [Collections.Generic.List[object]]::new()
+    $keyRetryProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$keyRetryEvents.Add($Record)
+        if (!$keyRetryState.failed -and $Record.EventCode -ceq 'pass-progress' -and $Record.AttemptIndex -eq 1 -and $Record.PassIndex -eq 1 -and $Record.RowCount -eq 1) {
+            $keyRetryState.failed = $true
+            $c9StabilityBase.DeleteSubKeyTree("$c9StabilityNativeRoot\TransientKey", $false)
+        }
+        elseif ($Record.EventCode -ceq 'attempt-retry' -and $Record.AttemptIndex -eq 1) {
+            $replacement = $c9StabilityBase.CreateSubKey("$c9StabilityNativeRoot\TransientKey\Child")
+            $replacement.Dispose()
+        }
+    }
+    $keyRetryCollector = New-G04DCTestStabilityCollector
+    $keyRetryCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $keyRetryProgress)
+    $keyRetry = @($keyRetryEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' })
+    if (!$keyRetryState.failed -or $keyRetryCollector.AttemptIndex -ne 2 -or $keyRetry.Count -ne 1 -or
+        [string]$keyRetry[0].FailureCode -cne 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED') {
+        throw 'A disappearing key in attempt 1 did not restart a complete attempt 2.'
+    }
+    $passed.Add('key disappears in pass 1 attempt 1 and attempt 2 succeeds')
+    $steadyAfterKeyRetry = New-G04DCTestStabilityCollector
+    $steadyAfterKeyRetry.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $null)
+    if ($keyRetryCollector.KeyCount -ne $steadyAfterKeyRetry.KeyCount -or
+        $keyRetryCollector.ValueCount -ne $steadyAfterKeyRetry.ValueCount -or
+        $keyRetryCollector.CanonicalByteCount -ne $steadyAfterKeyRetry.CanonicalByteCount -or
+        $keyRetryCollector.Sha256 -cne $steadyAfterKeyRetry.Sha256) {
+        throw 'A partial failed attempt contaminated the returned digest.'
+    }
+    $passed.Add('partial attempt state never enters the returned digest')
+
+    & $resetC9StabilityFixture {
+        param($Root)
+        $Root.SetValue('TransientValue', 'present', [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $valueRetryState = [pscustomobject]@{ failed = $false }
+    $valueRetryEvents = [Collections.Generic.List[object]]::new()
+    $valueRetryProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$valueRetryEvents.Add($Record)
+        if (!$valueRetryState.failed -and $Record.EventCode -ceq 'pass-progress' -and $Record.AttemptIndex -eq 1 -and $Record.PassIndex -eq 2 -and $Record.RowCount -eq 1) {
+            $valueRetryState.failed = $true
+            $root = $c9StabilityBase.OpenSubKey($c9StabilityNativeRoot, $true)
+            try { $root.DeleteValue('TransientValue', $false) }
+            finally { $root.Dispose() }
+        }
+        elseif ($Record.EventCode -ceq 'attempt-retry' -and $Record.AttemptIndex -eq 1) {
+            $root = $c9StabilityBase.OpenSubKey($c9StabilityNativeRoot, $true)
+            try { $root.SetValue('TransientValue', 'present', [Microsoft.Win32.RegistryValueKind]::String) }
+            finally { $root.Dispose() }
+        }
+    }
+    $valueRetryCollector = New-G04DCTestStabilityCollector
+    $valueRetryCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $valueRetryProgress)
+    $valueRetry = @($valueRetryEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' })
+    if (!$valueRetryState.failed -or $valueRetryCollector.AttemptIndex -ne 2 -or $valueRetry.Count -ne 1 -or
+        [string]$valueRetry[0].FailureCode -cne 'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED') {
+        throw 'A disappearing value in pass 2 did not restart a complete attempt 2.'
+    }
+    $passed.Add('value disappears in pass 2 attempt 1 and attempt 2 succeeds')
+
+    & $resetC9StabilityFixture {
+        param($Root)
+        $Root.SetValue('Mismatch', 'before', [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $mismatchState = [pscustomobject]@{ changed = $false }
+    $mismatchEvents = [Collections.Generic.List[object]]::new()
+    $mismatchProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$mismatchEvents.Add($Record)
+        if (!$mismatchState.changed -and $Record.EventCode -ceq 'pass-end' -and $Record.AttemptIndex -eq 1 -and $Record.PassIndex -eq 1) {
+            $mismatchState.changed = $true
+            $root = $c9StabilityBase.OpenSubKey($c9StabilityNativeRoot, $true)
+            try { $root.SetValue('Mismatch', 'after', [Microsoft.Win32.RegistryValueKind]::String) }
+            finally { $root.Dispose() }
+        }
+    }
+    $mismatchCollector = New-G04DCTestStabilityCollector
+    $mismatchCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $mismatchProgress)
+    $mismatchRetry = @($mismatchEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' })
+    if (!$mismatchState.changed -or $mismatchCollector.AttemptIndex -ne 2 -or $mismatchRetry.Count -ne 1 -or
+        [string]$mismatchRetry[0].FailureCode -cne 'REGISTRY_TRAVERSAL_UNSTABLE') {
+        throw 'A complete-pass mismatch did not trigger a whole-capture retry.'
+    }
+    $passed.Add('complete-pass mismatch retries')
+
+    & $resetC9StabilityFixture $null
+    $thirdAttemptEvents = [Collections.Generic.List[object]]::new()
+    $thirdAttemptProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$thirdAttemptEvents.Add($Record)
+        if ($Record.EventCode -ceq 'pass-start' -and $Record.PassIndex -eq 1 -and $Record.AttemptIndex -le 2) {
+            throw (New-G04DCTestRegistryTraversalException -Code 'REGISTRY_TRAVERSAL_UNSTABLE' -AttemptIndex $Record.AttemptIndex -PassIndex 1 -KeyCount 0 -ValueCount 0 -RawByteCount 0 -ElapsedMilliseconds $Record.AggregateElapsedMilliseconds)
+        }
+    }
+    $thirdAttemptCollector = New-G04DCTestStabilityCollector
+    $thirdAttemptCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $thirdAttemptProgress)
+    if ($thirdAttemptCollector.AttemptIndex -ne 3 -or @($thirdAttemptEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' }).Count -ne 2) {
+        throw 'Two transient attempts did not permit exactly one final attempt.'
+    }
+    $passed.Add('transient failures on attempts 1 and 2 allow attempt 3 success')
+    $retryDelays = @($thirdAttemptEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' } | ForEach-Object { [int]$_.StabilizationDelayMilliseconds })
+    if (($retryDelays -join ',') -cne '250,500' -or @($retryDelays | Where-Object { $_ -notin @(250, 500) }).Count -ne 0) {
+        throw 'Transient stabilization delays were not the exact bounded sequence.'
+    }
+    $passed.Add('deterministic stabilization delays are bounded')
+
+    $exhaustedEvents = [Collections.Generic.List[object]]::new()
+    $exhaustedProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$exhaustedEvents.Add($Record)
+        if ($Record.EventCode -ceq 'pass-start' -and $Record.PassIndex -eq 1) {
+            throw (New-G04DCTestRegistryTraversalException -Code 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' -AttemptIndex $Record.AttemptIndex -PassIndex 1 -KeyCount 0 -ValueCount 0 -RawByteCount 0 -ElapsedMilliseconds $Record.AggregateElapsedMilliseconds)
+        }
+    }
+    $exhaustedCollector = New-G04DCTestStabilityCollector
+    $exhaustedFailure = Get-G04DCTestTraversalFailureFromAction { $exhaustedCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $exhaustedProgress) }
+    $stabilityTerminal = @($exhaustedEvents | Where-Object { $_.EventCode -ceq 'stability-exhausted' })
+    if ([string]$exhaustedFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -or
+        [string]$exhaustedFailure.lastTransientReasonCode -cne 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED' -or
+        $exhaustedFailure.attemptIndex -ne 3 -or $stabilityTerminal.Count -ne 1 -or
+        [string]$stabilityTerminal[0].LastTransientFailureCode -cne 'REGISTRY_TRAVERSAL_KEY_DISAPPEARED') {
+        throw 'Three transient attempts did not seal stability exhaustion and the last transient reason.'
+    }
+    $passed.Add('three transient attempts fail as stability exhausted')
+
+    & $resetC9StabilityFixture {
+        param($Root)
+        $child = $Root.CreateSubKey('ReplaceEntireRoot')
+        $child.Dispose()
+    }
+    $freshHandleState = [pscustomobject]@{ failed = $false; replaced = $false }
+    $freshHandleProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        if (!$freshHandleState.failed -and $Record.EventCode -ceq 'pass-progress' -and $Record.AttemptIndex -eq 1 -and $Record.PassIndex -eq 1 -and $Record.RowCount -eq 1) {
+            $freshHandleState.failed = $true
+            $c9StabilityBase.DeleteSubKeyTree("$c9StabilityNativeRoot\ReplaceEntireRoot", $false)
+        }
+        elseif ($Record.EventCode -ceq 'attempt-retry' -and $Record.AttemptIndex -eq 1) {
+            $c9StabilityBase.DeleteSubKeyTree($c9StabilityNativeRoot, $false)
+            $replacement = $c9StabilityBase.CreateSubKey("$c9StabilityNativeRoot\FreshRoot")
+            $replacement.Dispose()
+            $freshHandleState.replaced = $true
+        }
+    }
+    $freshHandleCollector = New-G04DCTestStabilityCollector
+    $freshHandleCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $freshHandleProgress)
+    if (!$freshHandleState.failed -or !$freshHandleState.replaced -or $freshHandleCollector.AttemptIndex -ne 2 -or
+        $freshHandleCollector.KeyCount -ne 2 -or $freshHandleCollector.ActiveRegistryHandleCount -ne 0) {
+        throw 'A retry did not dispose old handles and open a fresh registry root.'
+    }
+    $passed.Add('fresh registry handles are used for every attempt')
+
+    $deadlineEvents = [Collections.Generic.List[object]]::new()
+    $deadlineProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$deadlineEvents.Add($Record)
+        if ($Record.EventCode -ceq 'pass-start') {
+            throw (New-G04DCTestRegistryTraversalException -Code 'REGISTRY_TRAVERSAL_UNSTABLE' -AttemptIndex 1 -PassIndex 1 -KeyCount 0 -ValueCount 0 -RawByteCount 0 -ElapsedMilliseconds $Record.AggregateElapsedMilliseconds)
+        }
+    }
+    $deadlineCollector = New-G04DCTestStabilityCollector
+    $deadlineWatch = [Diagnostics.Stopwatch]::StartNew()
+    $deadlineFailure = Get-G04DCTestTraversalFailureFromAction { $deadlineCollector.CollectTestClassesRoot64($c9StabilitySubKey, 100, $deadlineProgress) }
+    $deadlineWatch.Stop()
+    if ([string]$deadlineFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_TIMEOUT' -or
+        @($deadlineEvents | Where-Object { $_.EventCode -ceq 'attempt-start' }).Count -ne 1) {
+        throw 'The traversal deadline was reset for a retry.'
+    }
+    $passed.Add('global traversal deadline is not reset')
+    if ($deadlineWatch.ElapsedMilliseconds -ge 250 -or @($deadlineEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' }).Count -ne 0) {
+        throw 'A retry that could not fit its deterministic delay did not stop immediately.'
+    }
+    $passed.Add('timeout during retry stops immediately')
+
+    function Assert-G04DCTestNonTransientNotRetried {
+        param([Parameter(Mandatory = $true)] [string]$Code)
+        $events = [Collections.Generic.List[object]]::new()
+        $progress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+            param($Record)
+            [void]$events.Add($Record)
+            if ($Record.EventCode -ceq 'pass-start') {
+                throw (New-G04DCTestRegistryTraversalException -Code $Code -AttemptIndex 1 -PassIndex 1 -KeyCount 0 -ValueCount 0 -RawByteCount 0 -ElapsedMilliseconds $Record.AggregateElapsedMilliseconds)
+            }
+        }
+        $collector = New-G04DCTestStabilityCollector
+        $failure = Get-G04DCTestTraversalFailureFromAction { $collector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $progress) }
+        if ([string]$failure.detailReasonCode -cne $Code -or
+            @($events | Where-Object { $_.EventCode -ceq 'attempt-start' }).Count -ne 1 -or
+            @($events | Where-Object { $_.EventCode -ceq 'attempt-retry' }).Count -ne 0 -or
+            $collector.ActiveRegistryHandleCount -ne 0) {
+            throw "Non-transient traversal failure was retried: $Code"
+        }
+    }
+    Assert-G04DCTestNonTransientNotRetried -Code 'REGISTRY_TRAVERSAL_ACCESS_DENIED'
+    $passed.Add('access denied is not retried')
+    Assert-G04DCTestNonTransientNotRetried -Code 'REGISTRY_TRAVERSAL_VALUE_READ_FAILED'
+    $passed.Add('value-read failure is not retried')
+    foreach ($ceilingCode in @(
+        'REGISTRY_TRAVERSAL_DEPTH_CEILING',
+        'REGISTRY_TRAVERSAL_KEY_CEILING',
+        'REGISTRY_TRAVERSAL_VALUE_CEILING',
+        'REGISTRY_TRAVERSAL_VALUE_BYTE_CEILING',
+        'REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING'
+    )) {
+        Assert-G04DCTestNonTransientNotRetried -Code $ceilingCode
+    }
+    $passed.Add('every registry traversal ceiling failure is not retried')
+
+    $internalEvents = [Collections.Generic.List[object]]::new()
+    $internalProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$internalEvents.Add($Record)
+        if ($Record.EventCode -ceq 'pass-start') { throw 'unrestricted test-only callback failure' }
+    }
+    $internalCollector = New-G04DCTestStabilityCollector
+    $internalFailure = Get-G04DCTestTraversalFailureFromAction { $internalCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $internalProgress) }
+    if ([string]$internalFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE' -or
+        @($internalEvents | Where-Object { $_.EventCode -ceq 'attempt-retry' }).Count -ne 0) {
+        throw 'An internal registry traversal failure was retried.'
+    }
+    $passed.Add('internal registry traversal failure is not retried')
+    if ($exhaustedCollector.ActiveRegistryHandleCount -ne 0 -or $internalCollector.ActiveRegistryHandleCount -ne 0 -or
+        $thirdAttemptCollector.ActiveRegistryHandleCount -ne 0 -or $keyRetryCollector.ActiveRegistryHandleCount -ne 0) {
+        throw 'Registry handle instrumentation detected a retry cleanup leak.'
+    }
+    $passed.Add('retry cleanup leaves no registry handle')
+
+    & $resetC9StabilityFixture {
+        param($Root)
+        $Root.SetValue('NeverStable', 'a', [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    $neverStableState = [pscustomobject]@{ next = 'b' }
+    $neverStableEvents = [Collections.Generic.List[object]]::new()
+    $neverStableProgress = [Action[DocumentStudio.G04DC.RegistryTraversalProgress]]{
+        param($Record)
+        [void]$neverStableEvents.Add($Record)
+        if ($Record.EventCode -ceq 'pass-end' -and $Record.PassIndex -eq 1) {
+            $root = $c9StabilityBase.OpenSubKey($c9StabilityNativeRoot, $true)
+            try { $root.SetValue('NeverStable', $neverStableState.next, [Microsoft.Win32.RegistryValueKind]::String) }
+            finally { $root.Dispose() }
+            $neverStableState.next = if ($neverStableState.next -ceq 'a') { 'b' } else { 'a' }
+        }
+    }
+    $neverStableCollector = New-G04DCTestStabilityCollector
+    $neverStableFailure = Get-G04DCTestTraversalFailureFromAction { $neverStableCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $neverStableProgress) }
+    if ([string]$neverStableFailure.detailReasonCode -cne 'REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED' -or
+        [string]$neverStableFailure.lastTransientReasonCode -cne 'REGISTRY_TRAVERSAL_UNSTABLE' -or
+        @($neverStableEvents | Where-Object { $_.EventCode -ceq 'pass-end' }).Count -ne 6 -or
+        @($neverStableEvents | Where-Object { $_.EventCode -ceq 'attempt-success' }).Count -ne 0) {
+        throw 'The final digest was accepted without two identical complete passes.'
+    }
+    $passed.Add('final digest still requires two identical complete passes')
+
+    $unrelated = $c9StabilityBase.CreateSubKey($c9UnrelatedNativeRoot)
+    try { $unrelated.SetValue('Sentinel', 'unchanged', [Microsoft.Win32.RegistryValueKind]::String) }
+    finally { $unrelated.Dispose() }
+    $unrelatedBefore = Get-TestRegistryRawSnapshot -NativeSubKey $c9UnrelatedNativeRoot
+    $unrelatedCollector = New-G04DCTestStabilityCollector
+    $unrelatedCollector.CollectTestClassesRoot64($c9StabilitySubKey, 30000, $null)
+    $unrelatedAfter = Get-TestRegistryRawSnapshot -NativeSubKey $c9UnrelatedNativeRoot
+    if ($unrelatedBefore -cne $unrelatedAfter) { throw 'Stabilized collection modified unrelated registry state.' }
+    $passed.Add('unrelated registry state is not modified')
+
+    $thirdEventNames = @($thirdAttemptEvents | ForEach-Object { [string]$_.EventCode })
+    $expectedThirdEvents = @(
+        'attempt-start', 'pass-start', 'attempt-retry',
+        'attempt-start', 'pass-start', 'attempt-retry',
+        'attempt-start', 'pass-start', 'pass-progress', 'pass-end',
+        'pass-start', 'pass-progress', 'pass-end', 'attempt-success'
+    )
+    $forbiddenTelemetryProperties = @('Path', 'RegistryPath', 'KeyName', 'ValueName', 'ValueData', 'Message', 'StackTrace', 'Username')
+    if (($thirdEventNames -join '|') -cne ($expectedThirdEvents -join '|') -or
+        @($thirdAttemptEvents | Where-Object { $_.AttemptIndex -lt 1 -or $_.AttemptIndex -gt 3 -or $_.PassIndex -lt 0 -or $_.PassIndex -gt 2 -or $_.RowCount -ne $_.KeyCount + $_.ValueCount -or $_.AggregateElapsedMilliseconds -lt 0 }).Count -ne 0 -or
+        @($thirdAttemptEvents | Where-Object { @($_.PSObject.Properties.Name | Where-Object { $_ -cin $forbiddenTelemetryProperties }).Count -ne 0 }).Count -ne 0) {
+        throw 'Stabilized attempt/pass telemetry is nondeterministic or contains registry content.'
+    }
+    $passed.Add('stabilized attempt pass telemetry is deterministic and content free')
+}
+finally {
+    $c9StabilityBase.DeleteSubKeyTree($c9StabilityNativeRoot, $false)
+    $c9StabilityBase.DeleteSubKeyTree($c9UnrelatedNativeRoot, $false)
+    $c9StabilityBase.Dispose()
 }
 
 $shortcutRetryRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-shortcut-retry-' + [guid]::NewGuid().ToString('N'))
@@ -2585,5 +2957,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 327) { throw "Expected 327 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 346) { throw "Expected 346 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

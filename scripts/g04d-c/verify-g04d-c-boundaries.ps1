@@ -57,6 +57,7 @@ foreach ($directRegistryBoundary in @(
     'DirectClassRegistryDigestCollector', 'RegistryHive.ClassesRoot', 'RegistryView.Registry64',
     'sealed class RegistryTraversalException', 'enum RegistryTraversalFailureCode',
     'RegistryTraversalProgress',
+    'MaximumCaptureAttempts = 3', 'Thread.Sleep(delayMilliseconds)',
     'RegQueryValueExW', 'CollectClassesRoot64', 'REGISTRY_TRAVERSAL_ACCESS_DENIED',
     'REGISTRY_TRAVERSAL_KEY_DISAPPEARED', 'REGISTRY_TRAVERSAL_VALUE_DISAPPEARED',
     'REGISTRY_TRAVERSAL_VALUE_READ_FAILED', 'REGISTRY_TRAVERSAL_INTERNAL_FAILURE',
@@ -71,7 +72,8 @@ foreach ($directRegistryBoundary in @(
 foreach ($typedRegistryBoundary in @(
     'Get-G04DCSafeRegistryTraversalFailure', 'New-G04DCMachineStatePrecheckBlockedResult',
     'Write-G04DCDurableJson', 'detailReasonCode', 'attemptIndex', 'passIndex',
-    'passLocalRowCount', 'aggregateElapsedMilliseconds', 'failureElapsedMilliseconds'
+    'passLocalRowCount', 'aggregateElapsedMilliseconds', 'failureElapsedMilliseconds',
+    'lastTransientReasonCode', 'stabilizationDelayMilliseconds'
 )) {
     if (!$allProof.Contains($typedRegistryBoundary)) { throw "G04D-C typed HKCR evidence boundary is missing: $typedRegistryBoundary" }
 }
@@ -121,7 +123,16 @@ foreach ($classRegistryRegression in @(
     'typed HKCR failure evidence is durable before cleanup',
     'direct HKCR attempt pass telemetry is deterministic and content free',
     'typed HKCR telemetry scales past 208663 rows without unbounded evidence',
-    'Expected 327 fail-closed cases'
+    'stable two-pass capture succeeds on attempt 1',
+    'key disappears in pass 1 attempt 1 and attempt 2 succeeds',
+    'value disappears in pass 2 attempt 1 and attempt 2 succeeds',
+    'complete-pass mismatch retries',
+    'three transient attempts fail as stability exhausted',
+    'global traversal deadline is not reset',
+    'every registry traversal ceiling failure is not retried',
+    'final digest still requires two identical complete passes',
+    'stabilized attempt pass telemetry is deterministic and content free',
+    'Expected 346 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
@@ -212,7 +223,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 327 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 346 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }

@@ -43,6 +43,33 @@ namespace DocumentStudio.G04DC
             long rawByteCount,
             long elapsedMilliseconds,
             Exception innerException)
+            : this(
+                failureCode,
+                nativeStatus,
+                attemptIndex,
+                passIndex,
+                rowCount,
+                keyCount,
+                valueCount,
+                rawByteCount,
+                elapsedMilliseconds,
+                innerException,
+                null)
+        {
+        }
+
+        public RegistryTraversalException(
+            RegistryTraversalFailureCode failureCode,
+            int? nativeStatus,
+            int attemptIndex,
+            int passIndex,
+            int rowCount,
+            int keyCount,
+            int valueCount,
+            long rawByteCount,
+            long elapsedMilliseconds,
+            Exception innerException,
+            RegistryTraversalFailureCode? lastTransientFailureCode)
             : base("[" + failureCode.ToString() + "] Registry traversal failed.", innerException)
         {
             if (!Enum.IsDefined(typeof(RegistryTraversalFailureCode), failureCode)) throw new ArgumentOutOfRangeException("failureCode");
@@ -54,6 +81,17 @@ namespace DocumentStudio.G04DC
             if (rowCount != keyCount + valueCount) throw new ArgumentException("Registry traversal row count is inconsistent.");
             if (rawByteCount < 0) throw new ArgumentOutOfRangeException("rawByteCount");
             if (elapsedMilliseconds < 0) throw new ArgumentOutOfRangeException("elapsedMilliseconds");
+            if (failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED)
+            {
+                if (!lastTransientFailureCode.HasValue || !IsTransient(lastTransientFailureCode.Value))
+                {
+                    throw new ArgumentException("Stability exhaustion requires a known transient reason.");
+                }
+            }
+            else if (lastTransientFailureCode.HasValue)
+            {
+                throw new ArgumentException("Only stability exhaustion may retain a last transient reason.");
+            }
 
             FailureCode = failureCode;
             NativeStatus = nativeStatus;
@@ -64,6 +102,7 @@ namespace DocumentStudio.G04DC
             ValueCount = valueCount;
             RawByteCount = rawByteCount;
             ElapsedMilliseconds = elapsedMilliseconds;
+            LastTransientFailureCode = lastTransientFailureCode;
         }
 
         public RegistryTraversalFailureCode FailureCode { get; private set; }
@@ -75,6 +114,14 @@ namespace DocumentStudio.G04DC
         public int ValueCount { get; private set; }
         public long RawByteCount { get; private set; }
         public long ElapsedMilliseconds { get; private set; }
+        public RegistryTraversalFailureCode? LastTransientFailureCode { get; private set; }
+
+        private static bool IsTransient(RegistryTraversalFailureCode failureCode)
+        {
+            return failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED ||
+                failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_DISAPPEARED ||
+                failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE;
+        }
     }
 
     public sealed class RegistryTraversalProgress
@@ -88,23 +135,81 @@ namespace DocumentStudio.G04DC
             int valueCount,
             long rawByteCount,
             long aggregateElapsedMilliseconds)
+            : this(
+                eventCode,
+                attemptIndex,
+                passIndex,
+                rowCount,
+                keyCount,
+                valueCount,
+                rawByteCount,
+                aggregateElapsedMilliseconds,
+                null,
+                null,
+                0)
+        {
+        }
+
+        public RegistryTraversalProgress(
+            string eventCode,
+            int attemptIndex,
+            int passIndex,
+            int rowCount,
+            int keyCount,
+            int valueCount,
+            long rawByteCount,
+            long aggregateElapsedMilliseconds,
+            RegistryTraversalFailureCode? failureCode,
+            RegistryTraversalFailureCode? lastTransientFailureCode,
+            int stabilizationDelayMilliseconds)
         {
             if (eventCode != "attempt-start" &&
                 eventCode != "pass-start" &&
                 eventCode != "pass-progress" &&
                 eventCode != "pass-end" &&
+                eventCode != "attempt-retry" &&
+                eventCode != "stability-exhausted" &&
                 eventCode != "attempt-success")
             {
                 throw new ArgumentOutOfRangeException("eventCode");
             }
-            if (attemptIndex != 1) throw new ArgumentOutOfRangeException("attemptIndex");
+            if (attemptIndex < 1 || attemptIndex > 3) throw new ArgumentOutOfRangeException("attemptIndex");
             if (passIndex < 0 || passIndex > 2) throw new ArgumentOutOfRangeException("passIndex");
+            if ((eventCode == "attempt-start" && passIndex != 0) ||
+                (eventCode != "attempt-start" && passIndex == 0) ||
+                (eventCode == "attempt-success" && passIndex != 2))
+            {
+                throw new ArgumentException("Traversal event pass index is invalid.");
+            }
             if (rowCount < 0 || keyCount < 0 || valueCount < 0 || rowCount != keyCount + valueCount)
             {
                 throw new ArgumentOutOfRangeException("rowCount");
             }
             if (rawByteCount < 0) throw new ArgumentOutOfRangeException("rawByteCount");
             if (aggregateElapsedMilliseconds < 0) throw new ArgumentOutOfRangeException("aggregateElapsedMilliseconds");
+            if (eventCode == "attempt-retry")
+            {
+                if (!failureCode.HasValue || !IsTransient(failureCode.Value) || lastTransientFailureCode.HasValue ||
+                    (attemptIndex == 1 && stabilizationDelayMilliseconds != 250) ||
+                    (attemptIndex == 2 && stabilizationDelayMilliseconds != 500) ||
+                    attemptIndex == 3)
+                {
+                    throw new ArgumentException("Attempt retry evidence is invalid.");
+                }
+            }
+            else if (eventCode == "stability-exhausted")
+            {
+                if (failureCode != RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED ||
+                    !lastTransientFailureCode.HasValue || !IsTransient(lastTransientFailureCode.Value) ||
+                    attemptIndex != 3 || stabilizationDelayMilliseconds != 0)
+                {
+                    throw new ArgumentException("Stability exhaustion evidence is invalid.");
+                }
+            }
+            else if (failureCode.HasValue || lastTransientFailureCode.HasValue || stabilizationDelayMilliseconds != 0)
+            {
+                throw new ArgumentException("Non-retry traversal evidence may not contain retry details.");
+            }
 
             EventCode = eventCode;
             AttemptIndex = attemptIndex;
@@ -114,6 +219,9 @@ namespace DocumentStudio.G04DC
             ValueCount = valueCount;
             RawByteCount = rawByteCount;
             AggregateElapsedMilliseconds = aggregateElapsedMilliseconds;
+            FailureCode = failureCode;
+            LastTransientFailureCode = lastTransientFailureCode;
+            StabilizationDelayMilliseconds = stabilizationDelayMilliseconds;
         }
 
         public string EventCode { get; private set; }
@@ -124,6 +232,16 @@ namespace DocumentStudio.G04DC
         public int ValueCount { get; private set; }
         public long RawByteCount { get; private set; }
         public long AggregateElapsedMilliseconds { get; private set; }
+        public RegistryTraversalFailureCode? FailureCode { get; private set; }
+        public RegistryTraversalFailureCode? LastTransientFailureCode { get; private set; }
+        public int StabilizationDelayMilliseconds { get; private set; }
+
+        private static bool IsTransient(RegistryTraversalFailureCode failureCode)
+        {
+            return failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED ||
+                failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_DISAPPEARED ||
+                failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE;
+        }
     }
 
     public sealed class DirectClassRegistryDigestCollector
@@ -132,6 +250,7 @@ namespace DocumentStudio.G04DC
         private const int ErrorFileNotFound = 2;
         private const int ErrorAccessDenied = 5;
         private const int ErrorMoreData = 234;
+        private const int MaximumCaptureAttempts = 3;
         private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
 
         private readonly int maximumKeys;
@@ -146,6 +265,7 @@ namespace DocumentStudio.G04DC
         private long observedRawByteCount;
         private int currentAttemptIndex;
         private int currentPassIndex;
+        private int activeRegistryHandleCount;
 
         public DirectClassRegistryDigestCollector(
             int maximumKeys,
@@ -173,6 +293,7 @@ namespace DocumentStudio.G04DC
         public long RawByteCount { get { return Interlocked.Read(ref observedRawByteCount); } }
         public int AttemptIndex { get { return Volatile.Read(ref currentAttemptIndex); } }
         public int PassIndex { get { return Volatile.Read(ref currentPassIndex); } }
+        public int ActiveRegistryHandleCount { get { return Volatile.Read(ref activeRegistryHandleCount); } }
         public int KeyCount { get; private set; }
         public int ValueCount { get; private set; }
         public long CanonicalByteCount { get; private set; }
@@ -203,39 +324,93 @@ namespace DocumentStudio.G04DC
         private void Collect(RegistryHive hive, string subKey, long budgetMilliseconds, Action<RegistryTraversalProgress> progress)
         {
             Stopwatch total = Stopwatch.StartNew();
-            Volatile.Write(ref currentAttemptIndex, 1);
-            Volatile.Write(ref currentPassIndex, 1);
-            ResetObservedCounts();
             try
             {
                 if (budgetMilliseconds < 1)
                 {
                     throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_TIMEOUT, null, total, null, null);
                 }
-                PublishTraversalEvent("attempt-start", total, progress);
-                PublishTraversalEvent("pass-start", total, progress);
-                PassResult first = CapturePass(hive, subKey, budgetMilliseconds, total, progress);
-                PublishTraversalEvent("pass-end", total, progress);
-                Volatile.Write(ref currentPassIndex, 2);
-                ResetObservedCounts();
-                PublishTraversalEvent("pass-start", total, progress);
-                PassResult second = CapturePass(hive, subKey, budgetMilliseconds, total, progress);
-                PublishTraversalEvent("pass-end", total, progress);
-                if (first.KeyCount != second.KeyCount ||
-                    first.ValueCount != second.ValueCount ||
-                    first.RawByteCount != second.RawByteCount ||
-                    first.CanonicalByteCount != second.CanonicalByteCount ||
-                    !String.Equals(first.Sha256, second.Sha256, StringComparison.Ordinal))
+                ClearReturnedResult();
+                RegistryTraversalException lastTransient = null;
+                for (int attemptIndex = 1; attemptIndex <= MaximumCaptureAttempts; attemptIndex++)
                 {
-                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE, null, total, null, null);
+                    Volatile.Write(ref currentAttemptIndex, attemptIndex);
+                    Volatile.Write(ref currentPassIndex, 1);
+                    ResetObservedCounts();
+                    PublishTraversalEvent("attempt-start", total, progress);
+                    try
+                    {
+                        PublishTraversalEvent("pass-start", total, progress);
+                        PassResult first = CapturePass(hive, subKey, budgetMilliseconds, total, progress);
+                        PublishTraversalEvent("pass-end", total, progress);
+                        Volatile.Write(ref currentPassIndex, 2);
+                        ResetObservedCounts();
+                        PublishTraversalEvent("pass-start", total, progress);
+                        PassResult second = CapturePass(hive, subKey, budgetMilliseconds, total, progress);
+                        PublishTraversalEvent("pass-end", total, progress);
+                        if (first.KeyCount != second.KeyCount ||
+                            first.ValueCount != second.ValueCount ||
+                            first.RawByteCount != second.RawByteCount ||
+                            first.CanonicalByteCount != second.CanonicalByteCount ||
+                            !String.Equals(first.Sha256, second.Sha256, StringComparison.Ordinal))
+                        {
+                            throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE, null, total, null, null);
+                        }
+                        KeyCount = first.KeyCount;
+                        ValueCount = first.ValueCount;
+                        Volatile.Write(ref observedRowCount, first.RowCount);
+                        Volatile.Write(ref observedKeyCount, first.KeyCount);
+                        Volatile.Write(ref observedValueCount, first.ValueCount);
+                        Interlocked.Exchange(ref observedRawByteCount, first.RawByteCount);
+                        CanonicalByteCount = first.CanonicalByteCount;
+                        Sha256 = first.Sha256;
+                        PublishTraversalEvent("attempt-success", total, progress);
+                        return;
+                    }
+                    catch (Exception exception)
+                    {
+                        RegistryTraversalException typedFailure = FindTypedFailure(exception, 8);
+                        if (typedFailure == null) throw;
+                        if (!IsTransient(typedFailure.FailureCode)) throw typedFailure;
+                        lastTransient = typedFailure;
+                        ClearReturnedResult();
+                        ResetObservedCounts();
+                        if (attemptIndex == MaximumCaptureAttempts)
+                        {
+                            PublishTraversalEvent(
+                                "stability-exhausted",
+                                total,
+                                progress,
+                                RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED,
+                                lastTransient.FailureCode,
+                                0);
+                            throw new RegistryTraversalException(
+                                RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_STABILITY_EXHAUSTED,
+                                lastTransient.NativeStatus,
+                                attemptIndex,
+                                lastTransient.PassIndex,
+                                lastTransient.RowCount,
+                                lastTransient.KeyCount,
+                                lastTransient.ValueCount,
+                                lastTransient.RawByteCount,
+                                total.ElapsedMilliseconds,
+                                lastTransient,
+                                lastTransient.FailureCode);
+                        }
+                        int delayMilliseconds = attemptIndex == 1 ? 250 : 500;
+                        CheckRetryBudget(total, budgetMilliseconds, delayMilliseconds);
+                        PublishTraversalEvent("attempt-retry", total, progress, lastTransient.FailureCode, null, delayMilliseconds);
+                        CheckRetryBudget(total, budgetMilliseconds, delayMilliseconds);
+                        Thread.Sleep(delayMilliseconds);
+                        CheckBudget(total, budgetMilliseconds, 0);
+                    }
                 }
-                KeyCount = first.KeyCount;
-                ValueCount = first.ValueCount;
-                Volatile.Write(ref observedRowCount, first.RowCount);
-                Interlocked.Exchange(ref observedRawByteCount, first.RawByteCount);
-                CanonicalByteCount = first.CanonicalByteCount;
-                Sha256 = first.Sha256;
-                PublishTraversalEvent("attempt-success", total, progress);
+                throw CreateFailure(
+                    RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_INTERNAL_FAILURE,
+                    null,
+                    total,
+                    null,
+                    lastTransient);
             }
             catch (RegistryTraversalException)
             {
@@ -251,6 +426,8 @@ namespace DocumentStudio.G04DC
             }
             catch (Exception exception)
             {
+                RegistryTraversalException typedFailure = FindTypedFailure(exception, 8);
+                if (typedFailure != null) throw typedFailure;
                 throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_INTERNAL_FAILURE, null, total, null, exception);
             }
             finally
@@ -268,57 +445,66 @@ namespace DocumentStudio.G04DC
             Action<RegistryTraversalProgress> progress)
         {
             CheckBudget(total, budgetMilliseconds, RowCount);
-            using (RegistryKey baseKey = RegistryKey.OpenBaseKey(hive, RegistryView.Registry64))
+            RegistryKey baseKey = null;
+            RegistryKey root = null;
+            bool disposeRoot = false;
+            try
             {
-                RegistryKey root = baseKey;
-                bool disposeRoot = false;
+                baseKey = RegistryKey.OpenBaseKey(hive, RegistryView.Registry64);
+                Interlocked.Increment(ref activeRegistryHandleCount);
+                root = baseKey;
                 if (!String.IsNullOrEmpty(subKey))
                 {
                     root = baseKey.OpenSubKey(subKey, false);
-                    disposeRoot = true;
                     if (root == null)
                     {
                         throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED, null, total, null, null);
                     }
+                    Interlocked.Increment(ref activeRegistryHandleCount);
+                    disposeRoot = true;
                 }
+                CaptureBuffer capture = new CaptureBuffer(maximumCanonicalBytes, Utf8);
                 try
                 {
-                    CaptureBuffer capture = new CaptureBuffer(maximumCanonicalBytes, Utf8);
-                    try
+                    TraverseKey(root, String.Empty, 0, capture, total, budgetMilliseconds, progress);
+                    CheckBudget(total, budgetMilliseconds, capture.RowCount);
+                    Stopwatch hashStopwatch = Stopwatch.StartNew();
+                    string digest;
+                    using (SHA256 hash = SHA256.Create())
                     {
-                        TraverseKey(root, String.Empty, 0, capture, total, budgetMilliseconds, progress);
-                        CheckBudget(total, budgetMilliseconds, capture.RowCount);
-                        Stopwatch hashStopwatch = Stopwatch.StartNew();
-                        string digest;
-                        using (SHA256 hash = SHA256.Create())
-                        {
-                            capture.Stream.Position = 0;
-                            digest = ToLowerHex(hash.ComputeHash(capture.Stream));
-                        }
-                        hashStopwatch.Stop();
-                        CanonicalHashElapsedMilliseconds += hashStopwatch.ElapsedMilliseconds;
-                        CheckBudget(total, budgetMilliseconds, capture.RowCount);
-                        return new PassResult(
-                            capture.KeyCount,
-                            capture.ValueCount,
-                            capture.RawByteCount,
-                            capture.Stream.Length,
-                            digest);
+                        capture.Stream.Position = 0;
+                        digest = ToLowerHex(hash.ComputeHash(capture.Stream));
                     }
-                    catch (CanonicalByteCeilingException exception)
-                    {
-                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING, null, total, capture, exception);
-                    }
-                    finally
-                    {
-                        NormalizationElapsedMilliseconds += capture.NormalizationElapsedMilliseconds;
-                        ReadElapsedMilliseconds += capture.ReadElapsedMilliseconds;
-                        capture.Dispose();
-                    }
+                    hashStopwatch.Stop();
+                    CanonicalHashElapsedMilliseconds += hashStopwatch.ElapsedMilliseconds;
+                    CheckBudget(total, budgetMilliseconds, capture.RowCount);
+                    return new PassResult(
+                        capture.KeyCount,
+                        capture.ValueCount,
+                        capture.RawByteCount,
+                        capture.Stream.Length,
+                        digest);
+                }
+                catch (CanonicalByteCeilingException exception)
+                {
+                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_CANONICAL_BYTE_CEILING, null, total, capture, exception);
                 }
                 finally
                 {
-                    if (disposeRoot && root != null) root.Dispose();
+                    NormalizationElapsedMilliseconds += capture.NormalizationElapsedMilliseconds;
+                    ReadElapsedMilliseconds += capture.ReadElapsedMilliseconds;
+                    capture.Dispose();
+                }
+            }
+            finally
+            {
+                try
+                {
+                    if (disposeRoot && root != null) DisposeRegistryKey(root);
+                }
+                finally
+                {
+                    if (baseKey != null) DisposeRegistryKey(baseKey);
                 }
             }
         }
@@ -372,31 +558,37 @@ namespace DocumentStudio.G04DC
                 CheckBudget(total, budgetMilliseconds, capture.RowCount);
                 string name = subKeyNames[subKeyIndex];
                 long openStarted = Stopwatch.GetTimestamp();
-                RegistryKey child = key.OpenSubKey(name, false);
-                capture.AddReadTicks(Stopwatch.GetTimestamp() - openStarted);
-                if (child == null)
+                RegistryKey child = null;
+                try
                 {
-                    string[] subKeyNamesNow = key.GetSubKeyNames();
-                    SortNames(subKeyNamesNow);
-                    bool stillListed = false;
-                    for (int currentIndex = 0; currentIndex < subKeyNamesNow.Length; currentIndex++)
+                    child = key.OpenSubKey(name, false);
+                    capture.AddReadTicks(Stopwatch.GetTimestamp() - openStarted);
+                    if (child == null)
                     {
-                        if (String.Equals(subKeyNamesNow[currentIndex], name, StringComparison.Ordinal))
+                        string[] subKeyNamesNow = key.GetSubKeyNames();
+                        SortNames(subKeyNamesNow);
+                        bool stillListed = false;
+                        for (int currentIndex = 0; currentIndex < subKeyNamesNow.Length; currentIndex++)
                         {
-                            stillListed = true;
-                            break;
+                            if (String.Equals(subKeyNamesNow[currentIndex], name, StringComparison.Ordinal))
+                            {
+                                stillListed = true;
+                                break;
+                            }
                         }
+                        if (stillListed)
+                        {
+                            throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, null, total, capture, null);
+                        }
+                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED, null, total, capture, null);
                     }
-                    if (stillListed)
-                    {
-                        throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_ACCESS_DENIED, null, total, capture, null);
-                    }
-                    throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED, null, total, capture, null);
-                }
-                using (child)
-                {
+                    Interlocked.Increment(ref activeRegistryHandleCount);
                     string childPath = relativePath.Length == 0 ? name : relativePath + "\\" + name;
                     TraverseKey(child, childPath, depth + 1, capture, total, budgetMilliseconds, progress);
+                }
+                finally
+                {
+                    if (child != null) DisposeRegistryKey(child);
                 }
             }
 
@@ -478,6 +670,14 @@ namespace DocumentStudio.G04DC
             Interlocked.Exchange(ref observedRawByteCount, 0);
         }
 
+        private void ClearReturnedResult()
+        {
+            KeyCount = 0;
+            ValueCount = 0;
+            CanonicalByteCount = 0;
+            Sha256 = null;
+        }
+
         private void PublishProgress(CaptureBuffer capture, Stopwatch total, Action<RegistryTraversalProgress> progress)
         {
             Volatile.Write(ref observedRowCount, capture.RowCount);
@@ -492,6 +692,17 @@ namespace DocumentStudio.G04DC
 
         private void PublishTraversalEvent(string eventCode, Stopwatch total, Action<RegistryTraversalProgress> progress)
         {
+            PublishTraversalEvent(eventCode, total, progress, null, null, 0);
+        }
+
+        private void PublishTraversalEvent(
+            string eventCode,
+            Stopwatch total,
+            Action<RegistryTraversalProgress> progress,
+            RegistryTraversalFailureCode? failureCode,
+            RegistryTraversalFailureCode? lastTransientFailureCode,
+            int stabilizationDelayMilliseconds)
+        {
             if (progress == null) return;
             progress(new RegistryTraversalProgress(
                 eventCode,
@@ -501,7 +712,10 @@ namespace DocumentStudio.G04DC
                 ObservedKeyCount,
                 ObservedValueCount,
                 RawByteCount,
-                total.ElapsedMilliseconds));
+                total.ElapsedMilliseconds,
+                failureCode,
+                lastTransientFailureCode,
+                stabilizationDelayMilliseconds));
         }
 
         private void SortNames(string[] names)
@@ -527,12 +741,56 @@ namespace DocumentStudio.G04DC
             }
         }
 
+        private void CheckRetryBudget(Stopwatch stopwatch, long budgetMilliseconds, int delayMilliseconds)
+        {
+            if (stopwatch.ElapsedMilliseconds > budgetMilliseconds - delayMilliseconds)
+            {
+                throw CreateFailure(RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_TIMEOUT, null, stopwatch, null, null);
+            }
+        }
+
+        private static bool IsTransient(RegistryTraversalFailureCode failureCode)
+        {
+            return failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_KEY_DISAPPEARED ||
+                failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_VALUE_DISAPPEARED ||
+                failureCode == RegistryTraversalFailureCode.REGISTRY_TRAVERSAL_UNSTABLE;
+        }
+
+        private static RegistryTraversalException FindTypedFailure(Exception exception, int maximumDepth)
+        {
+            Exception current = exception;
+            for (int depth = 0; depth < maximumDepth && current != null; depth++)
+            {
+                RegistryTraversalException typed = current as RegistryTraversalException;
+                if (typed != null) return typed;
+                current = current.InnerException;
+            }
+            return null;
+        }
+
+        private void DisposeRegistryKey(RegistryKey key)
+        {
+            try { key.Dispose(); }
+            finally { Interlocked.Decrement(ref activeRegistryHandleCount); }
+        }
+
         private RegistryTraversalException CreateFailure(
             RegistryTraversalFailureCode failureCode,
             int? nativeStatus,
             Stopwatch total,
             CaptureBuffer capture,
             Exception innerException)
+        {
+            return CreateFailure(failureCode, nativeStatus, total, capture, innerException, null);
+        }
+
+        private RegistryTraversalException CreateFailure(
+            RegistryTraversalFailureCode failureCode,
+            int? nativeStatus,
+            Stopwatch total,
+            CaptureBuffer capture,
+            Exception innerException,
+            RegistryTraversalFailureCode? lastTransientFailureCode)
         {
             int keyCount = capture == null ? ObservedKeyCount : capture.KeyCount;
             int valueCount = capture == null ? ObservedValueCount : capture.ValueCount;
@@ -547,7 +805,8 @@ namespace DocumentStudio.G04DC
                 valueCount,
                 rawByteCount,
                 total == null ? 0L : total.ElapsedMilliseconds,
-                innerException);
+                innerException,
+                lastTransientFailureCode);
         }
 
         private static string ToLowerHex(byte[] bytes)
