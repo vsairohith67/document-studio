@@ -50,8 +50,9 @@ foreach ($c13Boundary in @(
     }
 }
 foreach ($onlineBoundary in @(
-    "@('verify', '/pa', '/all', '/v', '/tw', '/o', '2:10.0.26100.0'",
-    'Number of warnings:', 'VerifyOnlineFileTrust', 'BuildOnlineChain',
+    "@('verify', '/pa', '/all', '/v', '/tw'", 'ONLINE_PROVENANCE_TARGET_OS_MISMATCH',
+    "targetOsEnforcement = 'exact-verifier-host-build'", 'Number of signatures successfully Verified:',
+    'Number of warnings:', 'Number of errors:', 'VerifyOnlineFileTrust', 'BuildOnlineChain',
     'urlRetrievalTimeoutMilliseconds', 'signerChainExcludeRoot = ''good''',
     'timestampChainExcludeRoot = ''good''', 'canonicalRecordContainsRawConsoleOutput = $false',
     'canonicalRecordContainsCertificateSubjectText = $false', 'injected-windows-sdk-10.0.26100.0-x64'

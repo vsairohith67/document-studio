@@ -160,7 +160,7 @@ function Assert-G04DCOnlineProvenanceRecordModel {
     Assert-G04DCProvenanceExactProperties -Value $Record.authenticode -Names @('signatureDigestAlgorithm', 'signatureDigestAlgorithmOid', 'timestampType', 'timestampUtc', 'signerLeafDerSha256', 'signerLeafThumbprint', 'timestampLeafDerSha256', 'timestampLeafThumbprint', 'signerChain', 'timestampChain', 'revocation') | Out-Null
     Assert-G04DCProvenanceExactProperties -Value $Record.authenticode.revocation -Names @('signerChainExcludeRoot', 'timestampChainExcludeRoot', 'evidenceMode') | Out-Null
     Assert-G04DCProvenanceExactProperties -Value $Record.verification -Names @('accepted', 'signTool', 'winVerifyTrust', 'signerChain', 'timestampChain', 'urlRetrievalTimeoutMilliseconds', 'identityChecks') | Out-Null
-    Assert-G04DCProvenanceExactProperties -Value $Record.verification.signTool -Names @('accepted', 'exitCode', 'targetOs', 'allEmbeddedSignatures', 'timestampRequired', 'warningCount') | Out-Null
+    Assert-G04DCProvenanceExactProperties -Value $Record.verification.signTool -Names @('accepted', 'exitCode', 'targetOs', 'targetOsEnforcement', 'allEmbeddedSignatures', 'timestampRequired', 'warningCount') | Out-Null
     Assert-G04DCProvenanceExactProperties -Value $Record.verification.winVerifyTrust -Names @('accepted', 'statusHex', 'revocationChecks', 'cacheOnly') | Out-Null
     foreach ($chainName in @('signerChain', 'timestampChain')) {
         Assert-G04DCProvenanceExactProperties -Value $Record.verification.$chainName -Names @('accepted', 'errorStatusHex', 'errorStatusNames', 'policyErrorHex', 'policy', 'certificateSignaturesValid', 'revocationKnownGood') | Out-Null
@@ -203,7 +203,8 @@ function Assert-G04DCOnlineProvenanceRecordModel {
         [string]$Record.authenticode.timestampLeafDerSha256 -ceq [string]$Record.authenticode.timestampChain[0].derSha256 -and
         [string]$Record.authenticode.timestampLeafThumbprint -ceq [string]$Record.authenticode.timestampChain[0].thumbprint -and
         [bool]$Record.verification.accepted -and [bool]$Record.verification.signTool.accepted -and [int]$Record.verification.signTool.exitCode -eq 0 -and
-        [string]$Record.verification.signTool.targetOs -ceq '2:10.0.26100.0' -and [bool]$Record.verification.signTool.allEmbeddedSignatures -and
+        [string]$Record.verification.signTool.targetOs -ceq '2:10.0.26100.0' -and [string]$Record.verification.signTool.targetOsEnforcement -ceq 'exact-verifier-host-build' -and
+        [bool]$Record.verification.signTool.allEmbeddedSignatures -and
         [bool]$Record.verification.signTool.timestampRequired -and [int]$Record.verification.signTool.warningCount -eq 0 -and
         [bool]$Record.verification.winVerifyTrust.accepted -and [string]$Record.verification.winVerifyTrust.statusHex -ceq '0x00000000' -and
         [string]$Record.verification.winVerifyTrust.revocationChecks -ceq 'whole-chain-excluding-root' -and ![bool]$Record.verification.winVerifyTrust.cacheOnly -and

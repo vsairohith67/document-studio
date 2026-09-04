@@ -90,7 +90,7 @@ function New-G04DCSyntheticOnlineRecord {
         authenticode = [ordered]@{ signatureDigestAlgorithm = 'sha256'; signatureDigestAlgorithmOid = '2.16.840.1.101.3.4.2.1'; timestampType = 'embedded-authenticode-timestamp'; timestampUtc = '2026-07-23T13:18:03.0000000Z'; signerLeafDerSha256 = ('a' * 64); signerLeafThumbprint = $expected.SignerThumbprint; timestampLeafDerSha256 = ('d' * 64); timestampLeafThumbprint = $expected.TimestampSignerThumbprint; signerChain = $signer; timestampChain = $timestamp; revocation = [ordered]@{ signerChainExcludeRoot = 'good'; timestampChainExcludeRoot = 'good'; evidenceMode = 'fresh-windows-online-chain-results' } }
         verification = [ordered]@{
             accepted = $true
-            signTool = [ordered]@{ accepted = $true; exitCode = 0; targetOs = '2:10.0.26100.0'; allEmbeddedSignatures = $true; timestampRequired = $true; warningCount = 0 }
+            signTool = [ordered]@{ accepted = $true; exitCode = 0; targetOs = '2:10.0.26100.0'; targetOsEnforcement = 'exact-verifier-host-build'; allEmbeddedSignatures = $true; timestampRequired = $true; warningCount = 0 }
             winVerifyTrust = [ordered]@{ accepted = $true; statusHex = '0x00000000'; revocationChecks = 'whole-chain-excluding-root'; cacheOnly = $false }
             signerChain = [ordered]@{ accepted = $true; errorStatusHex = '0x00000000'; errorStatusNames = @(); policyErrorHex = '0x00000000'; policy = 'AUTHENTICODE'; certificateSignaturesValid = $true; revocationKnownGood = $true }
             timestampChain = [ordered]@{ accepted = $true; errorStatusHex = '0x00000000'; errorStatusNames = @(); policyErrorHex = '0x00000000'; policy = 'AUTHENTICODE_TS'; certificateSignaturesValid = $true; revocationKnownGood = $true }

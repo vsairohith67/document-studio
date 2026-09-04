@@ -106,15 +106,22 @@ if (!$signature.SignerCertificate -or !$signature.TimeStamperCertificate) {
 $signerLeafDerSha256 = Get-G04DCSha256Bytes -Bytes $signature.SignerCertificate.RawData
 $timestampLeafDerSha256 = Get-G04DCSha256Bytes -Bytes $signature.TimeStamperCertificate.RawData
 
-$signToolArguments = @('verify', '/pa', '/all', '/v', '/tw', '/o', '2:10.0.26100.0', $msiItem.FullName)
+$os = Get-CimInstance Win32_OperatingSystem
+if ([string]$os.Version -notmatch '^10\.0\.26100(?:\.|$)' -or [string]$os.BuildNumber -cne '26100' -or [string]$os.OSArchitecture -notmatch '64') {
+    throw '[ONLINE_PROVENANCE_TARGET_OS_MISMATCH] SignTool verification must execute on the Windows Server 2025 build 26100 x64 verifier.'
+}
+# SignTool rejects /o together with /pa. Bind the target OS by requiring the verifier
+# itself to be build 26100, then use the default authentication policy for the MSI.
+$signToolArguments = @('verify', '/pa', '/all', '/v', '/tw', $msiItem.FullName)
 $signToolOutput = @(& $signToolItem.FullName @signToolArguments 2>&1 | ForEach-Object { [string]$_ })
 $signToolExitCode = $LASTEXITCODE
 $signToolText = ($signToolOutput -join "`r`n") + "`r`n"
 Write-G04DCSanitizedLog -Path (Join-Path $evidence 'signtool-sanitized.log') -Text $signToolText -SensitivePaths @($msiItem.FullName, $evidence, $env:USERPROFILE, $env:TEMP)
 $digestMatch = [regex]::Match($signToolText, '(?im)^Hash of file \(([a-z0-9-]+)\):')
 $signToolAccepted = $signToolExitCode -eq 0 -and
-    $signToolText -match '(?im)^Successfully verified:\s*1\s*$' -and
+    $signToolText -match '(?im)^Number of signatures successfully Verified:\s*1\s*$' -and
     $signToolText -match '(?im)^Number of warnings:\s*0\s*$' -and
+    $signToolText -match '(?im)^Number of errors:\s*0\s*$' -and
     $signToolText -notmatch '(?im)^SignTool (?:Error|Warning):'
 if (!$signToolAccepted -or !$digestMatch.Success) {
     throw '[ONLINE_PROVENANCE_SIGNTOOL_FAILED] SignTool did not produce one warning-free accepted embedded-signature result.'
@@ -174,7 +181,6 @@ if ($identityFailures.Count -ne 0) { throw "[MSI_IDENTITY_MISMATCH] Online prove
 $signerCertificateRecords = @($signerChain.certificates | ForEach-Object { Get-G04DCCertificateRecord -Certificate $_ -Purpose 'signer' -CertificateDirectory $certificateDirectory })
 $timestampCertificateRecords = @($timestampChain.certificates | ForEach-Object { Get-G04DCCertificateRecord -Certificate $_ -Purpose 'timestamp' -CertificateDirectory $certificateDirectory })
 $verifiedAtUtc = [DateTime]::UtcNow.ToString('o')
-$os = Get-CimInstance Win32_OperatingSystem
 $record = [pscustomobject][ordered]@{
     schemaVersion = 1
     recordType = 'g04d-c13-online-authenticode-verifier'
@@ -218,7 +224,7 @@ $record = [pscustomobject][ordered]@{
     }
     verification = [ordered]@{
         accepted = $true
-        signTool = [ordered]@{ accepted = $true; exitCode = $signToolExitCode; targetOs = '2:10.0.26100.0'; allEmbeddedSignatures = $true; timestampRequired = $true; warningCount = 0 }
+        signTool = [ordered]@{ accepted = $true; exitCode = $signToolExitCode; targetOs = '2:10.0.26100.0'; targetOsEnforcement = 'exact-verifier-host-build'; allEmbeddedSignatures = $true; timestampRequired = $true; warningCount = 0 }
         winVerifyTrust = [ordered]@{ accepted = [bool]$fileTrust.passed; statusHex = [string]$fileTrust.statusHex; revocationChecks = 'whole-chain-excluding-root'; cacheOnly = $false }
         signerChain = [ordered]@{ accepted = [bool]$signerChain.valid; errorStatusHex = [string]$signerChain.errorStatusHex; errorStatusNames = @($signerChain.errorStatusNames); policyErrorHex = [string]$signerChain.policyErrorHex; policy = 'AUTHENTICODE'; certificateSignaturesValid = [bool]$signerChain.certificateSignaturesValid; revocationKnownGood = [bool]$signerChain.revocationKnownGood }
         timestampChain = [ordered]@{ accepted = [bool]$timestampChain.valid; errorStatusHex = [string]$timestampChain.errorStatusHex; errorStatusNames = @($timestampChain.errorStatusNames); policyErrorHex = [string]$timestampChain.policyErrorHex; policy = 'AUTHENTICODE_TS'; certificateSignaturesValid = [bool]$timestampChain.certificateSignaturesValid; revocationKnownGood = [bool]$timestampChain.revocationKnownGood }
