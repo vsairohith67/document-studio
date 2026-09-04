@@ -5,9 +5,17 @@ function Assert-G04DCProvenanceExactProperties {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)] $Value, [Parameter(Mandatory = $true)] [string[]]$Names, [string]$Code = 'ONLINE_PROVENANCE_RECORD_INVALID')
     if ($null -eq $Value) { throw "[$Code] Required object is missing." }
-    $actual = @($Value.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+    $actual = if ($Value -is [Collections.IDictionary]) {
+        @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)
+    } else {
+        @($Value.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+    }
     $expected = @($Names | Sort-Object)
-    if (($actual -join "`n") -cne ($expected -join "`n")) { throw "[$Code] Object fields are missing, duplicated, or unexpected." }
+    if (($actual -join "`n") -cne ($expected -join "`n")) {
+        $missing = @($expected | Where-Object { $actual -cnotcontains $_ }) -join ','
+        $unexpected = @($actual | Where-Object { $expected -cnotcontains $_ }) -join ','
+        throw "[$Code] Object fields are missing, duplicated, or unexpected. Missing=$missing; Unexpected=$unexpected"
+    }
     return $true
 }
 
@@ -182,7 +190,12 @@ function Assert-G04DCOnlineProvenanceRecordModel {
     $timestampAt = $timestampAt.ToUniversalTime()
     Assert-G04DCCertificateChainRecord -Certificates @($Record.authenticode.signerChain) -Purpose signer -VerificationTimeUtc $timestampAt | Out-Null
     Assert-G04DCCertificateChainRecord -Certificates @($Record.authenticode.timestampChain) -Purpose timestamp -VerificationTimeUtc $timestampAt | Out-Null
-    $allIdentityChecks = @($Record.verification.identityChecks.PSObject.Properties | Where-Object { ![bool]$_.Value }).Count -eq 0
+    $identityCheckValues = if ($Record.verification.identityChecks -is [Collections.IDictionary]) {
+        @($Record.verification.identityChecks.Values)
+    } else {
+        @($Record.verification.identityChecks.PSObject.Properties | ForEach-Object { $_.Value })
+    }
+    $allIdentityChecks = @($identityCheckValues | Where-Object { ![bool]$_ }).Count -eq 0
     $valid = [int]$Record.schemaVersion -eq 1 -and [string]$Record.recordType -ceq 'g04d-c13-online-authenticode-verifier' -and
         [string]$Record.verifier.id -ceq $ExpectedId -and (Test-G04DCCanonicalGuid -Value ([string]$Record.verifier.instanceId)) -and
         (Test-G04DCCanonicalGuid -Value ([string]$Record.verifier.vmUuid)) -and (Test-G04DCCanonicalGuid -Value ([string]$Record.verifier.diskUuid)) -and

@@ -102,11 +102,12 @@ function New-G04DCSyntheticOnlineRecord {
     }
 }
 
-$recordA = Copy-G04DCProvenanceValue (New-G04DCSyntheticOnlineRecord -Id 'A')
+$rawRecordA = New-G04DCSyntheticOnlineRecord -Id 'A'
+$recordA = Copy-G04DCProvenanceValue $rawRecordA
 $recordB = Copy-G04DCProvenanceValue (New-G04DCSyntheticOnlineRecord -Id 'B')
 $expectedMsi = Get-G04DCExpectedMsi
 
-Add-G04DCProvenancePass 'online complete good signer chain' { Assert-G04DCOnlineProvenanceRecordModel -Record $recordA -ExpectedId 'A' -ExpectedMsi $expectedMsi | Out-Null }
+Add-G04DCProvenancePass 'online complete good signer chain' { Assert-G04DCOnlineProvenanceRecordModel -Record $rawRecordA -ExpectedId 'A' -ExpectedMsi $expectedMsi | Out-Null }
 Add-G04DCProvenancePass 'online complete good timestamp chain' { Assert-G04DCOnlineProvenanceRecordModel -Record $recordB -ExpectedId 'B' -ExpectedMsi $expectedMsi | Out-Null }
 $case = Copy-G04DCProvenanceValue $recordA; $case.verification.signerChain.accepted = $false; $case.verification.signerChain.errorStatusNames = @('Revoked')
 Assert-G04DCProvenanceThrows 'online revoked signer rejected' 'ONLINE_PROVENANCE_RECORD_INVALID' { Assert-G04DCOnlineProvenanceRecordModel $case 'A' $expectedMsi }
