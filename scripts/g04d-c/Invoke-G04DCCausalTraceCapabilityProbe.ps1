@@ -411,6 +411,32 @@ function Invoke-G04DCDecodeAttempt {
     }
 }
 
+function Get-G04DCTraceFailureCode {
+    param([Parameter(Mandatory = $true)] [object]$ErrorRecord)
+    $message = if ($ErrorRecord.Exception) { [string]$ErrorRecord.Exception.Message } else { [string]$ErrorRecord }
+    if ($message -match '(?i)AssignProcessToJobObject|job') { return 'JOB_ASSIGNMENT_OR_OWNERSHIP_FAILED' }
+    if ($message -match '(?i)synthetic trace child|canary') { return 'SYNTHETIC_CANARY_FAILED' }
+    if ($message -match '(?i)tracerpt|decoded trace|CSV') { return 'TRACE_DECODER_FAILED' }
+    if ($message -match '(?i)timeout|exceeded') { return 'BOUNDED_TIMEOUT' }
+    return 'UNEXPECTED_PHASE_ERROR'
+}
+
+function Add-G04DCTracePhaseFailure {
+    param(
+        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]]$Failures,
+        [Parameter(Mandatory = $true)] [string]$Phase,
+        [Parameter(Mandatory = $true)] [string]$Blocker,
+        [Parameter(Mandatory = $true)] [object]$ErrorRecord
+    )
+    $exceptionType = if ($ErrorRecord.Exception) { [string]$ErrorRecord.Exception.GetType().FullName } else { $null }
+    $Failures.Add([pscustomobject][ordered]@{
+        phase = $Phase
+        blocker = $Blocker
+        failureCode = Get-G04DCTraceFailureCode -ErrorRecord $ErrorRecord
+        exceptionType = $exceptionType
+    })
+}
+
 $resolvedRepository = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $resolvedEvidence = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
 if (![IO.Path]::GetFullPath($resolvedEvidence).StartsWith([IO.Path]::GetFullPath($env:RUNNER_TEMP), [StringComparison]::OrdinalIgnoreCase)) {
@@ -428,6 +454,7 @@ Import-Module (Join-Path $resolvedRepository 'scripts\g04d-c\G04DC.Common.psm1')
 $commands = [System.Collections.Generic.List[object]]::new()
 $attempts = [System.Collections.Generic.List[object]]::new()
 $blockers = [System.Collections.Generic.List[string]]::new()
+$phaseFailures = [System.Collections.Generic.List[object]]::new()
 $tools = @(
     Get-G04DCTraceToolIdentity -Name 'wpr.exe'
     Get-G04DCTraceToolIdentity -Name 'logman.exe'
@@ -449,6 +476,7 @@ $report = [ordered]@{
     builtInProfiles = @()
     selectedProfiles = @()
     attempts = @()
+    phaseFailures = @()
     rawArtifacts = @()
     rawArtifactCount = 0
     rawArtifactByteCount = 0L
@@ -483,19 +511,37 @@ try {
             $commands.Add($wprStart)
             if ($wprStart.exitCode -eq 0) {
                 $wprActive = $true
-                $canary = Invoke-G04DCTraceCanaryPair -RawRoot $rawRoot -AttemptName 'wpr' -TimeoutMilliseconds $canaryTimeoutMilliseconds
-                $wprStatus = Invoke-G04DCTraceCommand -Name 'wpr-status' -ExecutablePath $wpr.canonicalPath -Arguments @('-status', 'collectors', '-details') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
-                $commands.Add($wprStatus)
-                $wprStatusText = (Get-Content -LiteralPath (Join-Path $rawRoot 'wpr-status.stdout.txt') -Raw) + (Get-Content -LiteralPath (Join-Path $rawRoot 'wpr-status.stderr.txt') -Raw)
-                $wprTrace = Join-Path $rawRoot 'wpr.etl'
-                $wprStop = Invoke-G04DCTraceCommand -Name 'wpr-stop' -ExecutablePath $wpr.canonicalPath -Arguments @('-stop', $wprTrace, '-skipPdbGen') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
-                $commands.Add($wprStop)
-                $wprActive = $false
-                if ($wprStop.exitCode -eq 0 -and (Test-Path -LiteralPath $wprTrace -PathType Leaf)) {
-                    try { $attempts.Add((Invoke-G04DCDecodeAttempt -AttemptName 'wpr' -TracePath $wprTrace -LossText $wprStatusText -Canary $canary -TracerptTool $tracerpt -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -Commands $commands)) }
-                    catch { $blockers.Add('WPR_DECODE_OR_ATTRIBUTION_INSUFFICIENT') }
+                try {
+                    $canary = Invoke-G04DCTraceCanaryPair -RawRoot $rawRoot -AttemptName 'wpr' -TimeoutMilliseconds $canaryTimeoutMilliseconds
+                    $wprStatus = Invoke-G04DCTraceCommand -Name 'wpr-status' -ExecutablePath $wpr.canonicalPath -Arguments @('-status', 'collectors', '-details') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
+                    $commands.Add($wprStatus)
+                    $wprStatusText = (Get-Content -LiteralPath (Join-Path $rawRoot 'wpr-status.stdout.txt') -Raw) + (Get-Content -LiteralPath (Join-Path $rawRoot 'wpr-status.stderr.txt') -Raw)
+                    $wprTrace = Join-Path $rawRoot 'wpr.etl'
+                    $wprStop = Invoke-G04DCTraceCommand -Name 'wpr-stop' -ExecutablePath $wpr.canonicalPath -Arguments @('-stop', $wprTrace, '-skipPdbGen') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
+                    $commands.Add($wprStop)
+                    $wprActive = $false
+                    if ($wprStop.exitCode -eq 0 -and (Test-Path -LiteralPath $wprTrace -PathType Leaf)) {
+                        try { $attempts.Add((Invoke-G04DCDecodeAttempt -AttemptName 'wpr' -TracePath $wprTrace -LossText $wprStatusText -Canary $canary -TracerptTool $tracerpt -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -Commands $commands)) }
+                        catch { $blockers.Add('WPR_DECODE_OR_ATTRIBUTION_INSUFFICIENT'); Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'wpr-decode' -Blocker 'WPR_DECODE_OR_ATTRIBUTION_INSUFFICIENT' -ErrorRecord $_ }
+                    }
+                    else { $blockers.Add('WPR_TRACE_STOP_FAILED') }
                 }
-                else { $blockers.Add('WPR_TRACE_STOP_FAILED') }
+                catch {
+                    $blockers.Add('WPR_CANARY_OR_STATUS_FAILED')
+                    Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'wpr-capture' -Blocker 'WPR_CANARY_OR_STATUS_FAILED' -ErrorRecord $_
+                }
+                finally {
+                    if ($wprActive) {
+                        try {
+                            $commands.Add((Invoke-G04DCTraceCommand -Name 'wpr-cancel' -ExecutablePath $wpr.canonicalPath -Arguments @('-cancel') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds))
+                        }
+                        catch {
+                            $blockers.Add('WPR_CLEANUP_FAILED')
+                            Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'wpr-cleanup' -Blocker 'WPR_CLEANUP_FAILED' -ErrorRecord $_
+                        }
+                        $wprActive = $false
+                    }
+                }
             }
             else { $blockers.Add('WPR_TRACE_START_FAILED') }
         }
@@ -515,24 +561,43 @@ try {
         $commands.Add($logmanStart)
         if ($providerQuery.exitCode -eq 0 -and $logmanStart.exitCode -eq 0) {
             $logmanActive = $true
-            $canary = Invoke-G04DCTraceCanaryPair -RawRoot $rawRoot -AttemptName 'logman' -TimeoutMilliseconds $canaryTimeoutMilliseconds
-            $logmanStatus = Invoke-G04DCTraceCommand -Name 'logman-status' -ExecutablePath $logman.canonicalPath -Arguments @('query', $logmanSession, '-ets') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
-            $commands.Add($logmanStatus)
-            $logmanStatusText = (Get-Content -LiteralPath (Join-Path $rawRoot 'logman-status.stdout.txt') -Raw) + (Get-Content -LiteralPath (Join-Path $rawRoot 'logman-status.stderr.txt') -Raw)
-            $logmanStop = Invoke-G04DCTraceCommand -Name 'logman-stop' -ExecutablePath $logman.canonicalPath -Arguments @('stop', $logmanSession, '-ets') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
-            $commands.Add($logmanStop)
-            $logmanActive = $false
-            if ($logmanStop.exitCode -eq 0 -and (Test-Path -LiteralPath $logmanTrace -PathType Leaf)) {
-                try { $attempts.Add((Invoke-G04DCDecodeAttempt -AttemptName 'logman' -TracePath $logmanTrace -LossText $logmanStatusText -Canary $canary -TracerptTool $tracerpt -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -Commands $commands)) }
-                catch { $blockers.Add('LOGMAN_DECODE_OR_ATTRIBUTION_INSUFFICIENT') }
+            try {
+                $canary = Invoke-G04DCTraceCanaryPair -RawRoot $rawRoot -AttemptName 'logman' -TimeoutMilliseconds $canaryTimeoutMilliseconds
+                $logmanStatus = Invoke-G04DCTraceCommand -Name 'logman-status' -ExecutablePath $logman.canonicalPath -Arguments @('query', $logmanSession, '-ets') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
+                $commands.Add($logmanStatus)
+                $logmanStatusText = (Get-Content -LiteralPath (Join-Path $rawRoot 'logman-status.stdout.txt') -Raw) + (Get-Content -LiteralPath (Join-Path $rawRoot 'logman-status.stderr.txt') -Raw)
+                $logmanStop = Invoke-G04DCTraceCommand -Name 'logman-stop' -ExecutablePath $logman.canonicalPath -Arguments @('stop', $logmanSession, '-ets') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds
+                $commands.Add($logmanStop)
+                $logmanActive = $false
+                if ($logmanStop.exitCode -eq 0 -and (Test-Path -LiteralPath $logmanTrace -PathType Leaf)) {
+                    try { $attempts.Add((Invoke-G04DCDecodeAttempt -AttemptName 'logman' -TracePath $logmanTrace -LossText $logmanStatusText -Canary $canary -TracerptTool $tracerpt -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -Commands $commands)) }
+                    catch { $blockers.Add('LOGMAN_DECODE_OR_ATTRIBUTION_INSUFFICIENT'); Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'logman-decode' -Blocker 'LOGMAN_DECODE_OR_ATTRIBUTION_INSUFFICIENT' -ErrorRecord $_ }
+                }
+                else { $blockers.Add('LOGMAN_TRACE_STOP_FAILED') }
             }
-            else { $blockers.Add('LOGMAN_TRACE_STOP_FAILED') }
+            catch {
+                $blockers.Add('LOGMAN_CANARY_OR_STATUS_FAILED')
+                Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'logman-capture' -Blocker 'LOGMAN_CANARY_OR_STATUS_FAILED' -ErrorRecord $_
+            }
+            finally {
+                if ($logmanActive) {
+                    try {
+                        $commands.Add((Invoke-G04DCTraceCommand -Name 'logman-cleanup-stop' -ExecutablePath $logman.canonicalPath -Arguments @('stop', $logmanSession, '-ets') -RawRoot $rawRoot -EvidenceRoot $resolvedEvidence -TimeoutMilliseconds $commandTimeoutMilliseconds))
+                    }
+                    catch {
+                        $blockers.Add('LOGMAN_CLEANUP_FAILED')
+                        Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'logman-cleanup' -Blocker 'LOGMAN_CLEANUP_FAILED' -ErrorRecord $_
+                    }
+                    $logmanActive = $false
+                }
+            }
         }
         else { $blockers.Add('LOGMAN_KERNEL_SESSION_START_FAILED') }
     }
 }
 catch {
     $blockers.Add('TRACE_CAPABILITY_PROBE_INTERNAL_FAILURE')
+    Add-G04DCTracePhaseFailure -Failures $phaseFailures -Phase 'probe' -Blocker 'TRACE_CAPABILITY_PROBE_INTERNAL_FAILURE' -ErrorRecord $_
 }
 finally {
     if ($wprActive) {
@@ -564,6 +629,7 @@ $passedAttempt = @($attempts.ToArray() | Where-Object { $_.decoded.passed } | Se
 $report.status = if ($passedAttempt.Count -eq 1) { $passStatus } else { $blockedStatus }
 $report.commands = @($commands.ToArray())
 $report.attempts = @($attempts.ToArray())
+$report.phaseFailures = @($phaseFailures.ToArray())
 $report.rawArtifacts = $rawArtifacts
 $report.rawArtifactCount = $rawArtifacts.Count
 $report.rawArtifactByteCount = $rawTotalBytes
