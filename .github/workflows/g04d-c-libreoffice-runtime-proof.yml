@@ -80,6 +80,13 @@ jobs:
       - name: Validate proof boundaries with Windows PowerShell 5.1
         shell: powershell
         run: .\scripts\g04d-c\verify-g04d-c-boundaries.ps1
+      - name: Prove built-in causal trace capability
+        shell: powershell
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'g04d-c-machine-state-precheck-evidence'
+          .\scripts\g04d-c\Invoke-G04DCCausalTraceCapabilityProbe.ps1 `
+            -RepositoryRoot $env:GITHUB_WORKSPACE `
+            -EvidenceDirectory $evidence
       - name: Run bounded machine-state precheck
         shell: powershell
         run: |

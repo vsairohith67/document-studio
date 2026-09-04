@@ -27,6 +27,7 @@ $classRegistryDigestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'C
 $runtimeManifestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCRuntimeManifest.ps1') -Raw
 $decisionProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCCandidateDecision.ps1') -Raw
 $precheckProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMachineStatePrecheck.ps1') -Raw
+$traceCapabilityProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCCausalTraceCapabilityProbe.ps1') -Raw
 $tests = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCBoundaries.ps1') -Raw
 foreach ($telemetryBoundary in @(
     'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
@@ -94,7 +95,7 @@ foreach ($classRegistryRegression in @(
     'P1-A redirected readers streams and tasks are disposed',
     'P1-A production cleanup uses no global process termination',
     'P1-B canonical hash independent of Console OutputEncoding',
-    'P1-B accepted canonical fixture remains byte-identical', 'Expected 315 fail-closed cases'
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 329 fail-closed cases'
 )) {
     if (!$tests.Contains($classRegistryRegression)) { throw "G04D-C class-registry regression is missing: $classRegistryRegression" }
 }
@@ -185,7 +186,7 @@ foreach ($scheduledTaskRegression in @(
     'scheduled task deterministic repeated serialization', 'changed scheduled task action changes definition evidence',
     'unchanged heterogeneous scheduled task action compares equal', 'scheduled task collection performs no mutation',
     'GitHub runner shaped non-Exec scheduled task action', 'no direct Execute assumption in scheduled task catalog',
-    'scheduled task TaskPath and TaskName ordering', 'Expected 315 fail-closed cases'
+    'scheduled task TaskPath and TaskName ordering', 'Expected 329 fail-closed cases'
 )) {
     if (!$tests.Contains($scheduledTaskRegression)) { throw "G04D-C scheduled-task regression is missing: $scheduledTaskRegression" }
 }
@@ -276,6 +277,29 @@ if (!$workflow.Contains('if: ${{ always() }}') -or !$workflow.Contains('PROOF_PR
 if (!$workflow.Contains('proofMode:') -or !$workflow.Contains('- precheck') -or !$workflow.Contains('- full') -or
     !$workflow.Contains("inputs.proofMode == 'precheck'") -or !$workflow.Contains("inputs.proofMode == 'full'")) {
     throw 'G04D-C workflow must expose bounded precheck/full dispatch modes.'
+}
+if (!$workflow.Contains('Prove built-in causal trace capability') -or
+    !$workflow.Contains('Invoke-G04DCCausalTraceCapabilityProbe.ps1')) {
+    throw 'G04D-C10 PRECHECK trace capability gate is missing from the workflow.'
+}
+if ($workflow.IndexOf('Prove built-in causal trace capability', [StringComparison]::Ordinal) -gt
+    $workflow.IndexOf('Run bounded machine-state precheck', [StringComparison]::Ordinal)) {
+    throw 'G04D-C10 trace capability must be established before machine-state capture.'
+}
+foreach ($traceBoundary in @(
+    'wpr.exe', 'built-in-wpr-profiles', 'logman.exe-kernel-session', 'tracerpt.exe',
+    "@('GeneralProfile', 'FileIO', 'Registry', 'Network')", '0x06030205',
+    'KillOnCloseJob', 'registryTargetAttribution', 'fileTargetAttribution',
+    'networkTargetAttribution', 'parentProcessAttribution', 'imageLoadAttribution',
+    'unrelatedProcessDistinguished', 'lossCounterAvailable', 'zeroEventsLost',
+    'maximumTraceBytes = 268435456L', 'rawArtifactsRemoved = $true',
+    'G04D-C10 CAUSAL TRACE CAPABILITY BLOCKED - CONTROLLED DISPOSABLE WINDOWS VM OR TRACE-TOOL OWNER GATE REQUIRED'
+)) {
+    if (!$traceCapabilityProof.Contains($traceBoundary)) { throw "G04D-C10 trace capability boundary is missing: $traceBoundary" }
+}
+if ($traceCapabilityProof.Contains("'-filemode'") -or
+    $traceCapabilityProof -match '(?i)procmon|xperf|wpaexporter|windows performance analyzer|msiexec|soffice|libreoffice') {
+    throw 'G04D-C10 capability probe is unbounded or crossed a prohibited tool boundary.'
 }
 if ([regex]::Matches($workflow, '(?m)^\s+timeout-minutes:\s*90\s*$').Count -ne 2 -or
     [regex]::Matches($workflow, '(?m)^\s+timeout-minutes:\s*20\s*$').Count -ne 1) {

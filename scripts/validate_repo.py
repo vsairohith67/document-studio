@@ -960,6 +960,7 @@ g04dc_minimal = (ROOT / 'scripts/g04d-c/Invoke-G04DCMinimalMsiProof.ps1').read_t
 g04dc_manifest = (ROOT / 'scripts/g04d-c/New-G04DCRuntimeManifest.ps1').read_text(encoding='utf-8')
 g04dc_decision = (ROOT / 'scripts/g04d-c/New-G04DCCandidateDecision.ps1').read_text(encoding='utf-8')
 g04dc_tests = (ROOT / 'scripts/g04d-c/Test-G04DCBoundaries.ps1').read_text(encoding='utf-8')
+g04dc_trace_capability = (ROOT / 'scripts/g04d-c/Invoke-G04DCCausalTraceCapabilityProbe.ps1').read_text(encoding='ascii')
 g04dc_source_gate = (ROOT / 'scripts/g04d-c/Test-G04DCPowerShell51Source.ps1').read_text(encoding='ascii')
 g04dc_boundary_verifier = (ROOT / 'scripts/g04d-c/verify-g04d-c-boundaries.ps1').read_text(encoding='ascii')
 g04dc_source_policy = (ROOT / 'scripts/g04d_c_powershell_source_policy.py').read_text(encoding='utf-8')
@@ -999,6 +1000,23 @@ for boundary in [
 ]:
     if boundary not in g04dc_precheck + g04dc_workflow:
         raise SystemExit(f'G04D-C PRECHECK bootstrap boundary is missing: {boundary}')
+if 'Invoke-G04DCCausalTraceCapabilityProbe.ps1' not in g04dc_workflow or 'Prove built-in causal trace capability' not in g04dc_workflow:
+    raise SystemExit('G04D-C10 causal trace capability gate is not wired into PRECHECK')
+if g04dc_workflow.index('Prove built-in causal trace capability') > g04dc_workflow.index('Run bounded machine-state precheck'):
+    raise SystemExit('G04D-C10 trace capability must precede machine-state capture')
+for boundary in [
+    'wpr.exe', 'built-in-wpr-profiles', 'logman.exe-kernel-session', 'tracerpt.exe',
+    'GeneralProfile', 'FileIO', 'Registry', 'Network', '0x06030205',
+    'KillOnCloseJob', 'registryTargetAttribution', 'fileTargetAttribution',
+    'networkTargetAttribution', 'parentProcessAttribution', 'imageLoadAttribution',
+    'unrelatedProcessDistinguished', 'lossCounterAvailable', 'zeroEventsLost',
+    'maximumTraceBytes = 268435456L', 'rawArtifactsRemoved = $true',
+    'G04D-C10 CAUSAL TRACE CAPABILITY BLOCKED - CONTROLLED DISPOSABLE WINDOWS VM OR TRACE-TOOL OWNER GATE REQUIRED',
+]:
+    if boundary not in g04dc_trace_capability:
+        raise SystemExit(f'G04D-C10 trace capability boundary is missing: {boundary}')
+if "'-filemode'" in g04dc_trace_capability or re.search(r'(?i)procmon|xperf|wpaexporter|windows performance analyzer|msiexec|soffice|libreoffice', g04dc_trace_capability):
+    raise SystemExit('G04D-C10 capability probe is unbounded or crossed a prohibited tool boundary')
 for boundary in [
     '[System.Management.Automation.Language.Parser]::ParseFile',
     "PSEdition -cne 'Desktop'", 'sourceFileCount', 'asciiGateStatus', 'parserGateStatus',
@@ -1106,7 +1124,7 @@ for regression in [
     'P1-A redirected readers streams and tasks are disposed',
     'P1-A production cleanup uses no global process termination',
     'P1-B canonical hash independent of Console OutputEncoding',
-    'P1-B accepted canonical fixture remains byte-identical', 'Expected 315 fail-closed cases',
+    'P1-B accepted canonical fixture remains byte-identical', 'Expected 329 fail-closed cases',
 ]:
     if regression not in g04dc_tests:
         raise SystemExit(f'G04D-C class-registry regression is missing: {regression}')

@@ -2242,6 +2242,79 @@ $changedPaths = @(git -C (Join-Path $PSScriptRoot '..\..') diff --name-only orig
 if (@($changedPaths | Where-Object { $_ -match '^(apps|packages|src|migrations)/' }).Count -ne 0) { throw 'C5 modified a production path.' }
 $passed.Add('C5 has no production impact path')
 
+$traceProbeSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCCausalTraceCapabilityProbe.ps1') -Raw
+$traceStepIndex = $workflowSource.IndexOf('Prove built-in causal trace capability', [StringComparison]::Ordinal)
+$machineStateStepIndex = $workflowSource.IndexOf('Run bounded machine-state precheck', [StringComparison]::Ordinal)
+if ($traceStepIndex -lt 0 -or $machineStateStepIndex -lt 0 -or $traceStepIndex -gt $machineStateStepIndex) {
+    throw 'C10 trace capability gate does not precede PRECHECK machine-state capture.'
+}
+$passed.Add('C10 trace capability gate precedes machine state')
+if ([regex]::Matches($workflowSource, 'Invoke-G04DCCausalTraceCapabilityProbe[.]ps1').Count -ne 1 -or
+    $workflowSource.IndexOf('Invoke-G04DCCausalTraceCapabilityProbe.ps1', [StringComparison]::Ordinal) -gt $workflowSource.IndexOf('admin-image:', [StringComparison]::Ordinal)) {
+    throw 'C10 trace capability probe escaped the PRECHECK-only workflow lane.'
+}
+$passed.Add('C10 capability probe remains PRECHECK only')
+$traceToolOrder = @('wpr.exe', 'built-in-wpr-profiles', 'logman.exe-kernel-session', 'tracerpt.exe')
+$tracePreferenceSource = $traceProbeSource.Substring($traceProbeSource.IndexOf('toolPreferenceOrder', [StringComparison]::Ordinal))
+$lastTraceToolIndex = -1
+foreach ($traceTool in $traceToolOrder) {
+    $traceToolIndex = $tracePreferenceSource.IndexOf("'$traceTool'", [StringComparison]::Ordinal)
+    if ($traceToolIndex -le $lastTraceToolIndex) { throw "C10 trace tool order is invalid at $traceTool." }
+    $lastTraceToolIndex = $traceToolIndex
+}
+$passed.Add('C10 built-in trace tool preference order')
+foreach ($profile in @('GeneralProfile', 'FileIO', 'Registry', 'Network')) {
+    if (!$traceProbeSource.Contains("'$profile'")) { throw "C10 built-in WPR profile is missing: $profile" }
+}
+$passed.Add('C10 WPR resource profiles are explicit')
+if ($traceProbeSource.Contains("'-filemode'")) { throw 'C10 WPR probe introduced unbounded file mode.' }
+$passed.Add('C10 WPR capture uses bounded memory mode')
+foreach ($ceiling in @('maximumTraceBytes = 268435456L', 'maximumRawEvidenceBytes = 536870912L', 'maximumDecodedRows = 1000000')) {
+    if (!$traceProbeSource.Contains($ceiling)) { throw "C10 raw trace ceiling is missing: $ceiling" }
+}
+$passed.Add('C10 trace and decoder ceilings are fixed')
+if (!$traceProbeSource.Contains('[DocumentStudio.G04DC.KillOnCloseJob]::new()') -or
+    !$traceProbeSource.Contains('$job.Assign($ownedProcess)') -or
+    !$traceProbeSource.Contains('$job.TerminateAndVerify($ownedProcess, 5000)')) {
+    throw 'C10 synthetic canary lacks verified Job Object ownership.'
+}
+$passed.Add('C10 synthetic canary has Job Object ownership')
+foreach ($operation in @('CreateSubKey', "SetValue('State','created'", "SetValue('State','modified'", 'DeleteValue', 'DeleteSubKeyTree', 'WriteAllBytes', "BeginConnect('127.0.0.1',9")) {
+    if (!$traceProbeSource.Contains($operation)) { throw "C10 synthetic canary operation is missing: $operation" }
+}
+$passed.Add('C10 canary covers registry file and loopback operations')
+if (!$traceProbeSource.Contains('comparisonProcessId') -or !$traceProbeSource.Contains('comparisonMisattributionCount') -or
+    !$traceProbeSource.Contains('unrelatedProcessDistinguished')) {
+    throw 'C10 trace canary lacks an unrelated-process attribution comparator.'
+}
+$passed.Add('C10 canary distinguishes unrelated process activity')
+foreach ($capability in @(
+    'decoderSchemaAvailable', 'processLifetime', 'parentProcessAttribution', 'imageLoadAttribution',
+    'registryTargetAttribution', 'fileTargetAttribution', 'networkTargetAttribution',
+    'operationResultAvailable', 'unrelatedProcessDistinguished', 'lossCounterAvailable', 'zeroEventsLost'
+)) {
+    if (!$traceProbeSource.Contains($capability)) { throw "C10 decoded trace capability is missing: $capability" }
+}
+$passed.Add('C10 causal trace capability set is fail closed')
+if (!$traceProbeSource.Contains('.g04d-c10-trace-raw-root') -or !$traceProbeSource.Contains('rawArtifactsRemoved = $true') -or
+    !$traceProbeSource.Contains("Remove-Item -LiteralPath `$rawRoot -Recurse -Force")) {
+    throw 'C10 raw trace cleanup is not marker-owned and terminally recorded.'
+}
+$passed.Add('C10 raw trace is hashed then marker-owned cleanup runs')
+if ($traceProbeSource -match '(?i)procmon|xperf|wpaexporter|windows performance analyzer|download.*trace') {
+    throw 'C10 trace probe introduced a prohibited external trace dependency.'
+}
+$passed.Add('C10 uses no external trace dependency')
+if ($traceProbeSource -match '(?i)msiexec|soffice|libreoffice|install-package|winget|choco') {
+    throw 'C10 trace capability probe crossed into installer or runtime execution.'
+}
+$passed.Add('C10 capability probe cannot execute MSI or LibreOffice')
+if (!$traceProbeSource.Contains('G04D-C10 CAUSAL TRACE CAPABILITY BLOCKED - CONTROLLED DISPOSABLE WINDOWS VM OR TRACE-TOOL OWNER GATE REQUIRED') -or
+    !$traceProbeSource.Contains('CAUSAL_TRACE_CAPABILITY_PASS')) {
+    throw 'C10 exact capability terminal statuses are missing.'
+}
+$passed.Add('C10 exact capability terminal statuses')
+
 $sourcePolicyTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('g04dc-source-policy-test-' + [guid]::NewGuid().ToString('N'))
 $sourceGateScript = Join-Path $PSScriptRoot 'Test-G04DCPowerShell51Source.ps1'
 $sourcePolicyScript = Join-Path $PSScriptRoot '..\g04d_c_powershell_source_policy.py'
@@ -2382,5 +2455,5 @@ finally {
     if (Test-Path -LiteralPath $sourcePolicyTestRoot) { Remove-Item -LiteralPath $sourcePolicyTestRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 315) { throw "Expected 315 fail-closed cases; passed $($passed.Count)." }
+if ($passed.Count -ne 329) { throw "Expected 329 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"
