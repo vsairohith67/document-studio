@@ -423,7 +423,7 @@ function Get-G04DCTraceFailureCode {
 
 function Add-G04DCTracePhaseFailure {
     param(
-        [Parameter(Mandatory = $true)] [System.Collections.Generic.List[object]]$Failures,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [System.Collections.Generic.List[object]]$Failures,
         [Parameter(Mandatory = $true)] [string]$Phase,
         [Parameter(Mandatory = $true)] [string]$Blocker,
         [Parameter(Mandatory = $true)] [object]$ErrorRecord
