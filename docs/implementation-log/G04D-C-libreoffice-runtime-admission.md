@@ -148,6 +148,8 @@ The retained 315-case boundary suite remains unchanged and invokes an additional
 
 Remediated local validation on 2026-09-05 used actual Windows PowerShell 5.1.26100.9168 and passed the 17-file ASCII/parser gate, all 315 retained cases, all 65 C13 cases, the focused verifier, locked repository validation, link checking, `git diff --check`, clean npm installation, typecheck, all 185 Vitest tests, the production web build, Cargo formatting/check/clippy/all workspace tests, and the Tauri no-bundle release build. The post-patch bypass review identified path-replacement windows in the first remediation; the final local source holds deny-write/delete bindings across MSI and SignTool use and parses only independently anchored owner-only verifier snapshots. The pre-remediation proof artifacts remain retired.
 
+The first remediated-head A/B acquisition on 2026-09-05 produced two independently anchored, agreeing online records, then stopped during host assembly before an offline clone existed: protected source snapshots were correctly removed after final canonical copying, but the attestation still tried to hash the removed source record paths. No `msiexec`, extraction or LibreOffice process ran. The lifecycle repair hashes the already verified final copied records, and a diagnostic host assembly completed with no source-snapshot residue; that A/B pair and diagnostic bundle are retained as failure/repair evidence but are retired from acceptance because the repair changes source.
+
 ## Explicit non-actions
 
 - No ordinary full MSI install occurs on the laptop.

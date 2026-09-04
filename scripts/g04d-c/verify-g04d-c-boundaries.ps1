@@ -112,6 +112,14 @@ $hostRecordRead = $combinedProvenance.IndexOf('$a = Read-G04DCCanonicalJson', [S
 if ($hostManifestBinding -lt 0 -or $hostRecordRead -lt 0 -or $hostManifestBinding -gt $hostRecordRead) {
     throw 'G04D-C13 host manifest bindings must be independently verified before record parsing.'
 }
+foreach ($copiedRecordBinding in @(
+    'verifierARecordSha256 = Get-G04DCSha256 -Path $copiedAPath',
+    'verifierBRecordSha256 = Get-G04DCSha256 -Path $copiedBPath'
+)) {
+    if (!$combinedProvenance.Contains($copiedRecordBinding)) {
+        throw "G04D-C13 attestation must hash the final copied verifier record: $copiedRecordBinding"
+    }
+}
 $offlineMsiEnvelope = $offlineProvenance.IndexOf('$msiEnvelope = Assert-G04DCExactFileEnvelope', [StringComparison]::Ordinal)
 $offlineMsiParser = $offlineProvenance.IndexOf('$msiIdentity = Get-G04DCOfflineMsiIdentity', [StringComparison]::Ordinal)
 if ($offlineMsiEnvelope -lt 0 -or $offlineMsiParser -lt 0 -or $offlineMsiEnvelope -gt $offlineMsiParser) {

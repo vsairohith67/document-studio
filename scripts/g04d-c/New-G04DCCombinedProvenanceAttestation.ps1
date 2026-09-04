@@ -235,6 +235,12 @@ Copy-G04DCSealedVerifierEvidence -Source $aRoot -Destination (Join-Path $output 
 Copy-G04DCSealedVerifierEvidence -Source $bRoot -Destination (Join-Path $output 'verifiers\B') -ExpectedId 'B' -ExpectedManifestSha256 $expectedBManifestSha256
 Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $aRoot -ExpectedManifestSha256 $expectedAManifestSha256 | Out-Null
 Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $bRoot -ExpectedManifestSha256 $expectedBManifestSha256 | Out-Null
+$copiedAPath = Join-Path $output 'verifiers\A\online-verifier-A.json'
+$copiedBPath = Join-Path $output 'verifiers\B\online-verifier-B.json'
+if ((Get-G04DCSha256 -Path $copiedAPath) -cne (Get-G04DCSha256 -Path $aPath) -or
+    (Get-G04DCSha256 -Path $copiedBPath) -cne (Get-G04DCSha256 -Path $bPath)) {
+    throw '[ONLINE_PROVENANCE_RECORD_INVALID] Final verifier records do not match their protected source snapshots.'
+}
 Remove-G04DCOwnedSourceSnapshot -Path $snapshotRoot -OutputRoot $output
 $snapshotRoot = $null
 
@@ -279,10 +285,10 @@ try {
         subject = $a.subject
         onlineVerification = [ordered]@{
             verifierARecordPath = 'verifiers/A/online-verifier-A.json'
-            verifierARecordSha256 = Get-G04DCSha256 -Path $aPath
+            verifierARecordSha256 = Get-G04DCSha256 -Path $copiedAPath
             verifierASourceManifestSha256 = $expectedAManifestSha256
             verifierBRecordPath = 'verifiers/B/online-verifier-B.json'
-            verifierBRecordSha256 = Get-G04DCSha256 -Path $bPath
+            verifierBRecordSha256 = Get-G04DCSha256 -Path $copiedBPath
             verifierBSourceManifestSha256 = $expectedBManifestSha256
             verifiedAtEarliestUtc = $earliest.ToString('o')
             verifiedAtLatestUtc = $latest.ToString('o')
