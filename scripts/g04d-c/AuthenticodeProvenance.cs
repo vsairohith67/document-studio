@@ -57,6 +57,7 @@ namespace DocumentStudio.G04DC.Provenance {
         public bool complete { get; set; }
         public bool trustedRoot { get; set; }
         public bool certificateSignaturesValid { get; set; }
+        public bool purposeEkuValid { get; set; }
         public bool revocationKnownGood { get; set; }
         public bool valid { get; set; }
         public string verificationTimeUtc { get; set; }
@@ -502,15 +503,21 @@ namespace DocumentStudio.G04DC.Provenance {
                 }
 
                 string usageOid = timestampPurpose ? "1.3.6.1.5.5.7.3.8" : "1.3.6.1.5.5.7.3.3";
-                oid = Marshal.StringToHGlobalAnsi(usageOid);
-                oidArray = Marshal.AllocHGlobal(IntPtr.Size);
-                Marshal.WriteIntPtr(oidArray, oid);
-                CERT_CHAIN_PARA chainPara = new CERT_CHAIN_PARA {
-                    cbSize = (uint)Marshal.SizeOf(typeof(CERT_CHAIN_PARA)),
-                    RequestedUsage = new CERT_USAGE_MATCH {
+                CERT_USAGE_MATCH requestedUsage = new CERT_USAGE_MATCH();
+                if (!timestampPurpose) {
+                    oid = Marshal.StringToHGlobalAnsi(usageOid);
+                    oidArray = Marshal.AllocHGlobal(IntPtr.Size);
+                    Marshal.WriteIntPtr(oidArray, oid);
+                    requestedUsage = new CERT_USAGE_MATCH {
                         dwType = 0,
                         Usage = new CERT_ENHKEY_USAGE { cUsageIdentifier = 1, rgpszUsageIdentifier = oidArray }
-                    },
+                    };
+                }
+                CERT_CHAIN_PARA chainPara = new CERT_CHAIN_PARA {
+                    cbSize = (uint)Marshal.SizeOf(typeof(CERT_CHAIN_PARA)),
+                    // AUTHENTICODE_TS evaluates timestamp purpose. Supplying a timestamp
+                    // RequestedUsage makes Windows mark this valid Certum TSA chain WrongUsage.
+                    RequestedUsage = requestedUsage,
                     dwUrlRetrievalTimeout = (uint)timeoutMilliseconds
                 };
                 long ticks = verificationTime.ToFileTimeUtc();
@@ -552,8 +559,9 @@ namespace DocumentStudio.G04DC.Provenance {
                 string[] names = TrustStatusNames(errors);
                 bool complete = (errors & TRUST_IS_PARTIAL_CHAIN) == 0 && certificates.Count >= 2;
                 bool trusted = (errors & TRUST_IS_UNTRUSTED_ROOT) == 0;
+                bool purposeEkuValid = PurposeEkuValid(certificates, usageOid);
                 bool revocationGood = online && (errors & (TRUST_IS_REVOKED | TRUST_REVOCATION_STATUS_UNKNOWN | TRUST_IS_OFFLINE_REVOCATION)) == 0;
-                bool valid = errors == 0 && policyStatus.dwError == 0 && complete && trusted && certificateSignaturesValid && (online ? revocationGood : true);
+                bool valid = errors == 0 && policyStatus.dwError == 0 && complete && trusted && certificateSignaturesValid && purposeEkuValid && (online ? revocationGood : true);
                 return new ChainEvidence {
                     purpose = purpose,
                     onlineRevocation = online,
@@ -570,6 +578,7 @@ namespace DocumentStudio.G04DC.Provenance {
                     complete = complete,
                     trustedRoot = trusted,
                     certificateSignaturesValid = certificateSignaturesValid,
+                    purposeEkuValid = purposeEkuValid,
                     revocationKnownGood = revocationGood,
                     valid = valid,
                     verificationTimeUtc = verificationTime.ToString("o", CultureInfo.InvariantCulture),
@@ -591,6 +600,16 @@ namespace DocumentStudio.G04DC.Provenance {
         public static CertificateEvidence GetCertificateEvidence(byte[] der, int chainPosition) {
             if (der == null || der.Length == 0) throw new ArgumentException("Certificate DER is required.", "der");
             return CertificateFromDer(der, chainPosition);
+        }
+
+        private static bool PurposeEkuValid(List<CertificateEvidence> certificates, string requiredOid) {
+            if (certificates == null || certificates.Count < 2) return false;
+            if (certificates[0].ekuOids == null || !certificates[0].ekuOids.Contains(requiredOid, StringComparer.Ordinal)) return false;
+            for (int index = 1; index < certificates.Count; index++) {
+                string[] eku = certificates[index].ekuOids ?? new string[0];
+                if (eku.Length > 0 && !eku.Contains(requiredOid, StringComparer.Ordinal)) return false;
+            }
+            return true;
         }
 
         private static IntPtr OpenMemoryStore() {

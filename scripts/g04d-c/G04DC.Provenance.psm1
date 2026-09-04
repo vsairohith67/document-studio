@@ -163,7 +163,7 @@ function Assert-G04DCOnlineProvenanceRecordModel {
     Assert-G04DCProvenanceExactProperties -Value $Record.verification.signTool -Names @('accepted', 'exitCode', 'targetOs', 'targetOsEnforcement', 'allEmbeddedSignatures', 'timestampRequired', 'warningCount') | Out-Null
     Assert-G04DCProvenanceExactProperties -Value $Record.verification.winVerifyTrust -Names @('accepted', 'statusHex', 'revocationChecks', 'cacheOnly') | Out-Null
     foreach ($chainName in @('signerChain', 'timestampChain')) {
-        Assert-G04DCProvenanceExactProperties -Value $Record.verification.$chainName -Names @('accepted', 'errorStatusHex', 'errorStatusNames', 'policyErrorHex', 'policy', 'certificateSignaturesValid', 'revocationKnownGood') | Out-Null
+        Assert-G04DCProvenanceExactProperties -Value $Record.verification.$chainName -Names @('accepted', 'errorStatusHex', 'errorStatusNames', 'policyErrorHex', 'policy', 'certificateSignaturesValid', 'purposeEkuValid', 'revocationKnownGood') | Out-Null
     }
     Assert-G04DCProvenanceExactProperties -Value $Record.verification.identityChecks -Names @(
         'regularFile', 'nonReparse', 'sizeBytes', 'sha256', 'authenticode', 'signerThumbprint', 'timestampThumbprint',
@@ -210,6 +210,7 @@ function Assert-G04DCOnlineProvenanceRecordModel {
         [string]$Record.verification.winVerifyTrust.revocationChecks -ceq 'whole-chain-excluding-root' -and ![bool]$Record.verification.winVerifyTrust.cacheOnly -and
         [bool]$Record.verification.signerChain.accepted -and [bool]$Record.verification.timestampChain.accepted -and
         [bool]$Record.verification.signerChain.certificateSignaturesValid -and [bool]$Record.verification.timestampChain.certificateSignaturesValid -and
+        [bool]$Record.verification.signerChain.purposeEkuValid -and [bool]$Record.verification.timestampChain.purposeEkuValid -and
         [bool]$Record.verification.signerChain.revocationKnownGood -and [bool]$Record.verification.timestampChain.revocationKnownGood -and
         [string]$Record.verification.signerChain.errorStatusHex -ceq '0x00000000' -and [string]$Record.verification.timestampChain.errorStatusHex -ceq '0x00000000' -and
         @($Record.verification.signerChain.errorStatusNames).Count -eq 0 -and @($Record.verification.timestampChain.errorStatusNames).Count -eq 0 -and

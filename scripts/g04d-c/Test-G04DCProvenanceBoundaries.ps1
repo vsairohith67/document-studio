@@ -92,8 +92,8 @@ function New-G04DCSyntheticOnlineRecord {
             accepted = $true
             signTool = [ordered]@{ accepted = $true; exitCode = 0; targetOs = '2:10.0.26100.0'; targetOsEnforcement = 'exact-verifier-host-build'; allEmbeddedSignatures = $true; timestampRequired = $true; warningCount = 0 }
             winVerifyTrust = [ordered]@{ accepted = $true; statusHex = '0x00000000'; revocationChecks = 'whole-chain-excluding-root'; cacheOnly = $false }
-            signerChain = [ordered]@{ accepted = $true; errorStatusHex = '0x00000000'; errorStatusNames = @(); policyErrorHex = '0x00000000'; policy = 'AUTHENTICODE'; certificateSignaturesValid = $true; revocationKnownGood = $true }
-            timestampChain = [ordered]@{ accepted = $true; errorStatusHex = '0x00000000'; errorStatusNames = @(); policyErrorHex = '0x00000000'; policy = 'AUTHENTICODE_TS'; certificateSignaturesValid = $true; revocationKnownGood = $true }
+            signerChain = [ordered]@{ accepted = $true; errorStatusHex = '0x00000000'; errorStatusNames = @(); policyErrorHex = '0x00000000'; policy = 'AUTHENTICODE'; certificateSignaturesValid = $true; purposeEkuValid = $true; revocationKnownGood = $true }
+            timestampChain = [ordered]@{ accepted = $true; errorStatusHex = '0x00000000'; errorStatusNames = @(); policyErrorHex = '0x00000000'; policy = 'AUTHENTICODE_TS'; certificateSignaturesValid = $true; purposeEkuValid = $true; revocationKnownGood = $true }
             urlRetrievalTimeoutMilliseconds = 15000
             identityChecks = [ordered]@{ regularFile = $true; nonReparse = $true; sizeBytes = $true; sha256 = $true; authenticode = $true; signerThumbprint = $true; timestampThumbprint = $true; signerLeafDer = $true; timestampLeafDer = $true; version = $true; architecture = $true; productCode = $true; upgradeCode = $true; packageCode = $true }
         }

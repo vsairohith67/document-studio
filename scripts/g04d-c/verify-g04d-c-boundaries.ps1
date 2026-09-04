@@ -39,7 +39,7 @@ foreach ($c13Boundary in @(
     'CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT', 'CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT',
     'CertCreateCertificateChainEngine', 'hExclusiveRoot', 'CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL',
     'CERT_CHAIN_POLICY_AUTHENTICODE', 'AUTHENTICODE_TS', 'WTD_HASH_ONLY_FLAG',
-    'Cryptographic APIs', 'RSASSA-PKCS1-v1_5-SHA256', 'attestation-private-key.cspblob',
+    'Cryptographic APIs', 'PurposeEkuValid', 'purposeEkuValid', 'RSASSA-PKCS1-v1_5-SHA256', 'attestation-private-key.cspblob',
     'two-independent-online-verifier-results', 'ONLINE_PROVENANCE_VERIFIERS_DISAGREE',
     'OFFLINE_PROVENANCE_VERIFIED', 'signed-payload-manifest.json', 'globalCertificateStoreUnchanged',
     'diagnosticDefaultChainAcceptedAsTrust = $false', 'diagnosticOfflineRevocationAcceptedAsTrust = $false'

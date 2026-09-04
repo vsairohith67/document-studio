@@ -411,8 +411,8 @@ $result = [pscustomobject][ordered]@{
     onlineRevocationDecision = 'two-independent-online-verifier-results'
     msiIdentity = $msiIdentity
     embeddedAuthenticode = [ordered]@{ hashAndSignatureValid = [bool]$fileTrust.passed; signerCount = [int]$fileTrust.signerCount; timestampSignerCount = [int]$fileTrust.timestampSignerCount; timestampUtc = [string]$fileTrust.timestampUtc }
-    signerStructuralChain = [ordered]@{ accepted = [bool]$signerStructural.valid; exclusiveRoot = [bool]$signerStructural.exclusiveRoot; urlRetrievalDisabled = [bool]$signerStructural.urlRetrievalDisabled; certificateDerSha256 = @($signerStructural.certificates.derSha256) }
-    timestampStructuralChain = [ordered]@{ accepted = [bool]$timestampStructural.valid; exclusiveRoot = [bool]$timestampStructural.exclusiveRoot; urlRetrievalDisabled = [bool]$timestampStructural.urlRetrievalDisabled; certificateDerSha256 = @($timestampStructural.certificates.derSha256) }
+    signerStructuralChain = [ordered]@{ accepted = [bool]$signerStructural.valid; exclusiveRoot = [bool]$signerStructural.exclusiveRoot; urlRetrievalDisabled = [bool]$signerStructural.urlRetrievalDisabled; purposeEkuValid = [bool]$signerStructural.purposeEkuValid; certificateDerSha256 = @($signerStructural.certificates.derSha256) }
+    timestampStructuralChain = [ordered]@{ accepted = [bool]$timestampStructural.valid; exclusiveRoot = [bool]$timestampStructural.exclusiveRoot; urlRetrievalDisabled = [bool]$timestampStructural.urlRetrievalDisabled; purposeEkuValid = [bool]$timestampStructural.purposeEkuValid; certificateDerSha256 = @($timestampStructural.certificates.derSha256) }
     diagnosticDefaultChainAcceptedAsTrust = $false
     diagnosticOfflineRevocationAcceptedAsTrust = $false
     globalCertificateStoreSha256Before = $storeBefore
