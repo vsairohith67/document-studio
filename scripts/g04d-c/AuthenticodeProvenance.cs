@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 
 namespace DocumentStudio.G04DC.Provenance {
@@ -22,6 +23,7 @@ namespace DocumentStudio.G04DC.Provenance {
         public string timestampUtc { get; set; }
         public int providerSignerError { get; set; }
         public int providerTimestampError { get; set; }
+        public string failureOperation { get; set; }
     }
 
     public sealed class CertificateEvidence {
@@ -86,15 +88,18 @@ namespace DocumentStudio.G04DC.Provenance {
         private static readonly IntPtr CERT_CHAIN_POLICY_AUTHENTICODE_TS = new IntPtr(3);
 
         private const uint WTD_UI_NONE = 2;
-        private const uint WTD_REVOKE_NONE = 0;
         private const uint WTD_REVOKE_WHOLECHAIN = 1;
         private const uint WTD_CHOICE_FILE = 1;
         private const uint WTD_STATEACTION_VERIFY = 1;
         private const uint WTD_STATEACTION_CLOSE = 2;
         private const uint WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT = 0x00000080;
-        private const uint WTD_HASH_ONLY_FLAG = 0x00000200;
-        private const uint WTD_CACHE_ONLY_URL_RETRIEVAL = 0x00001000;
         private const uint WTD_DISABLE_MD2_MD4 = 0x00002000;
+        private const uint PKCS_7_ASN_ENCODING = 0x00010000;
+        private const uint SPC_INDIRECT_DATA_CONTENT_STRUCT = 2003;
+        private const uint ERROR_INVALID_PARAMETER = 87;
+        private const uint ERROR_INSUFFICIENT_BUFFER = 122;
+        private const uint ERROR_MORE_DATA = 234;
+        private const uint CRYPT_E_NO_MATCH = 0x80092009;
         private const uint WINHTTP_ACCESS_TYPE_NO_PROXY = 1;
         private const uint CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT = 2;
         private const uint CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT = 2;
@@ -189,6 +194,40 @@ namespace DocumentStudio.G04DC.Provenance {
             public uint dwCtlError;
             public int fIsCyclic;
             public IntPtr pChainElement;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CRYPTOAPI_BLOB {
+            public uint cbData;
+            public IntPtr pbData;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CRYPT_ALGORITHM_IDENTIFIER {
+            public IntPtr pszObjId;
+            public CRYPTOAPI_BLOB Parameters;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct SIP_SUBJECTINFO {
+            public uint cbSize;
+            public IntPtr pgSubjectType;
+            public IntPtr hFile;
+            public string pwsFileName;
+            public string pwsDisplayName;
+            public uint dwReserved1;
+            public uint dwIntVersion;
+            public IntPtr hProv;
+            public CRYPT_ALGORITHM_IDENTIFIER DigestAlgorithm;
+            public uint dwFlags;
+            public uint dwEncodingType;
+            public uint dwReserved2;
+            public uint fdwCAPISettings;
+            public uint fdwSecuritySettings;
+            public uint dwIndex;
+            public uint dwUnionChoice;
+            public IntPtr psFlat;
+            public IntPtr pClientData;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -331,6 +370,14 @@ namespace DocumentStudio.G04DC.Provenance {
         private static extern bool CertVerifyCertificateChainPolicy(IntPtr policyOid, IntPtr chainContext, ref CERT_CHAIN_POLICY_PARA policyPara, ref CERT_CHAIN_POLICY_STATUS policyStatus);
         [DllImport("crypt32.dll", SetLastError = true)]
         private static extern bool CryptVerifyCertificateSignatureEx(IntPtr cryptProv, uint encodingType, uint subjectType, IntPtr subject, uint issuerType, IntPtr issuer, uint flags, IntPtr extra);
+        [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CryptSIPRetrieveSubjectGuid(string fileName, IntPtr file, out Guid subjectGuid);
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CryptSIPGetSignedDataMsg(ref SIP_SUBJECTINFO subjectInfo, out uint encodingType, uint index, ref uint signedDataSize, byte[] signedData);
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CryptSIPVerifyIndirectData(ref SIP_SUBJECTINFO subjectInfo, IntPtr indirectData);
+        [DllImport("crypt32.dll", SetLastError = true)]
+        private static extern bool CryptDecodeObjectEx(uint encodingType, IntPtr structType, byte[] encoded, uint encodedSize, uint flags, IntPtr decodeParameters, IntPtr decoded, ref uint decodedSize);
         [DllImport("winhttp.dll", SetLastError = true)]
         private static extern bool WinHttpGetDefaultProxyConfiguration(out WINHTTP_PROXY_INFO proxyInfo);
         [DllImport("winhttp.dll", SetLastError = true)]
@@ -339,11 +386,163 @@ namespace DocumentStudio.G04DC.Provenance {
         private static extern IntPtr GlobalFree(IntPtr memory);
 
         public static FileTrustEvidence VerifyOnlineFileTrust(string filePath) {
-            return VerifyFileTrust(filePath, false, false);
+            return VerifyOnlineFileTrustCore(filePath);
         }
 
         public static FileTrustEvidence VerifyOfflineFileDigestAndSignature(string filePath) {
-            return VerifyFileTrust(filePath, true, true);
+            return VerifyOfflineSipSignature(filePath);
+        }
+
+        private static FileTrustEvidence VerifyOfflineSipSignature(string filePath) {
+            if (String.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("File path is required.", "filePath");
+            string canonical = System.IO.Path.GetFullPath(filePath);
+            FileTrustEvidence evidence = new FileTrustEvidence {
+                hashOnly = true,
+                cacheOnlyUrlRetrieval = true
+            };
+            try {
+                int messageCount = 0;
+                int signerCount = 0;
+                int timestampSignerCount = 0;
+                for (uint index = 0; index < 8; index++) {
+                    uint encodingType;
+                    SIP_SUBJECTINFO subject;
+                    byte[] signedMessage = GetSipSignedMessage(canonical, index, out encodingType, out subject);
+                    if (signedMessage == null) break;
+                    messageCount++;
+                    try {
+                        SignedCms cms = new SignedCms();
+                        cms.Decode(signedMessage);
+                        if (!String.Equals(cms.ContentInfo.ContentType.Value, "1.3.6.1.4.1.311.2.1.4", StringComparison.Ordinal)) {
+                            throw new CryptographicException("Signed content is not SPC indirect data.");
+                        }
+                        foreach (SignerInfo signer in cms.SignerInfos) {
+                            signerCount++;
+                            signer.CheckSignature(true);
+                            if (signer.Certificate == null) throw new CryptographicException("Signer certificate is missing.");
+                            if (signerCount == 1) evidence.signerLeafDerSha256 = Sha256(signer.Certificate.RawData);
+                            foreach (SignerInfo timestampSigner in signer.CounterSignerInfos) {
+                                timestampSignerCount++;
+                                timestampSigner.CheckSignature(true);
+                                if (timestampSigner.Certificate == null) throw new CryptographicException("Timestamp signer certificate is missing.");
+                                if (timestampSignerCount == 1) {
+                                    evidence.timestampLeafDerSha256 = Sha256(timestampSigner.Certificate.RawData);
+                                    evidence.timestampUtc = GetCmsSigningTime(timestampSigner);
+                                }
+                            }
+                        }
+
+                        VerifySipIndirectData(ref subject, encodingType, cms.ContentInfo.Content);
+                    }
+                    finally {
+                        FreeSipSubject(ref subject);
+                    }
+                }
+
+                evidence.signerCount = signerCount;
+                evidence.timestampSignerCount = timestampSignerCount;
+                evidence.providerSignerError = 0;
+                evidence.providerTimestampError = 0;
+                if (messageCount != 1 || signerCount != 1 ||
+                    String.IsNullOrWhiteSpace(evidence.signerLeafDerSha256) ||
+                    (timestampSignerCount > 0 && (String.IsNullOrWhiteSpace(evidence.timestampLeafDerSha256) || String.IsNullOrWhiteSpace(evidence.timestampUtc)))) {
+                    throw new CryptographicException("The embedded signer or timestamp countersigner set is invalid.");
+                }
+                evidence.status = 0;
+                evidence.statusHex = Hex(0);
+                evidence.passed = true;
+                return evidence;
+            }
+            catch (CryptographicException exception) {
+                evidence.status = exception.HResult;
+                evidence.statusHex = Hex(exception.HResult);
+                evidence.failureOperation = "managed-signature-validation";
+                evidence.passed = false;
+                return evidence;
+            }
+            catch (Win32Exception exception) {
+                evidence.status = exception.NativeErrorCode;
+                evidence.statusHex = Hex(exception.NativeErrorCode);
+                evidence.failureOperation = exception.Message.Split(' ')[0];
+                evidence.passed = false;
+                return evidence;
+            }
+        }
+
+        private static byte[] GetSipSignedMessage(string filePath, uint index, out uint encodingType, out SIP_SUBJECTINFO subject) {
+            encodingType = 0;
+            subject = new SIP_SUBJECTINFO();
+            Guid subjectGuid;
+            if (!CryptSIPRetrieveSubjectGuid(filePath, IntPtr.Zero, out subjectGuid)) Win32("CryptSIPRetrieveSubjectGuid");
+            IntPtr subjectGuidPointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(Guid)));
+            bool retained = false;
+            try {
+                Marshal.StructureToPtr(subjectGuid, subjectGuidPointer, false);
+                subject = new SIP_SUBJECTINFO {
+                    cbSize = (uint)Marshal.SizeOf(typeof(SIP_SUBJECTINFO)),
+                    pgSubjectType = subjectGuidPointer,
+                    hFile = new IntPtr(-1),
+                    pwsFileName = filePath,
+                    pwsDisplayName = filePath,
+                    dwIndex = index
+                };
+                uint size = 0;
+                bool measured = CryptSIPGetSignedDataMsg(ref subject, out encodingType, index, ref size, null);
+                if (!measured) {
+                    uint error = unchecked((uint)Marshal.GetLastWin32Error());
+                    if (error == CRYPT_E_NO_MATCH || (index > 0 && error == ERROR_INVALID_PARAMETER)) return null;
+                    if (size == 0 || (error != ERROR_INSUFFICIENT_BUFFER && error != ERROR_MORE_DATA)) Win32("CryptSIPGetSignedDataMsg(size)");
+                }
+                if (size == 0 || size > 16 * 1024 * 1024) throw new CryptographicException("Embedded signature size is invalid.");
+                byte[] message = new byte[checked((int)size)];
+                if (!CryptSIPGetSignedDataMsg(ref subject, out encodingType, index, ref size, message)) Win32("CryptSIPGetSignedDataMsg");
+                if (size != message.Length) Array.Resize(ref message, checked((int)size));
+                retained = true;
+                return message;
+            }
+            finally {
+                if (!retained) {
+                    Marshal.FreeHGlobal(subjectGuidPointer);
+                    subject.pgSubjectType = IntPtr.Zero;
+                }
+            }
+        }
+
+        private static void VerifySipIndirectData(ref SIP_SUBJECTINFO subject, uint encodingType, byte[] encodedIndirectData) {
+            IntPtr decoded = IntPtr.Zero;
+            try {
+                uint decodedSize = 0;
+                uint combinedEncoding = encodingType | X509_ASN_ENCODING | PKCS_7_ASN_ENCODING;
+                if (!CryptDecodeObjectEx(combinedEncoding, new IntPtr(SPC_INDIRECT_DATA_CONTENT_STRUCT), encodedIndirectData, (uint)encodedIndirectData.Length, 0, IntPtr.Zero, IntPtr.Zero, ref decodedSize)) {
+                    Win32("CryptDecodeObjectEx(size)");
+                }
+                if (decodedSize == 0 || decodedSize > 1024 * 1024) throw new CryptographicException("Decoded indirect data size is invalid.");
+                decoded = Marshal.AllocHGlobal(checked((int)decodedSize));
+                if (!CryptDecodeObjectEx(combinedEncoding, new IntPtr(SPC_INDIRECT_DATA_CONTENT_STRUCT), encodedIndirectData, (uint)encodedIndirectData.Length, 0, IntPtr.Zero, decoded, ref decodedSize)) {
+                    Win32("CryptDecodeObjectEx");
+                }
+                subject.dwEncodingType = encodingType;
+                if (!CryptSIPVerifyIndirectData(ref subject, decoded)) Win32("CryptSIPVerifyIndirectData");
+            }
+            finally {
+                if (decoded != IntPtr.Zero) Marshal.FreeHGlobal(decoded);
+            }
+        }
+
+        private static void FreeSipSubject(ref SIP_SUBJECTINFO subject) {
+            if (subject.pgSubjectType == IntPtr.Zero) return;
+            Marshal.FreeHGlobal(subject.pgSubjectType);
+            subject.pgSubjectType = IntPtr.Zero;
+        }
+
+        private static string GetCmsSigningTime(SignerInfo signer) {
+            List<DateTime> values = new List<DateTime>();
+            foreach (CryptographicAttributeObject attribute in signer.SignedAttributes) {
+                if (!String.Equals(attribute.Oid.Value, "1.2.840.113549.1.9.5", StringComparison.Ordinal)) continue;
+                foreach (AsnEncodedData value in attribute.Values) values.Add(new Pkcs9SigningTime(value.RawData).SigningTime.ToUniversalTime());
+            }
+            if (values.Count != 1) throw new CryptographicException("Timestamp signing time is missing or ambiguous.");
+            return values[0].ToString("o", CultureInfo.InvariantCulture);
         }
 
         public static ProxyConfigurationEvidence GetProxyConfiguration() {
@@ -376,7 +575,7 @@ namespace DocumentStudio.G04DC.Provenance {
             }
         }
 
-        private static FileTrustEvidence VerifyFileTrust(string filePath, bool cacheOnly, bool hashOnly) {
+        private static FileTrustEvidence VerifyOnlineFileTrustCore(string filePath) {
             if (String.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("File path is required.", "filePath");
             string canonical = System.IO.Path.GetFullPath(filePath);
             WINTRUST_FILE_INFO file = new WINTRUST_FILE_INFO {
@@ -390,18 +589,16 @@ namespace DocumentStudio.G04DC.Provenance {
             WINTRUST_DATA data = new WINTRUST_DATA {
                 cbStruct = (uint)Marshal.SizeOf(typeof(WINTRUST_DATA)),
                 dwUIChoice = WTD_UI_NONE,
-                fdwRevocationChecks = hashOnly ? WTD_REVOKE_NONE : WTD_REVOKE_WHOLECHAIN,
+                fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN,
                 dwUnionChoice = WTD_CHOICE_FILE,
                 pFile = filePointer,
                 dwStateAction = WTD_STATEACTION_VERIFY,
-                dwProvFlags = WTD_DISABLE_MD2_MD4 |
-                    (hashOnly ? WTD_HASH_ONLY_FLAG : WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT) |
-                    (cacheOnly ? WTD_CACHE_ONLY_URL_RETRIEVAL : 0)
+                dwProvFlags = WTD_DISABLE_MD2_MD4 | WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
             };
             int status = unchecked((int)0x800B0001);
             FileTrustEvidence evidence = new FileTrustEvidence {
-                hashOnly = hashOnly,
-                cacheOnlyUrlRetrieval = cacheOnly
+                hashOnly = false,
+                cacheOnlyUrlRetrieval = false
             };
             try {
                 Guid action = GenericVerifyV2;

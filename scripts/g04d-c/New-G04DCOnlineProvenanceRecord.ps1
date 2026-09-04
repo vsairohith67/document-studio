@@ -95,7 +95,7 @@ New-Item -ItemType Directory -Path $certificateDirectory | Out-Null
 [IO.File]::WriteAllText((Join-Path $evidence 'MARKER.md'), "# G04D-C13 online verifier $VerifierId evidence`r`n", [Text.UTF8Encoding]::new($false))
 
 if (!('DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier' -as [type])) {
-    Add-Type -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -ErrorAction Stop
+    Add-Type -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -ReferencedAssemblies 'System.Security.dll' -ErrorAction Stop
 }
 
 $identity = Get-G04DCMsiIdentity -MsiPath $msiItem.FullName

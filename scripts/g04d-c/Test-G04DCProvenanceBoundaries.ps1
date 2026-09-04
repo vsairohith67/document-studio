@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'G04DC.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'G04DC.Provenance.psm1') -Force
-if (!('DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -ErrorAction Stop }
+if (!('DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -ReferencedAssemblies 'System.Security.dll' -ErrorAction Stop }
 
 $passed = [System.Collections.Generic.List[string]]::new()
 function Assert-G04DCProvenanceThrows {
@@ -222,7 +222,9 @@ try {
     if ($signTool.Count -ne 1) { throw 'Synthetic Authenticode test requires the installed Windows SDK SignTool.' }
     & $signTool[0].FullName sign /f $pfxPath /p $pfxPassword /fd SHA256 $syntheticExe | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Synthetic Authenticode signing failed.' }
+    $fileTrustStoreBefore = Get-G04DCTestCertificateStoreDigest
     $fileTrust = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::VerifyOfflineFileDigestAndSignature($syntheticExe)
+    $fileTrustStoreAfter = Get-G04DCTestCertificateStoreDigest
     Add-G04DCProvenancePass 'offline valid embedded file signature' { if (!$fileTrust.passed -or $fileTrust.signerCount -ne 1) { throw 'synthetic signature invalid' } }
     $alteredExe = Join-Path $testRoot 'synthetic-altered.exe'; Copy-Item -LiteralPath $syntheticExe -Destination $alteredExe; $stream = [IO.File]::Open($alteredExe, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); try { [void]$stream.Seek(1024, [IO.SeekOrigin]::Begin); $originalByte = $stream.ReadByte(); [void]$stream.Seek(1024, [IO.SeekOrigin]::Begin); $stream.WriteByte([byte]($originalByte -bxor 1)) } finally { $stream.Dispose() }
     Add-G04DCProvenancePass 'offline altered signed file rejected' { if ([DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::VerifyOfflineFileDigestAndSignature($alteredExe).passed) { throw 'altered file accepted' } }
@@ -251,7 +253,7 @@ try {
             throw 'offline retrieval or disconnected-route handling is invalid'
         }
     }
-    Add-G04DCProvenancePass 'offline global store remains unchanged' { if (!$structural.valid -or $testStoreBefore -cne $testStoreAfter) { throw 'exclusive chain changed a global certificate store' } }
+    Add-G04DCProvenancePass 'offline global store remains unchanged' { if (!$structural.valid -or $testStoreBefore -cne $testStoreAfter -or $fileTrustStoreBefore -cne $fileTrustStoreAfter) { throw 'offline verification changed a global certificate store' } }
     Add-G04DCProvenancePass 'offline diagnostic PartialChain is not trust evidence' { if ((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') -Raw) -notmatch 'diagnosticDefaultChainAcceptedAsTrust = \$false') { throw 'partial chain boundary missing' } }
     Add-G04DCProvenancePass 'offline diagnostic OfflineRevocation is not trust evidence' { if ((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') -Raw) -notmatch 'diagnosticOfflineRevocationAcceptedAsTrust = \$false') { throw 'offline revocation boundary missing' } }
     Add-G04DCProvenancePass 'offline online attestation cannot hide structural failure' { $r = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::BuildOfflineExclusiveChain([byte[][]]@($leaf.RawData, $otherIntermediate.RawData, $root.RawData), 'signer', $now.ToString('o')); if ($r.valid) { throw 'structural failure hidden' } }

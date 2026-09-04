@@ -353,7 +353,7 @@ if (($attestation.onlineVerification.signerChain | ConvertTo-Json -Depth 20 -Com
     throw '[ATTESTATION_RECORD_BINDING_INVALID] Combined attestation does not exactly reproduce the agreed verifier result.'
 }
 
-if (!('DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -ErrorAction Stop }
+if (!('DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -ReferencedAssemblies 'System.Security.dll' -ErrorAction Stop }
 $storeBefore = Get-G04DCCertificateStoreDigest
 $networkBefore = Get-G04DCNetworkState
 if ($networkBefore.physicalAdapterCount -ne 1 -or $networkBefore.connectedAdapterCount -ne 0 -or @($networkBefore.defaultRoutes).Count -ne 0 -or
