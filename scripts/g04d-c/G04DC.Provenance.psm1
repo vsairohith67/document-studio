@@ -55,6 +55,45 @@ function Read-G04DCCanonicalJson {
     return $value
 }
 
+function Assert-G04DCExactFileEnvelope {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [ValidateRange(0, 9223372036854775807)] [long]$ExpectedSizeBytes,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedSha256,
+        [string]$ExpectedFileName,
+        [string]$Code = 'FILE_ENVELOPE_INVALID'
+    )
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer -or [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        (![string]::IsNullOrWhiteSpace($ExpectedFileName) -and $item.Name -cne $ExpectedFileName)) {
+        throw "[$Code] File is missing, renamed, or not a regular non-reparse file."
+    }
+    $stream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $observedSizeBytes = [long]$stream.Length
+        $observedSha256 = (($algorithm.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
+    }
+    catch {
+        $stream.Dispose()
+        throw
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+    if ($observedSizeBytes -ne $ExpectedSizeBytes -or $observedSha256 -cne $ExpectedSha256.ToLowerInvariant()) {
+        $stream.Dispose()
+        throw "[$Code] File size or SHA-256 does not match the required envelope."
+    }
+    return [pscustomobject][ordered]@{
+        path = $item.FullName
+        sizeBytes = $observedSizeBytes
+        sha256 = $observedSha256
+        readBinding = $stream
+    }
+}
+
 function New-G04DCCanonicalArtifactManifest {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)] [string]$EvidenceDirectory)
@@ -85,6 +124,118 @@ function Assert-G04DCCanonicalArtifactManifest {
         Assert-G04DCProvenanceExactProperties -Value $file -Names @('path', 'sizeBytes', 'sha256') -Code 'ARTIFACT_MANIFEST_INVALID' | Out-Null
     }
     return $manifest
+}
+
+function Assert-G04DCExpectedArtifactManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedManifestSha256
+    )
+    $rootItem = Get-Item -LiteralPath $EvidenceDirectory -Force
+    if (!$rootItem.PSIsContainer -or [bool]($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Verifier evidence root is unsafe.'
+    }
+    $manifestPath = Join-Path $rootItem.FullName 'artifact-manifest.json'
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    if ($manifestItem.PSIsContainer -or [bool]($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $manifestItem.Length -lt 3 -or $manifestItem.Length -gt 1048576) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Verifier manifest is missing, unsafe, empty, or oversized.'
+    }
+    $expected = $ExpectedManifestSha256.ToLowerInvariant()
+    $observedBefore = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($observedBefore -cne $expected) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Verifier manifest does not match its independent host binding.'
+    }
+    $manifest = Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $rootItem.FullName
+    $observedAfter = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($observedAfter -cne $expected) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Verifier manifest changed during host validation.'
+    }
+    return $manifest
+}
+
+function Copy-G04DCExpectedArtifactSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedManifestSha256,
+        [Parameter(Mandatory = $true)] [string]$DestinationDirectory
+    )
+    if (Test-Path -LiteralPath $DestinationDirectory) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Refusing to overwrite a verifier snapshot.'
+    }
+    $sourceItem = Get-Item -LiteralPath $EvidenceDirectory -Force
+    if (!$sourceItem.PSIsContainer -or [bool]($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Verifier evidence root is unsafe.'
+    }
+    $sourceRoot = $sourceItem.FullName.TrimEnd('\')
+    $manifestPath = Join-Path $sourceRoot 'artifact-manifest.json'
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    if ($manifestItem.PSIsContainer -or [bool]($manifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $manifestItem.Length -lt 3 -or $manifestItem.Length -gt 1048576) {
+        throw '[ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID] Verifier manifest is missing, unsafe, empty, or oversized.'
+    }
+    $manifestBinding = Assert-G04DCExactFileEnvelope -Path $manifestPath -ExpectedSizeBytes ([long]$manifestItem.Length) `
+        -ExpectedSha256 $ExpectedManifestSha256 -ExpectedFileName 'artifact-manifest.json' -Code 'ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID'
+    try {
+        $manifest = Read-G04DCCanonicalJson -Path $manifestBinding.path -MaximumBytes 1048576 -Depth 10 -Code 'ARTIFACT_MANIFEST_INVALID'
+        Assert-G04DCProvenanceExactProperties -Value $manifest -Names @('schemaVersion', 'files') -Code 'ARTIFACT_MANIFEST_INVALID' | Out-Null
+        if ([int]$manifest.schemaVersion -ne 1 -or @($manifest.files).Count -lt 1 -or @($manifest.files).Count -gt 128) {
+            throw '[ARTIFACT_MANIFEST_INVALID] Verifier manifest schema or file count is invalid.'
+        }
+
+        New-Item -ItemType Directory -Path $DestinationDirectory | Out-Null
+        $destinationRoot = (Resolve-Path -LiteralPath $DestinationDirectory).Path.TrimEnd('\')
+        $sourcePrefix = $sourceRoot + '\'
+        $destinationPrefix = $destinationRoot + '\'
+        $declared = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        [long]$totalBytes = 0
+        foreach ($file in @($manifest.files)) {
+            Assert-G04DCProvenanceExactProperties -Value $file -Names @('path', 'sizeBytes', 'sha256') -Code 'ARTIFACT_MANIFEST_INVALID' | Out-Null
+            $relative = ([string]$file.path).Replace('\', '/')
+            $declaredSize = [long]$file.sizeBytes
+            if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or $relative -match '(^|/)\.\.(/|$)' -or
+                $relative.Contains(':') -or !$declared.Add($relative) -or $declaredSize -lt 0 -or $declaredSize -gt 1048576 -or
+                [string]$file.sha256 -notmatch '^[0-9a-f]{64}$') {
+                throw '[ARTIFACT_MANIFEST_INVALID] Verifier manifest contains an unsafe, duplicate, or unbounded file.'
+            }
+            $totalBytes += $declaredSize
+            if ($totalBytes -gt 16777216) { throw '[ARTIFACT_MANIFEST_INVALID] Verifier evidence exceeds the snapshot byte ceiling.' }
+            $sourcePath = [IO.Path]::GetFullPath((Join-Path $sourceRoot $relative.Replace('/', '\')))
+            $destinationPath = [IO.Path]::GetFullPath((Join-Path $destinationRoot $relative.Replace('/', '\')))
+            if (!$sourcePath.StartsWith($sourcePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                !$destinationPath.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                throw '[ARTIFACT_MANIFEST_INVALID] Verifier manifest path escapes its evidence root.'
+            }
+            $fileBinding = Assert-G04DCExactFileEnvelope -Path $sourcePath -ExpectedSizeBytes $declaredSize `
+                -ExpectedSha256 ([string]$file.sha256) -ExpectedFileName ([IO.Path]::GetFileName($relative)) -Code 'ARTIFACT_MANIFEST_INVALID'
+            try {
+                $destinationParent = Split-Path -Parent $destinationPath
+                if (!(Test-Path -LiteralPath $destinationParent)) { New-Item -ItemType Directory -Path $destinationParent | Out-Null }
+                $destinationStream = [IO.File]::Open($destinationPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try {
+                    $fileBinding.readBinding.Position = 0
+                    $fileBinding.readBinding.CopyTo($destinationStream)
+                    $destinationStream.Flush($true)
+                }
+                finally { $destinationStream.Dispose() }
+            }
+            finally { $fileBinding.readBinding.Dispose() }
+        }
+
+        $destinationManifestPath = Join-Path $destinationRoot 'artifact-manifest.json'
+        $destinationManifestStream = [IO.File]::Open($destinationManifestPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $manifestBinding.readBinding.Position = 0
+            $manifestBinding.readBinding.CopyTo($destinationManifestStream)
+            $destinationManifestStream.Flush($true)
+        }
+        finally { $destinationManifestStream.Dispose() }
+        Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $destinationRoot -ExpectedManifestSha256 $ExpectedManifestSha256 | Out-Null
+        return $destinationRoot
+    }
+    finally { $manifestBinding.readBinding.Dispose() }
 }
 
 function Test-G04DCCanonicalGuid {
@@ -292,5 +443,6 @@ Export-ModuleMember -Function @(
     'Assert-G04DCProvenanceExactProperties', 'Assert-G04DCOnlineProvenanceRecordModel',
     'Compare-G04DCOnlineProvenanceRecordModels', 'Assert-G04DCProvenanceFreshnessModel',
     'Write-G04DCCanonicalJson', 'Read-G04DCCanonicalJson', 'Assert-G04DCOfflineEmbeddedIdentityModel',
-    'New-G04DCCanonicalArtifactManifest', 'Assert-G04DCCanonicalArtifactManifest'
+    'New-G04DCCanonicalArtifactManifest', 'Assert-G04DCCanonicalArtifactManifest',
+    'Assert-G04DCExactFileEnvelope', 'Assert-G04DCExpectedArtifactManifest', 'Copy-G04DCExpectedArtifactSnapshot'
 )

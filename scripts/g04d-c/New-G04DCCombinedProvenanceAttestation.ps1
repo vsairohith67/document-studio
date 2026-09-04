@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string]$VerifierAEvidenceDirectory,
+    [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedVerifierAManifestSha256,
     [Parameter(Mandatory = $true)] [string]$VerifierBEvidenceDirectory,
+    [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedVerifierBManifestSha256,
     [Parameter(Mandatory = $true)] [string]$OutputDirectory,
     [Parameter(Mandatory = $true)] [string]$KeyDirectory,
     [ValidateRange(1, 12)] [int]$AttestationLifetimeHours = 12
@@ -79,10 +81,11 @@ function Copy-G04DCSealedVerifierEvidence {
     param(
         [Parameter(Mandatory = $true)] [string]$Source,
         [Parameter(Mandatory = $true)] [string]$Destination,
-        [Parameter(Mandatory = $true)] [ValidateSet('A', 'B')] [string]$ExpectedId
+        [Parameter(Mandatory = $true)] [ValidateSet('A', 'B')] [string]$ExpectedId,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedManifestSha256
     )
     $sourceRoot = (Resolve-Path -LiteralPath $Source).Path
-    Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $sourceRoot | Out-Null
+    Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $sourceRoot -ExpectedManifestSha256 $ExpectedManifestSha256 | Out-Null
     if (@(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force | Where-Object { [bool]($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) {
         throw '[ONLINE_PROVENANCE_RECORD_INVALID] Verifier evidence contains a reparse point.'
     }
@@ -103,7 +106,16 @@ function Copy-G04DCSealedVerifierEvidence {
         throw '[ONLINE_PROVENANCE_RECORD_INVALID] Verifier certificate inventory is incomplete or contains an extra file.'
     }
     New-Item -ItemType Directory -Path (Join-Path $Destination 'certificates') -Force | Out-Null
-    Copy-Item -LiteralPath $recordPath -Destination (Join-Path $Destination $recordName)
+    $destinationRecordPath = Join-Path $Destination $recordName
+    Copy-Item -LiteralPath $recordPath -Destination $destinationRecordPath
+    if ((Get-G04DCSha256 -Path $destinationRecordPath) -cne (Get-G04DCSha256 -Path $recordPath)) {
+        throw '[ONLINE_PROVENANCE_RECORD_INVALID] Copied verifier record does not match the protected source snapshot.'
+    }
+    $copiedRecord = Read-G04DCCanonicalJson -Path $destinationRecordPath -Code 'ONLINE_PROVENANCE_RECORD_INVALID'
+    Assert-G04DCOnlineRecord -Record $copiedRecord -ExpectedId $ExpectedId | Out-Null
+    if ((Get-G04DCSemanticJson -Value $copiedRecord) -cne (Get-G04DCSemanticJson -Value $record)) {
+        throw '[ONLINE_PROVENANCE_RECORD_INVALID] Copied verifier record changed semantically.'
+    }
     foreach ($certificate in @(@($record.authenticode.signerChain) + @($record.authenticode.timestampChain))) {
         $relative = [string]$certificate.path
         $sourcePath = Join-Path $sourceRoot $relative.Replace('/', '\')
@@ -116,6 +128,7 @@ function Copy-G04DCSealedVerifierEvidence {
     }
     New-G04DCCanonicalArtifactManifest -EvidenceDirectory $Destination | Out-Null
     Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $Destination | Out-Null
+    Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $sourceRoot -ExpectedManifestSha256 $ExpectedManifestSha256 | Out-Null
 }
 
 function Set-G04DCOwnerOnlyAcl {
@@ -140,6 +153,22 @@ function Set-G04DCOwnerOnlyAcl {
     }
 }
 
+function Remove-G04DCOwnedSourceSnapshot {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$OutputRoot
+    )
+    $candidate = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $outputCanonical = [IO.Path]::GetFullPath($OutputRoot).TrimEnd('\')
+    $leaf = [IO.Path]::GetFileName($candidate)
+    if ([IO.Path]::GetDirectoryName($candidate) -cne $outputCanonical -or
+        $leaf -notmatch '^\.source-snapshots-[0-9a-f-]{36}$' -or
+        !(Test-Path -LiteralPath (Join-Path $candidate 'MARKER.md') -PathType Leaf)) {
+        throw '[ONLINE_PROVENANCE_SNAPSHOT_CLEANUP_INVALID] Refusing to remove an unowned source snapshot.'
+    }
+    Remove-Item -LiteralPath $candidate -Recurse -Force
+}
+
 $keyParent = [IO.Path]::GetFullPath('C:\DocumentStudioLab\G04D-C12L\credentials').TrimEnd('\')
 $keyCanonical = [IO.Path]::GetFullPath($KeyDirectory).TrimEnd('\')
 if ($keyCanonical -cne $keyParent -and !$keyCanonical.StartsWith($keyParent + '\', [StringComparison]::OrdinalIgnoreCase)) {
@@ -148,10 +177,25 @@ if ($keyCanonical -cne $keyParent -and !$keyCanonical.StartsWith($keyParent + '\
 if (Test-Path -LiteralPath $OutputDirectory) { throw '[ATTESTATION_PACKAGE_INVALID] Refusing to overwrite provenance bundle.' }
 if (Test-Path -LiteralPath $keyCanonical) { throw '[ATTESTATION_KEY_PATH_INVALID] Refusing to reuse an existing proof key directory.' }
 
-$aRoot = (Resolve-Path -LiteralPath $VerifierAEvidenceDirectory).Path
-$bRoot = (Resolve-Path -LiteralPath $VerifierBEvidenceDirectory).Path
-Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $aRoot | Out-Null
-Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $bRoot | Out-Null
+$sourceARoot = (Resolve-Path -LiteralPath $VerifierAEvidenceDirectory).Path
+$sourceBRoot = (Resolve-Path -LiteralPath $VerifierBEvidenceDirectory).Path
+$expectedAManifestSha256 = $ExpectedVerifierAManifestSha256.ToLowerInvariant()
+$expectedBManifestSha256 = $ExpectedVerifierBManifestSha256.ToLowerInvariant()
+if ($expectedAManifestSha256 -ceq $expectedBManifestSha256) {
+    throw '[ONLINE_PROVENANCE_INDEPENDENCE_INVALID] Verifier source manifest bindings must be distinct.'
+}
+New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
+$output = (Resolve-Path -LiteralPath $OutputDirectory).Path
+Set-G04DCOwnerOnlyAcl -Path $output
+$snapshotRoot = Join-Path $output ('.source-snapshots-' + [guid]::NewGuid().ToString('D'))
+New-Item -ItemType Directory -Path $snapshotRoot | Out-Null
+Set-G04DCOwnerOnlyAcl -Path $snapshotRoot
+[IO.File]::WriteAllText((Join-Path $snapshotRoot 'MARKER.md'), "G04D-C13 marker-owned verifier snapshots`r`n", [Text.UTF8Encoding]::new($false))
+try {
+$aRoot = Copy-G04DCExpectedArtifactSnapshot -EvidenceDirectory $sourceARoot -ExpectedManifestSha256 $expectedAManifestSha256 -DestinationDirectory (Join-Path $snapshotRoot 'A')
+$bRoot = Copy-G04DCExpectedArtifactSnapshot -EvidenceDirectory $sourceBRoot -ExpectedManifestSha256 $expectedBManifestSha256 -DestinationDirectory (Join-Path $snapshotRoot 'B')
+Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $aRoot -ExpectedManifestSha256 $expectedAManifestSha256 | Out-Null
+Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $bRoot -ExpectedManifestSha256 $expectedBManifestSha256 | Out-Null
 $aPath = Join-Path $aRoot 'online-verifier-A.json'
 $bPath = Join-Path $bRoot 'online-verifier-B.json'
 if (!(Test-Path -LiteralPath $aPath -PathType Leaf) -or !(Test-Path -LiteralPath $bPath -PathType Leaf)) { throw '[ONLINE_PROVENANCE_RECORD_INVALID] Both verifier records are required.' }
@@ -187,10 +231,12 @@ $disagreement = @($agreementFields.GetEnumerator() | Where-Object { !$_.Value } 
 if ($disagreement.Count -ne 0) { throw "[ONLINE_PROVENANCE_VERIFIERS_DISAGREE] Semantic verifier disagreement: $($disagreement -join ', ')" }
 $sharedAgreement = Compare-G04DCOnlineProvenanceRecordModels -VerifierA $a -VerifierB $b
 
-New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
-$output = (Resolve-Path -LiteralPath $OutputDirectory).Path
-Copy-G04DCSealedVerifierEvidence -Source $aRoot -Destination (Join-Path $output 'verifiers\A') -ExpectedId 'A'
-Copy-G04DCSealedVerifierEvidence -Source $bRoot -Destination (Join-Path $output 'verifiers\B') -ExpectedId 'B'
+Copy-G04DCSealedVerifierEvidence -Source $aRoot -Destination (Join-Path $output 'verifiers\A') -ExpectedId 'A' -ExpectedManifestSha256 $expectedAManifestSha256
+Copy-G04DCSealedVerifierEvidence -Source $bRoot -Destination (Join-Path $output 'verifiers\B') -ExpectedId 'B' -ExpectedManifestSha256 $expectedBManifestSha256
+Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $aRoot -ExpectedManifestSha256 $expectedAManifestSha256 | Out-Null
+Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $bRoot -ExpectedManifestSha256 $expectedBManifestSha256 | Out-Null
+Remove-G04DCOwnedSourceSnapshot -Path $snapshotRoot -OutputRoot $output
+$snapshotRoot = $null
 
 New-Item -ItemType Directory -Path $keyCanonical | Out-Null
 Set-G04DCOwnerOnlyAcl -Path $keyCanonical
@@ -234,8 +280,10 @@ try {
         onlineVerification = [ordered]@{
             verifierARecordPath = 'verifiers/A/online-verifier-A.json'
             verifierARecordSha256 = Get-G04DCSha256 -Path $aPath
+            verifierASourceManifestSha256 = $expectedAManifestSha256
             verifierBRecordPath = 'verifiers/B/online-verifier-B.json'
             verifierBRecordSha256 = Get-G04DCSha256 -Path $bPath
+            verifierBSourceManifestSha256 = $expectedBManifestSha256
             verifiedAtEarliestUtc = $earliest.ToString('o')
             verifiedAtLatestUtc = $latest.ToString('o')
             verifierMaximumSeparationMinutes = 30
@@ -290,4 +338,10 @@ finally {
     if ($null -ne $privateBlob) { [Array]::Clear($privateBlob, 0, $privateBlob.Length) }
     $rsa.Clear()
     $rsa.Dispose()
+}
+}
+finally {
+    if ($null -ne $snapshotRoot -and (Test-Path -LiteralPath $snapshotRoot)) {
+        Remove-G04DCOwnedSourceSnapshot -Path $snapshotRoot -OutputRoot $output
+    }
 }

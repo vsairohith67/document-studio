@@ -44,7 +44,8 @@ foreach ($c13Boundary in @(
     'Cryptographic APIs', 'PurposeEkuValid', 'purposeEkuValid', 'RSASSA-PKCS1-v1_5-SHA256', 'attestation-private-key.cspblob',
     'two-independent-online-verifier-results', 'ONLINE_PROVENANCE_VERIFIERS_DISAGREE',
     'OFFLINE_PROVENANCE_VERIFIED', 'signed-payload-manifest.json', 'globalCertificateStoreUnchanged',
-    'diagnosticDefaultChainAcceptedAsTrust = $false', 'diagnosticOfflineRevocationAcceptedAsTrust = $false'
+    'diagnosticDefaultChainAcceptedAsTrust = $false', 'diagnosticOfflineRevocationAcceptedAsTrust = $false',
+    'Assert-G04DCExactFileEnvelope', 'Assert-G04DCExpectedArtifactManifest', 'Copy-G04DCExpectedArtifactSnapshot'
 )) {
     if (!$provenanceHelper.Contains($c13Boundary) -and !$provenanceModule.Contains($c13Boundary) -and
         !$onlineProvenance.Contains($c13Boundary) -and !$combinedProvenance.Contains($c13Boundary) -and !$offlineProvenance.Contains($c13Boundary)) {
@@ -57,14 +58,17 @@ foreach ($onlineBoundary in @(
     'Number of warnings:', 'Number of errors:', 'VerifyOnlineFileTrust', 'BuildOnlineChain',
     'urlRetrievalTimeoutMilliseconds', 'signerChainExcludeRoot = ''good''',
     'timestampChainExcludeRoot = ''good''', 'canonicalRecordContainsRawConsoleOutput = $false',
-    'canonicalRecordContainsCertificateSubjectText = $false', 'injected-windows-sdk-10.0.26100.0-x64'
+    'canonicalRecordContainsCertificateSubjectText = $false', 'injected-windows-sdk-10.0.26100.0-x64',
+    'ExpectedSignToolSha256', 'Verification tool identity changed during execution'
 )) {
     if (!$onlineProvenance.Contains($onlineBoundary)) { throw "G04D-C13 online verifier boundary is missing: $onlineBoundary" }
 }
 foreach ($attestationBoundary in @(
     "[Security.Cryptography.RSACryptoServiceProvider]::new(3072)", 'C:\DocumentStudioLab\G04D-C12L\credentials',
     'SetAccessRuleProtection($true, $false)', 'privateKeyCopiedToGuest', 'signedPayloadManifestSha256',
-    'minimumOnlineVerifierCount = 2', 'maximumLifetimeHours', 'AddHours($AttestationLifetimeHours)'
+    'minimumOnlineVerifierCount = 2', 'maximumLifetimeHours', 'AddHours($AttestationLifetimeHours)',
+    'ExpectedVerifierAManifestSha256', 'ExpectedVerifierBManifestSha256',
+    'verifierASourceManifestSha256', 'verifierBSourceManifestSha256'
 )) {
     if (!$combinedProvenance.Contains($attestationBoundary) -and !$offlineProvenance.Contains($attestationBoundary)) { throw "G04D-C13 attestation boundary is missing: $attestationBoundary" }
 }
@@ -85,9 +89,33 @@ foreach ($negativeCase in @(
     'attestation altered JSON rejected', 'attestation altered signature rejected', 'attestation altered public key rejected',
     'offline altered signed file rejected', 'offline missing intermediate rejected', 'offline substituted root rejected',
     'offline wrong EKU rejected', 'offline no network retrieval', 'privacy no private-key material in guest package',
-    'Expected 60 G04D-C13 provenance cases'
+    'Expected 65 G04D-C13 provenance cases', 'externally anchored verifier snapshot preserves exact bytes',
+    'self-consistent replacement manifest rejected by external binding'
 )) {
     if (!$provenanceTests.Contains($negativeCase)) { throw "G04D-C13 provenance regression is missing: $negativeCase" }
+}
+$onlineMsiEnvelope = $onlineProvenance.IndexOf('$msiEnvelope = Assert-G04DCExactFileEnvelope', [StringComparison]::Ordinal)
+$onlineMsiParser = $onlineProvenance.IndexOf('$identity = Get-G04DCMsiIdentity', [StringComparison]::Ordinal)
+$onlineToolIdentity = $onlineProvenance.IndexOf('$signToolBinding = Get-G04DCToolIdentity', [StringComparison]::Ordinal)
+$onlineToolExecution = $onlineProvenance.IndexOf('$signToolOutput = @(&', [StringComparison]::Ordinal)
+if ($onlineMsiEnvelope -lt 0 -or $onlineMsiParser -lt 0 -or $onlineMsiEnvelope -gt $onlineMsiParser -or
+    $onlineToolIdentity -lt 0 -or $onlineToolExecution -lt 0 -or $onlineToolIdentity -gt $onlineToolExecution) {
+    throw 'G04D-C13 online MSI and SignTool identities must be pinned before parser or executable use.'
+}
+$onlineBindingDispose = $onlineProvenance.IndexOf('$msiEnvelope.readBinding.Dispose()', [StringComparison]::Ordinal)
+$onlineToolBindingDispose = $onlineProvenance.IndexOf('$signToolBinding.readBinding.Dispose()', [StringComparison]::Ordinal)
+if ($onlineBindingDispose -lt $onlineMsiParser -or $onlineToolBindingDispose -lt $onlineToolExecution) {
+    throw 'G04D-C13 online file bindings must remain held across parser and executable use.'
+}
+$hostManifestBinding = $combinedProvenance.IndexOf('Assert-G04DCExpectedArtifactManifest -EvidenceDirectory $aRoot', [StringComparison]::Ordinal)
+$hostRecordRead = $combinedProvenance.IndexOf('$a = Read-G04DCCanonicalJson', [StringComparison]::Ordinal)
+if ($hostManifestBinding -lt 0 -or $hostRecordRead -lt 0 -or $hostManifestBinding -gt $hostRecordRead) {
+    throw 'G04D-C13 host manifest bindings must be independently verified before record parsing.'
+}
+$offlineMsiEnvelope = $offlineProvenance.IndexOf('$msiEnvelope = Assert-G04DCExactFileEnvelope', [StringComparison]::Ordinal)
+$offlineMsiParser = $offlineProvenance.IndexOf('$msiIdentity = Get-G04DCOfflineMsiIdentity', [StringComparison]::Ordinal)
+if ($offlineMsiEnvelope -lt 0 -or $offlineMsiParser -lt 0 -or $offlineMsiEnvelope -gt $offlineMsiParser) {
+    throw 'G04D-C13 offline MSI identity must be pinned before Windows Installer parsing.'
 }
 if ($provenanceHelper -match '(?i)CERT_CHAIN_POLICY_IGNORE|WTD_REVOCATION_CHECK_NONE\s*\||RevocationMode\s*=\s*NoCheck' -or
     $onlineProvenance -match '(?i)ignore.*revocation|PartialChain.*accepted|OfflineRevocation.*accepted') {

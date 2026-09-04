@@ -191,6 +191,37 @@ try {
     $manifestRoot = Join-Path $testRoot 'manifest'; New-Item -ItemType Directory -Path $manifestRoot | Out-Null; [IO.File]::WriteAllText((Join-Path $manifestRoot 'owned.txt'), 'owned')
     New-G04DCCanonicalArtifactManifest $manifestRoot | Out-Null; Assert-G04DCCanonicalArtifactManifest $manifestRoot | Out-Null; [IO.File]::WriteAllText((Join-Path $manifestRoot 'extra.txt'), 'extra')
     Assert-G04DCProvenanceThrows 'attestation manifest completeness' 'ARTIFACT_MANIFEST_INVALID' { Assert-G04DCCanonicalArtifactManifest $manifestRoot }
+    $envelopePath = Join-Path $testRoot 'exact.bin'; [IO.File]::WriteAllBytes($envelopePath, [byte[]](1, 2, 3, 4))
+    $envelopeSha256 = (Get-FileHash -LiteralPath $envelopePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Add-G04DCProvenancePass 'exact file envelope accepted before parser use' {
+        $envelopeBinding = Assert-G04DCExactFileEnvelope $envelopePath 4 $envelopeSha256 'exact.bin' 'EXACT_FILE_TEST'
+        try {
+            $replacementBlocked = $false
+            try { [IO.File]::Open($envelopePath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose() }
+            catch { $replacementBlocked = $true }
+            if (!$replacementBlocked) { throw 'file envelope did not retain its deny-write binding' }
+        }
+        finally { $envelopeBinding.readBinding.Dispose() }
+    }
+    Add-G04DCProvenancePass 'exact file envelope rejects size and hash mismatch' {
+        $sizeRejected = $false; $hashRejected = $false
+        try { Assert-G04DCExactFileEnvelope $envelopePath 5 $envelopeSha256 'exact.bin' 'EXACT_FILE_TEST' | Out-Null } catch { $sizeRejected = $_.Exception.Message -match '\[EXACT_FILE_TEST\]' }
+        try { Assert-G04DCExactFileEnvelope $envelopePath 4 ('0' * 64) 'exact.bin' 'EXACT_FILE_TEST' | Out-Null } catch { $hashRejected = $_.Exception.Message -match '\[EXACT_FILE_TEST\]' }
+        if (!$sizeRejected -or !$hashRejected) { throw 'file envelope mismatch accepted' }
+    }
+    $anchoredRoot = Join-Path $testRoot 'anchored-manifest'; New-Item -ItemType Directory -Path $anchoredRoot | Out-Null
+    [IO.File]::WriteAllText((Join-Path $anchoredRoot 'owned.txt'), 'first')
+    New-G04DCCanonicalArtifactManifest $anchoredRoot | Out-Null
+    $anchoredManifestSha256 = (Get-FileHash -LiteralPath (Join-Path $anchoredRoot 'artifact-manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Add-G04DCProvenancePass 'external verifier manifest binding accepted' { Assert-G04DCExpectedArtifactManifest $anchoredRoot $anchoredManifestSha256 | Out-Null }
+    $snapshotDestination = Join-Path $testRoot 'anchored-snapshot'
+    Add-G04DCProvenancePass 'externally anchored verifier snapshot preserves exact bytes' {
+        Copy-G04DCExpectedArtifactSnapshot $anchoredRoot $anchoredManifestSha256 $snapshotDestination | Out-Null
+        Assert-G04DCExpectedArtifactManifest $snapshotDestination $anchoredManifestSha256 | Out-Null
+        if ([IO.File]::ReadAllText((Join-Path $snapshotDestination 'owned.txt')) -cne 'first') { throw 'snapshot bytes changed' }
+    }
+    [IO.File]::WriteAllText((Join-Path $anchoredRoot 'owned.txt'), 'replacement'); New-G04DCCanonicalArtifactManifest $anchoredRoot | Out-Null
+    Assert-G04DCProvenanceThrows 'self-consistent replacement manifest rejected by external binding' 'ONLINE_PROVENANCE_MANIFEST_BINDING_INVALID' { Assert-G04DCExpectedArtifactManifest $anchoredRoot $anchoredManifestSha256 }
 
     $rootKey = [Security.Cryptography.RSA]::Create(3072); $rootRequest = [Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=G04DC13 Synthetic Root', $rootKey, [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
     $rootRequest.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
@@ -273,5 +304,5 @@ finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
 }
 
-if ($passed.Count -ne 60) { throw "Expected 60 G04D-C13 provenance cases; passed $($passed.Count)." }
+if ($passed.Count -ne 65) { throw "Expected 65 G04D-C13 provenance cases; passed $($passed.Count)." }
 Write-Output "G04D-C13 provenance boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"

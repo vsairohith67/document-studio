@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F-]{36}$')] [string]$DiskUuid,
     [Parameter(Mandatory = $true)] [string]$MsiPath,
     [Parameter(Mandatory = $true)] [string]$SignToolPath,
+    [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedSignToolSha256,
     [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
     [ValidateRange(1000, 120000)] [int]$UrlRetrievalTimeoutMilliseconds = 15000
 )
@@ -43,23 +44,40 @@ function Get-G04DCCertificateRecord {
 }
 
 function Get-G04DCToolIdentity {
-    param([Parameter(Mandatory = $true)] [string]$Path, [Parameter(Mandatory = $true)] [string]$PathCategory)
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^[0-9a-fA-F]{64}$')] [string]$ExpectedSha256
+    )
     $item = Get-Item -LiteralPath $Path -Force
-    if ($item.PSIsContainer -or [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw '[ONLINE_PROVENANCE_TOOL_INVALID] Verification tool must be a regular non-reparse file.'
+    if ($item.PSIsContainer -or [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0 -or $item.Length -gt 52428800) {
+        throw '[ONLINE_PROVENANCE_TOOL_INVALID] Verification tool must be a bounded regular non-reparse file.'
     }
-    $signature = Get-AuthenticodeSignature -LiteralPath $item.FullName
-    if ([string]$signature.Status -cne 'Valid' -or !$signature.SignerCertificate) {
-        throw '[ONLINE_PROVENANCE_TOOL_INVALID] Verification tool Authenticode identity is invalid.'
+    $envelope = Assert-G04DCExactFileEnvelope -Path $item.FullName -ExpectedSizeBytes ([long]$item.Length) `
+        -ExpectedSha256 $ExpectedSha256 -ExpectedFileName 'signtool.exe' -Code 'ONLINE_PROVENANCE_TOOL_INVALID'
+    try {
+        if ([string]$item.VersionInfo.OriginalFilename -ine 'signtool.exe' -or
+            [string]::IsNullOrWhiteSpace([string]$item.VersionInfo.FileVersion) -or
+            [string]::IsNullOrWhiteSpace([string]$item.VersionInfo.ProductVersion)) {
+            throw '[ONLINE_PROVENANCE_TOOL_INVALID] Verification tool version identity is not Windows SignTool.'
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $item.FullName
+        if ([string]$signature.Status -cne 'Valid' -or !$signature.SignerCertificate) {
+            throw '[ONLINE_PROVENANCE_TOOL_INVALID] Verification tool Authenticode identity is invalid.'
+        }
+        $identity = [pscustomobject][ordered]@{
+            pathCategory = 'injected-windows-sdk-10.0.26100.0-x64'
+            sizeBytes = [long]$envelope.sizeBytes
+            sha256 = [string]$envelope.sha256
+            fileVersion = [string]$item.VersionInfo.FileVersion
+            productVersion = [string]$item.VersionInfo.ProductVersion
+            signerLeafThumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
+            signerLeafDerSha256 = Get-G04DCSha256Bytes -Bytes $signature.SignerCertificate.RawData
+        }
+        return [pscustomobject][ordered]@{ identity = $identity; readBinding = $envelope.readBinding }
     }
-    return [pscustomobject][ordered]@{
-        pathCategory = $PathCategory
-        sizeBytes = [long]$item.Length
-        sha256 = Get-G04DCSha256 -Path $item.FullName
-        fileVersion = [string]$item.VersionInfo.FileVersion
-        productVersion = [string]$item.VersionInfo.ProductVersion
-        signerLeafThumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant()
-        signerLeafDerSha256 = Get-G04DCSha256Bytes -Bytes $signature.SignerCertificate.RawData
+    catch {
+        $envelope.readBinding.Dispose()
+        throw
     }
 }
 
@@ -81,12 +99,16 @@ function Write-G04DCSanitizedLog {
     [IO.File]::WriteAllText($Path, $sanitized, [Text.UTF8Encoding]::new($false))
 }
 
+$msiEnvelope = $null
+$signToolBinding = $null
+try {
 $expected = Get-G04DCExpectedMsi
-$msiItem = Get-Item -LiteralPath $MsiPath -Force
+$msiEnvelope = Assert-G04DCExactFileEnvelope -Path $MsiPath -ExpectedSizeBytes ([long]$expected.SizeBytes) `
+    -ExpectedSha256 ([string]$expected.Sha256) -ExpectedFileName ([string]$expected.FileName) -Code 'MSI_IDENTITY_MISMATCH'
+$msiItem = Get-Item -LiteralPath $msiEnvelope.path -Force
 $signToolItem = Get-Item -LiteralPath $SignToolPath -Force
-if ($msiItem.PSIsContainer -or [bool]($msiItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-    throw '[MSI_IDENTITY_MISMATCH] Online provenance input is not a regular non-reparse MSI.'
-}
+$signToolBinding = Get-G04DCToolIdentity -Path $signToolItem.FullName -ExpectedSha256 $ExpectedSignToolSha256
+$signToolIdentity = $signToolBinding.identity
 if (Test-Path -LiteralPath $EvidenceDirectory) { throw '[ONLINE_PROVENANCE_EVIDENCE_INVALID] Refusing to overwrite verifier evidence.' }
 New-Item -ItemType Directory -Path $EvidenceDirectory | Out-Null
 $evidence = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
@@ -126,6 +148,15 @@ $signToolAccepted = $signToolExitCode -eq 0 -and
 if (!$signToolAccepted -or !$digestMatch.Success) {
     throw '[ONLINE_PROVENANCE_SIGNTOOL_FAILED] SignTool did not produce one warning-free accepted embedded-signature result.'
 }
+$signToolIdentityAfter = Get-G04DCToolIdentity -Path $signToolItem.FullName -ExpectedSha256 $ExpectedSignToolSha256
+try {
+    if (($signToolIdentity | ConvertTo-Json -Compress) -cne ($signToolIdentityAfter.identity | ConvertTo-Json -Compress)) {
+        throw '[ONLINE_PROVENANCE_TOOL_INVALID] Verification tool identity changed during execution.'
+    }
+}
+finally {
+    $signToolIdentityAfter.readBinding.Dispose()
+}
 
 $fileTrust = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::VerifyOnlineFileTrust($msiItem.FullName)
 if (!$fileTrust.passed -or $fileTrust.hashOnly -or $fileTrust.cacheOnlyUrlRetrieval -or $fileTrust.signerCount -ne 1 -or
@@ -159,11 +190,12 @@ $weakCertificates = @(@($signerChain.certificates) + @($timestampChain.certifica
 })
 if ($weakCertificates.Count -ne 0) { throw '[ONLINE_PROVENANCE_WEAK_ALGORITHM] Certificate chain contains a weak or unsupported signature/public-key algorithm.' }
 
+$finalMsiEnvelope = $msiEnvelope
 $identityChecks = [ordered]@{
     regularFile = !$msiItem.PSIsContainer
     nonReparse = ![bool]($msiItem.Attributes -band [IO.FileAttributes]::ReparsePoint)
-    sizeBytes = [long]$msiItem.Length -eq [long]$expected.SizeBytes
-    sha256 = (Get-G04DCSha256 -Path $msiItem.FullName) -ceq [string]$expected.Sha256
+    sizeBytes = [long]$finalMsiEnvelope.sizeBytes -eq [long]$expected.SizeBytes
+    sha256 = [string]$finalMsiEnvelope.sha256 -ceq [string]$expected.Sha256
     authenticode = [string]$signature.Status -ceq 'Valid'
     signerThumbprint = $signature.SignerCertificate.Thumbprint.ToUpperInvariant() -ceq [string]$expected.SignerThumbprint
     timestampThumbprint = $signature.TimeStamperCertificate.Thumbprint.ToUpperInvariant() -ceq [string]$expected.TimestampSignerThumbprint
@@ -197,8 +229,8 @@ $record = [pscustomobject][ordered]@{
     }
     subject = [ordered]@{
         filename = $expected.FileName
-        sizeBytes = [long]$msiItem.Length
-        sha256 = Get-G04DCSha256 -Path $msiItem.FullName
+        sizeBytes = [long]$finalMsiEnvelope.sizeBytes
+        sha256 = [string]$finalMsiEnvelope.sha256
         version = [string]$identity.productVersion
         architecture = [string]$identity.architecture
         productCode = [string]$identity.productCode
@@ -232,7 +264,7 @@ $record = [pscustomobject][ordered]@{
         identityChecks = $identityChecks
     }
     tooling = [ordered]@{
-        signTool = Get-G04DCToolIdentity -Path $signToolItem.FullName -PathCategory 'injected-windows-sdk-10.0.26100.0-x64'
+        signTool = $signToolIdentity
         provenanceHelper = [ordered]@{ sourceSha256 = Get-G04DCSha256 -Path (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs'); runtime = '.NET Framework and Windows cryptographic APIs' }
     }
     privacy = [ordered]@{
@@ -249,3 +281,8 @@ Write-G04DCCanonicalJson -Path $recordPath -Value $record -Depth 30
 New-G04DCCanonicalArtifactManifest -EvidenceDirectory $evidence | Out-Null
 Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $evidence | Out-Null
 Write-Output $recordPath
+}
+finally {
+    if ($null -ne $signToolBinding) { $signToolBinding.readBinding.Dispose() }
+    if ($null -ne $msiEnvelope) { $msiEnvelope.readBinding.Dispose() }
+}

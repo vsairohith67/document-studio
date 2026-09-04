@@ -231,7 +231,8 @@ $attestation = Read-G04DCCanonicalJson -Path $attestationPath -Code 'ATTESTATION
 Assert-G04DCExactProperties -Value $attestation -Names @('schemaVersion', 'attestationType', 'subject', 'onlineVerification', 'freshness', 'proofPolicy', 'integrity', 'agreement') -Code 'ATTESTATION_SCHEMA_INVALID'
 Assert-G04DCExactProperties -Value $attestation.subject -Names @('filename', 'sizeBytes', 'sha256', 'version', 'architecture', 'productCode', 'upgradeCode', 'packageCode') -Code 'ATTESTATION_SCHEMA_INVALID'
 Assert-G04DCExactProperties -Value $attestation.onlineVerification -Names @(
-    'verifierARecordPath', 'verifierARecordSha256', 'verifierBRecordPath', 'verifierBRecordSha256',
+    'verifierARecordPath', 'verifierARecordSha256', 'verifierASourceManifestSha256',
+    'verifierBRecordPath', 'verifierBRecordSha256', 'verifierBSourceManifestSha256',
     'verifiedAtEarliestUtc', 'verifiedAtLatestUtc', 'verifierMaximumSeparationMinutes', 'signerChain', 'timestampChain',
     'signatureDigestAlgorithm', 'timestampType', 'timestampUtc', 'revocation'
 ) -Code 'ATTESTATION_SCHEMA_INVALID'
@@ -253,6 +254,9 @@ if ([int]$attestation.schemaVersion -ne 1 -or [string]$attestation.attestationTy
     [string]$attestation.onlineVerification.verifierBRecordPath -cne 'verifiers/B/online-verifier-B.json' -or
     [string]$attestation.onlineVerification.verifierARecordSha256 -notmatch '^[0-9a-f]{64}$' -or
     [string]$attestation.onlineVerification.verifierBRecordSha256 -notmatch '^[0-9a-f]{64}$' -or
+    [string]$attestation.onlineVerification.verifierASourceManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+    [string]$attestation.onlineVerification.verifierBSourceManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+    [string]$attestation.onlineVerification.verifierASourceManifestSha256 -ceq [string]$attestation.onlineVerification.verifierBSourceManifestSha256 -or
     [int]$attestation.onlineVerification.verifierMaximumSeparationMinutes -ne 30 -or
     [string]$attestation.onlineVerification.signatureDigestAlgorithm -cne 'sha256' -or
     [string]$attestation.onlineVerification.timestampType -cne 'embedded-authenticode-timestamp' -or
@@ -362,8 +366,17 @@ if ($networkBefore.physicalAdapterCount -ne 1 -or $networkBefore.connectedAdapte
     throw '[OFFLINE_PROVENANCE_NETWORK_INVALID] Proof clone is not physically disconnected before verification.'
 }
 
-$msiIdentity = Get-G04DCOfflineMsiIdentity -Path $msi
 $expected = Get-G04DCExpectedMsi
+if ([string]$attestation.subject.filename -cne [string]$expected.FileName -or
+    [long]$attestation.subject.sizeBytes -ne [long]$expected.SizeBytes -or
+    [string]$attestation.subject.sha256 -cne [string]$expected.Sha256) {
+    throw '[MSI_IDENTITY_MISMATCH] Signed attestation does not contain the frozen MSI envelope.'
+}
+$msiEnvelope = $null
+try {
+$msiEnvelope = Assert-G04DCExactFileEnvelope -Path $msi -ExpectedSizeBytes ([long]$attestation.subject.sizeBytes) `
+    -ExpectedSha256 ([string]$attestation.subject.sha256) -ExpectedFileName ([string]$attestation.subject.filename) -Code 'MSI_IDENTITY_MISMATCH'
+$msiIdentity = Get-G04DCOfflineMsiIdentity -Path $msiEnvelope.path
 if (($msiIdentity | ConvertTo-Json -Compress) -cne ($attestation.subject | ConvertTo-Json -Compress) -or
     [string]$msiIdentity.sha256 -cne [string]$expected.Sha256 -or [long]$msiIdentity.sizeBytes -ne [long]$expected.SizeBytes) {
     throw '[MSI_IDENTITY_MISMATCH] Offline MSI identity does not match the signed attestation.'
@@ -378,7 +391,7 @@ if ((@($signerA.metadata.derSha256) -join "`n") -cne (@($signerB.metadata.derSha
     throw '[ONLINE_PROVENANCE_VERIFIERS_DISAGREE] Certificate DER chains disagree.'
 }
 
-$fileTrust = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::VerifyOfflineFileDigestAndSignature($msi)
+$fileTrust = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::VerifyOfflineFileDigestAndSignature($msiEnvelope.path)
 Assert-G04DCOfflineEmbeddedIdentityModel -FileTrust $fileTrust -OnlineRecord $a | Out-Null
 $signerStructural = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::BuildOfflineExclusiveChain($signerA.bytes, 'signer', [string]$a.authenticode.timestampUtc)
 $timestampStructural = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::BuildOfflineExclusiveChain($timestampA.bytes, 'timestamp', [string]$a.authenticode.timestampUtc)
@@ -438,3 +451,7 @@ Write-G04DCJson -Path (Join-Path $evidence 'offline-provenance-result.json') -Va
 New-G04DCCanonicalArtifactManifest -EvidenceDirectory $evidence | Out-Null
 Assert-G04DCCanonicalArtifactManifest -EvidenceDirectory $evidence | Out-Null
 Write-Output 'OFFLINE_PROVENANCE_VERIFIED'
+}
+finally {
+    if ($null -ne $msiEnvelope) { $msiEnvelope.readBinding.Dispose() }
+}
