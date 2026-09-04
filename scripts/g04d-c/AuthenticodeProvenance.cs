@@ -100,6 +100,8 @@ namespace DocumentStudio.G04DC.Provenance {
         private const uint ERROR_INSUFFICIENT_BUFFER = 122;
         private const uint ERROR_MORE_DATA = 234;
         private const uint CRYPT_E_NO_MATCH = 0x80092009;
+        private const uint PROV_RSA_AES = 24;
+        private const uint CRYPT_VERIFYCONTEXT = 0xF0000000;
         private const uint WINHTTP_ACCESS_TYPE_NO_PROXY = 1;
         private const uint CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT = 2;
         private const uint CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT = 2;
@@ -208,6 +210,19 @@ namespace DocumentStudio.G04DC.Provenance {
             public CRYPTOAPI_BLOB Parameters;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CRYPT_ATTRIBUTE_TYPE_VALUE {
+            public IntPtr pszObjId;
+            public CRYPTOAPI_BLOB Value;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SIP_INDIRECT_DATA {
+            public CRYPT_ATTRIBUTE_TYPE_VALUE Data;
+            public CRYPT_ALGORITHM_IDENTIFIER DigestAlgorithm;
+            public CRYPTOAPI_BLOB Digest;
+        }
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct SIP_SUBJECTINFO {
             public uint cbSize;
@@ -228,6 +243,62 @@ namespace DocumentStudio.G04DC.Provenance {
             public uint dwUnionChoice;
             public IntPtr psFlat;
             public IntPtr pClientData;
+        }
+
+        private sealed class DerValue {
+            public byte tag;
+            public byte[] content;
+        }
+
+        private sealed class DerReader {
+            private readonly byte[] data;
+            private int offset;
+            private readonly int end;
+
+            public DerReader(byte[] value) : this(value, 0, value == null ? 0 : value.Length) {
+                if (value == null) throw new ArgumentNullException("value");
+            }
+
+            private DerReader(byte[] value, int start, int length) {
+                data = value;
+                offset = start;
+                end = checked(start + length);
+            }
+
+            public bool complete { get { return offset == end; } }
+
+            public DerValue Read(byte expectedTag) {
+                DerValue value = ReadAny();
+                if (value.tag != expectedTag) throw new CryptographicException("Unexpected DER tag.");
+                return value;
+            }
+
+            public DerValue ReadAny() {
+                if (offset >= end) throw new CryptographicException("DER value is truncated.");
+                byte tag = data[offset++];
+                if (offset >= end) throw new CryptographicException("DER length is truncated.");
+                int firstLength = data[offset++];
+                int length;
+                if ((firstLength & 0x80) == 0) {
+                    length = firstLength;
+                } else {
+                    int lengthBytes = firstLength & 0x7F;
+                    if (lengthBytes == 0 || lengthBytes > 4 || offset + lengthBytes > end || data[offset] == 0) throw new CryptographicException("DER length is invalid.");
+                    length = 0;
+                    for (int index = 0; index < lengthBytes; index++) length = checked((length << 8) | data[offset++]);
+                    if (length < 128) throw new CryptographicException("DER length is non-canonical.");
+                }
+                if (length < 0 || offset + length > end) throw new CryptographicException("DER value exceeds its container.");
+                byte[] content = new byte[length];
+                Buffer.BlockCopy(data, offset, content, 0, length);
+                offset += length;
+                return new DerValue { tag = tag, content = content };
+            }
+        }
+
+        private sealed class TimestampTokenEvidence {
+            public string signerDerSha256;
+            public string timestampUtc;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -378,6 +449,10 @@ namespace DocumentStudio.G04DC.Provenance {
         private static extern bool CryptSIPVerifyIndirectData(ref SIP_SUBJECTINFO subjectInfo, IntPtr indirectData);
         [DllImport("crypt32.dll", SetLastError = true)]
         private static extern bool CryptDecodeObjectEx(uint encodingType, IntPtr structType, byte[] encoded, uint encodedSize, uint flags, IntPtr decodeParameters, IntPtr decoded, ref uint decodedSize);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CryptAcquireContextW(out IntPtr cryptProv, string container, string provider, uint providerType, uint flags);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern bool CryptReleaseContext(IntPtr cryptProv, uint flags);
         [DllImport("winhttp.dll", SetLastError = true)]
         private static extern bool WinHttpGetDefaultProxyConfiguration(out WINHTTP_PROXY_INFO proxyInfo);
         [DllImport("winhttp.dll", SetLastError = true)]
@@ -430,6 +505,17 @@ namespace DocumentStudio.G04DC.Provenance {
                                     evidence.timestampUtc = GetCmsSigningTime(timestampSigner);
                                 }
                             }
+                            foreach (CryptographicAttributeObject attribute in signer.UnsignedAttributes) {
+                                if (!String.Equals(attribute.Oid.Value, "1.3.6.1.4.1.311.3.3.1", StringComparison.Ordinal)) continue;
+                                foreach (AsnEncodedData value in attribute.Values) {
+                                    TimestampTokenEvidence timestamp = VerifyRfc3161TimestampToken(value.RawData, signer.GetSignature());
+                                    timestampSignerCount++;
+                                    if (timestampSignerCount == 1) {
+                                        evidence.timestampLeafDerSha256 = timestamp.signerDerSha256;
+                                        evidence.timestampUtc = timestamp.timestampUtc;
+                                    }
+                                }
+                            }
                         }
 
                         VerifySipIndirectData(ref subject, encodingType, cms.ContentInfo.Content);
@@ -478,12 +564,15 @@ namespace DocumentStudio.G04DC.Provenance {
             bool retained = false;
             try {
                 Marshal.StructureToPtr(subjectGuid, subjectGuidPointer, false);
+                IntPtr cryptProv;
+                if (!CryptAcquireContextW(out cryptProv, null, null, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) Win32("CryptAcquireContext");
                 subject = new SIP_SUBJECTINFO {
                     cbSize = (uint)Marshal.SizeOf(typeof(SIP_SUBJECTINFO)),
                     pgSubjectType = subjectGuidPointer,
                     hFile = new IntPtr(-1),
                     pwsFileName = filePath,
                     pwsDisplayName = filePath,
+                    hProv = cryptProv,
                     dwIndex = index
                 };
                 uint size = 0;
@@ -502,6 +591,10 @@ namespace DocumentStudio.G04DC.Provenance {
             }
             finally {
                 if (!retained) {
+                    if (subject.hProv != IntPtr.Zero) {
+                        CryptReleaseContext(subject.hProv, 0);
+                        subject.hProv = IntPtr.Zero;
+                    }
                     Marshal.FreeHGlobal(subjectGuidPointer);
                     subject.pgSubjectType = IntPtr.Zero;
                 }
@@ -522,6 +615,8 @@ namespace DocumentStudio.G04DC.Provenance {
                     Win32("CryptDecodeObjectEx");
                 }
                 subject.dwEncodingType = encodingType;
+                SIP_INDIRECT_DATA indirectData = (SIP_INDIRECT_DATA)Marshal.PtrToStructure(decoded, typeof(SIP_INDIRECT_DATA));
+                subject.DigestAlgorithm = indirectData.DigestAlgorithm;
                 if (!CryptSIPVerifyIndirectData(ref subject, decoded)) Win32("CryptSIPVerifyIndirectData");
             }
             finally {
@@ -530,9 +625,14 @@ namespace DocumentStudio.G04DC.Provenance {
         }
 
         private static void FreeSipSubject(ref SIP_SUBJECTINFO subject) {
-            if (subject.pgSubjectType == IntPtr.Zero) return;
-            Marshal.FreeHGlobal(subject.pgSubjectType);
-            subject.pgSubjectType = IntPtr.Zero;
+            if (subject.hProv != IntPtr.Zero) {
+                if (!CryptReleaseContext(subject.hProv, 0)) Win32("CryptReleaseContext");
+                subject.hProv = IntPtr.Zero;
+            }
+            if (subject.pgSubjectType != IntPtr.Zero) {
+                Marshal.FreeHGlobal(subject.pgSubjectType);
+                subject.pgSubjectType = IntPtr.Zero;
+            }
         }
 
         private static string GetCmsSigningTime(SignerInfo signer) {
@@ -543,6 +643,82 @@ namespace DocumentStudio.G04DC.Provenance {
             }
             if (values.Count != 1) throw new CryptographicException("Timestamp signing time is missing or ambiguous.");
             return values[0].ToString("o", CultureInfo.InvariantCulture);
+        }
+
+        private static TimestampTokenEvidence VerifyRfc3161TimestampToken(byte[] encodedToken, byte[] outerSignature) {
+            SignedCms timestampCms = new SignedCms();
+            timestampCms.Decode(encodedToken);
+            if (!String.Equals(timestampCms.ContentInfo.ContentType.Value, "1.2.840.113549.1.9.16.1.4", StringComparison.Ordinal) || timestampCms.SignerInfos.Count != 1) {
+                throw new CryptographicException("RFC3161 timestamp token content or signer count is invalid.");
+            }
+            SignerInfo timestampSigner = timestampCms.SignerInfos[0];
+            timestampSigner.CheckSignature(true);
+            if (timestampSigner.Certificate == null) throw new CryptographicException("RFC3161 timestamp signer certificate is missing.");
+
+            string hashOid;
+            byte[] messageImprint;
+            DateTime generatedAtUtc;
+            ParseRfc3161TstInfo(timestampCms.ContentInfo.Content, out hashOid, out messageImprint, out generatedAtUtc);
+            if (!String.Equals(hashOid, "2.16.840.1.101.3.4.2.1", StringComparison.Ordinal)) {
+                throw new CryptographicException("RFC3161 message imprint must use SHA-256.");
+            }
+            byte[] calculated;
+            using (SHA256 algorithm = SHA256.Create()) calculated = algorithm.ComputeHash(outerSignature);
+            if (!calculated.SequenceEqual(messageImprint)) throw new CryptographicException("RFC3161 message imprint does not bind the Authenticode signature.");
+            return new TimestampTokenEvidence {
+                signerDerSha256 = Sha256(timestampSigner.Certificate.RawData),
+                timestampUtc = generatedAtUtc.ToString("o", CultureInfo.InvariantCulture)
+            };
+        }
+
+        private static void ParseRfc3161TstInfo(byte[] encoded, out string hashOid, out byte[] messageImprint, out DateTime generatedAtUtc) {
+            DerReader outer = new DerReader(encoded);
+            DerReader sequence = new DerReader(outer.Read(0x30).content);
+            if (!outer.complete) throw new CryptographicException("RFC3161 TSTInfo has trailing data.");
+            byte[] version = sequence.Read(0x02).content;
+            if (version.Length != 1 || version[0] != 1) throw new CryptographicException("RFC3161 TSTInfo version is invalid.");
+            DecodeOid(sequence.Read(0x06).content);
+            DerReader imprint = new DerReader(sequence.Read(0x30).content);
+            DerReader algorithmIdentifier = new DerReader(imprint.Read(0x30).content);
+            hashOid = DecodeOid(algorithmIdentifier.Read(0x06).content);
+            if (!algorithmIdentifier.complete) {
+                DerValue parameters = algorithmIdentifier.ReadAny();
+                if (parameters.tag != 0x05 || parameters.content.Length != 0 || !algorithmIdentifier.complete) throw new CryptographicException("RFC3161 hash parameters are invalid.");
+            }
+            messageImprint = imprint.Read(0x04).content;
+            if (!imprint.complete || messageImprint.Length != 32) throw new CryptographicException("RFC3161 message imprint is invalid.");
+            byte[] serialNumber = sequence.Read(0x02).content;
+            if (serialNumber.Length == 0) throw new CryptographicException("RFC3161 serial number is missing.");
+            string generalizedTime = System.Text.Encoding.ASCII.GetString(sequence.Read(0x18).content);
+            string[] formats = new string[] { "yyyyMMddHHmmss'Z'", "yyyyMMddHHmmss.FFFFFFF'Z'" };
+            if (!DateTime.TryParseExact(generalizedTime, formats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out generatedAtUtc)) {
+                throw new CryptographicException("RFC3161 generalized time is invalid.");
+            }
+            while (!sequence.complete) sequence.ReadAny();
+        }
+
+        private static string DecodeOid(byte[] encoded) {
+            if (encoded == null || encoded.Length == 0) throw new CryptographicException("DER OID is empty.");
+            List<ulong> arcs = new List<ulong>();
+            uint first = encoded[0];
+            arcs.Add(first < 40 ? 0UL : first < 80 ? 1UL : 2UL);
+            arcs.Add(first < 40 ? first : first < 80 ? first - 40UL : first - 80UL);
+            int offset = 1;
+            while (offset < encoded.Length) {
+                ulong value = 0;
+                bool firstByte = true;
+                while (true) {
+                    if (offset >= encoded.Length) throw new CryptographicException("DER OID is truncated.");
+                    byte current = encoded[offset++];
+                    if (firstByte && current == 0x80) throw new CryptographicException("DER OID is non-canonical.");
+                    if (value > (UInt64.MaxValue >> 7)) throw new CryptographicException("DER OID arc is too large.");
+                    value = (value << 7) | (uint)(current & 0x7F);
+                    firstByte = false;
+                    if ((current & 0x80) == 0) break;
+                }
+                arcs.Add(value);
+            }
+            return String.Join(".", arcs.Select(value => value.ToString(CultureInfo.InvariantCulture)).ToArray());
         }
 
         public static ProxyConfigurationEvidence GetProxyConfiguration() {
