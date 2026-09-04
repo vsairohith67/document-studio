@@ -84,7 +84,12 @@ function Get-G04DCNetworkState {
     $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Sort-Object ifIndex | ForEach-Object {
         [pscustomobject][ordered]@{ ifIndex = [int]$_.ifIndex; status = [string]$_.Status; linkSpeed = [string]$_.LinkSpeed }
     })
-    $defaultRoutes = @(Get-NetRoute -DestinationPrefix @('0.0.0.0/0', '::/0') -ErrorAction Stop | Where-Object { $_.State -ne 'Invalid' } | ForEach-Object {
+    # A physically disconnected adapter legitimately has no default-route
+    # instances. Querying the absent prefixes directly turns that safe state
+    # into a terminating CIM error, so enumerate and filter instead.
+    $defaultRoutes = @(Get-NetRoute -ErrorAction Stop | Where-Object {
+        $_.DestinationPrefix -in @('0.0.0.0/0', '::/0') -and $_.State -ne 'Invalid'
+    } | ForEach-Object {
         [pscustomobject][ordered]@{ ifIndex = [int]$_.ifIndex; destinationPrefix = [string]$_.DestinationPrefix; nextHop = [string]$_.NextHop }
     })
     $tcpState = @(Get-NetTCPConnection -ErrorAction Stop)

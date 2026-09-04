@@ -245,7 +245,12 @@ try {
     Add-G04DCProvenancePass 'offline certificate-time failure rejected' { $r = [DocumentStudio.G04DC.Provenance.AuthenticodeProvenanceVerifier]::BuildOfflineExclusiveChain($chainBytes, 'signer', $now.AddYears(2).ToString('o')); if ($r.valid) { throw 'expired certificate accepted' } }
     $wrongEmbedded = Copy-G04DCProvenanceValue $embeddedModel; $wrongEmbedded.signerCount = 2
     Assert-G04DCProvenanceThrows 'offline additional unexpected signer rejected' 'OFFLINE_PROVENANCE_SIGNATURE_INVALID' { Assert-G04DCOfflineEmbeddedIdentityModel $wrongEmbedded $recordA }
-    Add-G04DCProvenancePass 'offline no network retrieval' { if (!$structural.urlRetrievalDisabled -or !$structural.exclusiveRoot) { throw 'offline retrieval enabled' } }
+    Add-G04DCProvenancePass 'offline no network retrieval' {
+        $offlineVerifierSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') -Raw
+        if (!$structural.urlRetrievalDisabled -or !$structural.exclusiveRoot -or $offlineVerifierSource -match 'Get-NetRoute\s+-DestinationPrefix') {
+            throw 'offline retrieval or disconnected-route handling is invalid'
+        }
+    }
     Add-G04DCProvenancePass 'offline global store remains unchanged' { if (!$structural.valid -or $testStoreBefore -cne $testStoreAfter) { throw 'exclusive chain changed a global certificate store' } }
     Add-G04DCProvenancePass 'offline diagnostic PartialChain is not trust evidence' { if ((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') -Raw) -notmatch 'diagnosticDefaultChainAcceptedAsTrust = \$false') { throw 'partial chain boundary missing' } }
     Add-G04DCProvenancePass 'offline diagnostic OfflineRevocation is not trust evidence' { if ((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') -Raw) -notmatch 'diagnosticOfflineRevocationAcceptedAsTrust = \$false') { throw 'offline revocation boundary missing' } }
