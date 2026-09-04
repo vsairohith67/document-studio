@@ -2384,3 +2384,4 @@ finally {
 
 if ($passed.Count -ne 315) { throw "Expected 315 fail-closed cases; passed $($passed.Count)." }
 Write-Output "G04D-C fail-closed boundary tests passed ($($passed.Count) cases): $($passed -join '; ')"
+& (Join-Path $PSScriptRoot 'Test-G04DCProvenanceBoundaries.ps1')
