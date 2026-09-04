@@ -1,6 +1,10 @@
 param(
     [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
-    [Parameter(Mandatory = $true)] [string]$EvidenceDirectory
+    [Parameter(Mandatory = $true)] [string]$EvidenceDirectory,
+    [string]$OfflineMsiPath,
+    [string]$OfflineProvenanceBundle,
+    [string]$TrustedHostUtc,
+    [string]$ExpectedAttestationPublicKeySha256
 )
 
 Set-StrictMode -Version Latest
@@ -41,7 +45,38 @@ function Complete-G04DCAdminModelRejection {
     Write-Output ($result | ConvertTo-Json -Compress)
 }
 
-try { $identity = Invoke-G04DCAcquireMsi -Destination $download -EvidenceDirectory $evidence }
+try {
+    $offlineValues = @($OfflineMsiPath, $OfflineProvenanceBundle, $TrustedHostUtc, $ExpectedAttestationPublicKeySha256)
+    $offlineMode = @($offlineValues | Where-Object { ![string]::IsNullOrWhiteSpace($_) }).Count -ne 0
+    if ($offlineMode -and @($offlineValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
+        throw '[OFFLINE_PROVENANCE_INPUT_INVALID] Offline MSI, provenance bundle, and trusted host UTC must be supplied together.'
+    }
+    if ($offlineMode) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $download) | Out-Null
+        Copy-Item -LiteralPath $OfflineMsiPath -Destination $download
+        $offlineEvidence = Join-Path $evidence 'offline-provenance'
+        & (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') `
+            -BundleDirectory $OfflineProvenanceBundle `
+            -MsiPath $download `
+            -EvidenceDirectory $offlineEvidence `
+            -TrustedHostUtc $TrustedHostUtc `
+            -ExpectedPublicKeySha256 $ExpectedAttestationPublicKeySha256 | Out-Null
+        $offlineResult = Get-Content -LiteralPath (Join-Path $offlineEvidence 'offline-provenance-result.json') -Raw | ConvertFrom-Json
+        if (![bool]$offlineResult.accepted -or [string]$offlineResult.status -cne 'OFFLINE_PROVENANCE_VERIFIED') {
+            throw '[OFFLINE_PROVENANCE_SIGNATURE_INVALID] Offline provenance did not pass before administrative extraction.'
+        }
+        $identity = $offlineResult.msiIdentity
+        Write-G04DCJson -Path (Join-Path $evidence 'msi-identity.json') -Value ([ordered]@{
+            expected = Get-G04DCExpectedMsi
+            observed = $identity
+            source = 'signed two-verifier offline provenance contract'
+            offlineProvenanceVerified = $true
+        })
+    }
+    else {
+        $identity = Invoke-G04DCAcquireMsi -Destination $download -EvidenceDirectory $evidence
+    }
+}
 catch {
     $cleanup = Remove-G04DCOwnedRoot -OwnedRoot $ownedRoot -MarkerPath $ownedMarker -MarkerContent $ownedMarkerContent -RequiredParent $env:RUNNER_TEMP
     Write-G04DCJson -Path (Join-Path $evidence 'cleanup.json') -Value $cleanup

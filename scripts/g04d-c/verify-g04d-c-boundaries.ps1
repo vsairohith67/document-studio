@@ -28,6 +28,73 @@ $runtimeManifestProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G
 $decisionProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCCandidateDecision.ps1') -Raw
 $precheckProof = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-G04DCMachineStatePrecheck.ps1') -Raw
 $tests = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCBoundaries.ps1') -Raw
+$provenanceHelper = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'AuthenticodeProvenance.cs') -Raw
+$provenanceModule = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'G04DC.Provenance.psm1') -Raw
+$onlineProvenance = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCOnlineProvenanceRecord.ps1') -Raw
+$combinedProvenance = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'New-G04DCCombinedProvenanceAttestation.ps1') -Raw
+$offlineProvenance = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCOfflineProvenanceAttestation.ps1') -Raw
+$provenanceTests = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Test-G04DCProvenanceBoundaries.ps1') -Raw
+foreach ($c13Boundary in @(
+    'WinVerifyTrust', 'WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT', 'CertGetCertificateChain',
+    'CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT', 'CERT_CHAIN_REVOCATION_ACCUMULATIVE_TIMEOUT',
+    'CertCreateCertificateChainEngine', 'hExclusiveRoot', 'CERT_CHAIN_CACHE_ONLY_URL_RETRIEVAL',
+    'CERT_CHAIN_POLICY_AUTHENTICODE', 'AUTHENTICODE_TS', 'WTD_HASH_ONLY_FLAG',
+    'Cryptographic APIs', 'RSASSA-PKCS1-v1_5-SHA256', 'attestation-private-key.cspblob',
+    'two-independent-online-verifier-results', 'ONLINE_PROVENANCE_VERIFIERS_DISAGREE',
+    'OFFLINE_PROVENANCE_VERIFIED', 'signed-payload-manifest.json', 'globalCertificateStoreUnchanged',
+    'diagnosticDefaultChainAcceptedAsTrust = $false', 'diagnosticOfflineRevocationAcceptedAsTrust = $false'
+)) {
+    if (!$provenanceHelper.Contains($c13Boundary) -and !$provenanceModule.Contains($c13Boundary) -and
+        !$onlineProvenance.Contains($c13Boundary) -and !$combinedProvenance.Contains($c13Boundary) -and !$offlineProvenance.Contains($c13Boundary)) {
+        throw "G04D-C13 offline provenance boundary is missing: $c13Boundary"
+    }
+}
+foreach ($onlineBoundary in @(
+    "@('verify', '/pa', '/all', '/v', '/tw', '/o', '2:10.0.26100.0'",
+    'Number of warnings:', 'VerifyOnlineFileTrust', 'BuildOnlineChain',
+    'urlRetrievalTimeoutMilliseconds', 'signerChainExcludeRoot = ''good''',
+    'timestampChainExcludeRoot = ''good''', 'canonicalRecordContainsRawConsoleOutput = $false',
+    'canonicalRecordContainsCertificateSubjectText = $false', 'injected-windows-sdk-10.0.26100.0-x64'
+)) {
+    if (!$onlineProvenance.Contains($onlineBoundary)) { throw "G04D-C13 online verifier boundary is missing: $onlineBoundary" }
+}
+foreach ($attestationBoundary in @(
+    "[Security.Cryptography.RSACryptoServiceProvider]::new(3072)", 'C:\DocumentStudioLab\G04D-C12L\credentials',
+    'SetAccessRuleProtection($true, $false)', 'privateKeyCopiedToGuest', 'signedPayloadManifestSha256',
+    'minimumOnlineVerifierCount = 2', 'maximumLifetimeHours', 'AddHours($AttestationLifetimeHours)'
+)) {
+    if (!$combinedProvenance.Contains($attestationBoundary) -and !$offlineProvenance.Contains($attestationBoundary)) { throw "G04D-C13 attestation boundary is missing: $attestationBoundary" }
+}
+foreach ($offlineBoundary in @(
+    'VerifyOfflineFileDigestAndSignature', 'BuildOfflineExclusiveChain', 'Get-G04DCCertificateStoreDigest',
+    'Get-G04DCOfflineMsiIdentity', 'ATTESTATION_PRIVATE_KEY_LEAK', 'connectedAdapterCount -ne 0',
+    'defaultRoutes', 'noLoopbackListenerUsedForProvenance', 'activeDnsServerCount', 'proxyFree',
+    'ExpectedPublicKeySha256', 'MaximumClockSkewMinutes = 5',
+    'ATTESTATION_FUTURE_DATED', 'ATTESTATION_EXPIRED', 'ATTESTATION_SIGNATURE_INVALID'
+)) {
+    if (!$offlineProvenance.Contains($offlineBoundary)) { throw "G04D-C13 offline verifier boundary is missing: $offlineBoundary" }
+}
+foreach ($negativeCase in @(
+    'online revoked signer rejected', 'online revoked timestamp signer rejected', 'online revocation unknown rejected',
+    'online offline revocation rejected', 'online partial chain rejected', 'online untrusted root rejected',
+    'two verifier MSI hash disagreement', 'two verifier signer disagreement', 'two verifier timestamp disagreement',
+    'two verifier intermediate disagreement', 'two verifier root disagreement', 'two verifier revocation disagreement',
+    'attestation altered JSON rejected', 'attestation altered signature rejected', 'attestation altered public key rejected',
+    'offline altered signed file rejected', 'offline missing intermediate rejected', 'offline substituted root rejected',
+    'offline wrong EKU rejected', 'offline no network retrieval', 'privacy no private-key material in guest package',
+    'Expected 60 G04D-C13 provenance cases'
+)) {
+    if (!$provenanceTests.Contains($negativeCase)) { throw "G04D-C13 provenance regression is missing: $negativeCase" }
+}
+if ($provenanceHelper -match '(?i)CERT_CHAIN_POLICY_IGNORE|WTD_REVOCATION_CHECK_NONE\s*\||RevocationMode\s*=\s*NoCheck' -or
+    $onlineProvenance -match '(?i)ignore.*revocation|PartialChain.*accepted|OfflineRevocation.*accepted') {
+    throw 'G04D-C13 may not ignore revocation or accept partial/offline online trust.'
+}
+$offlineGate = $adminProof.IndexOf('Test-G04DCOfflineProvenanceAttestation.ps1', [StringComparison]::Ordinal)
+$adminExtraction = $adminProof.IndexOf("@('/a',", [StringComparison]::Ordinal)
+if ($offlineGate -lt 0 -or $adminExtraction -lt 0 -or $offlineGate -gt $adminExtraction) {
+    throw 'G04D-C13 offline provenance must pass before administrative extraction is prepared.'
+}
 foreach ($telemetryBoundary in @(
     'New-G04DCMachineStateCaptureContext', 'Write-G04DCMachineStateProgressRecord',
     'Write-G04DCMachineStateSubstageRecord', 'Start-G04DCMachineStateSubstage',
